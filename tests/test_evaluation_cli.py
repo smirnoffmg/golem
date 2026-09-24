@@ -172,9 +172,7 @@ def test_the_production_runner_gets_the_platform_tools_from_the_environment(tmp_
     from golem.evaluation.cli import deepagents_runner
 
     registry = tmp_path / "mcp-registry.yaml"
-    registry.write_text(
-        "tracker.read:\n  url: http://mcp-tracker.test/mcp\n  tools: [get_issue]\n"
-    )
+    registry.write_text("tracker.read:\n  url: http://mcp-tracker.test/mcp\n  tools: [get_issue]\n")
     runner = deepagents_runner(
         {
             "GOLEM_MODEL_GATEWAY_URL": "http://gateway.test/v1",
