@@ -1,6 +1,9 @@
 name: discovery
 description: Turns a product problem space into evidenced hypotheses and reviewed solutions.
 version: 0.1.0
+context:
+  url: https://git.example.com/product/discovery-context.git
+  branch: main
 skills:
   - id: research
     name: Research a hypothesis

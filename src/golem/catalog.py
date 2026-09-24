@@ -55,10 +55,18 @@ class Role(_Frozen):
     tools: tuple[str, ...] = ()
 
 
+class ContextRepo(_Frozen):
+    """The Git repository of records the agent reads and writes through merge requests."""
+
+    url: str
+    branch: str = "main"
+
+
 class AgentCatalog(_Frozen):
     name: str = Field(pattern=SLUG)
     description: str
     version: str
+    context: ContextRepo | None = None
     skills: tuple[Skill, ...] = ()
     kinds: tuple[Kind, ...] = ()
     roles: tuple[Role, ...] = ()
