@@ -27,6 +27,9 @@ class FakeOrchestrator:
     async def cancel(self, task_id: str) -> None:
         self.canceled.append(task_id)
 
+    async def status(self, run_id: str) -> str | None:
+        return None
+
 
 def make_card() -> AgentCard:
     return AgentCard(
@@ -300,3 +303,26 @@ def test_run_signing_keys_are_served_on_an_internal_route_the_edge_does_not_forw
     assert (public["kid"], public["kty"], public["crv"]) == ("run-2026-09", "EC", "P-256")
     assert "d" not in public
     assert verify(issue(claims, key, now=1_000), jwt.PyJWKSet.from_dict(jwks), now=1_000) == claims
+
+
+@dataclass
+class StatusOrchestrator(FakeOrchestrator):
+    statuses: dict[str, str] = field(default_factory=dict)
+    asked: list[str] = field(default_factory=list)
+
+    async def status(self, run_id: str) -> str | None:
+        self.asked.append(run_id)
+        return self.statuses.get(run_id)
+
+
+def test_a_runs_status_is_served_on_an_internal_route() -> None:
+    orchestrator = StatusOrchestrator(statuses={"run-1": "canceled"})
+
+    with TestClient(create_app(make_card(), orchestrator)) as client:
+        found = client.get("/internal/runs/run-1")
+        missing = client.get("/internal/runs/run-2")
+
+    assert found.status_code == 200
+    assert found.json() == {"run_id": "run-1", "status": "canceled"}
+    assert missing.status_code == 404
+    assert orchestrator.asked == ["run-1", "run-2"]

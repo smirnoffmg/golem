@@ -31,9 +31,10 @@ from golem.adapters.jira import (
     push_token,
     signature_valid,
 )
-from golem.edge.__main__ import SigningKeys, authenticator, fetch_jwks
+from golem.edge.__main__ import authenticator
 from golem.edge.app import create_edge_app
 from golem.edge.policy import ChainLimits, Registry
+from golem.jwks import SigningKeys, fetch_jwks
 from golem.settings import SettingsError, adapter_settings, parse_label_agents
 
 WEBHOOK_SECRET = b"webhook-secret"

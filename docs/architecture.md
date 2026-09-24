@@ -85,6 +85,15 @@ write only its own branch. Platform MCP servers (Jira, Confluence, GitLab) hold 
 themselves and accept calls authorized by the run token; the diagram folds them into one
 container. Metrics in Grafana and Prometheus are omitted.
 
+**Platform MCP servers are resource servers for run tokens**
+([ADR 0008](adr/0008-platform-mcp-servers.md)). One process serves one tool group over
+streamable HTTP, read only. A gate in front of the MCP SDK verifies the run token against the
+task service's JWKS, requires the server's group in the token's `tools`, asks the task service
+whether the run is still running (cached for seconds), and writes an audit row for every
+request, allowed or refused, before serving it. Anything it cannot check it refuses: no signing
+keys, no run status, no audit row. Upstream calls carry the server's own credentials; the run
+token never leaves the server.
+
 **The A2A edge and the task service are two containers, not one gateway**
 ([ADR 0002](adr/0002-edge-and-task-service-split.md)).
 
@@ -151,7 +160,7 @@ System_Boundary(platform, "Golem (orchestrator namespace)") {
     ContainerDb(db_temporal, "temporal, temporal_visibility", "two databases; owner: Temporal", "workflow history and search", $tags="target")
     ContainerDb(audit, "golem_audit", "database; INSERT only", "time, account, request, target, operation, result, source, chain")
   }
-  Container(mcp, "Platform MCP servers", "Jira and Confluence read only; GitLab read", "own their secrets from Vault; called with the run token; every action audited")
+  Container(mcp, "Platform MCP servers", "Python, MCP SDK; one per tool group; Jira and Confluence read only; GitLab read", "accept run tokens only; grant from token claims; revoked when the run ends; own secrets from Vault; every decision audited")
 }
 
 System_Boundary(team, "Team zone (Jobs namespace, ResourceQuota)") {
@@ -201,7 +210,8 @@ Rel(job, gateway, "model calls", "agent key")
 Rel(job, langfuse, "traces; golden sets and evaluation results", "OTLP, API")
 Rel(mcp, atlassian, "read")
 Rel(mcp, gitlab, "read")
-Rel(mcp, audit, "every action")
+Rel(mcp, audit, "every decision", "INSERT as golem_mcp")
+Rel(mcp, tasks, "run signing keys; run status", "internal HTTP")
 Rel(vault, mcp, "secrets")
 Rel(vault, job, "gateway key, branch token", "secrets operator")
 

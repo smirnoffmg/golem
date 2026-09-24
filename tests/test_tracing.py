@@ -424,6 +424,9 @@ class RecordingOrchestrator:
     async def cancel(self, task_id: str) -> None:
         return None
 
+    async def status(self, run_id: str) -> str | None:
+        return None
+
 
 def send_with_headers(headers: dict[str, str]) -> RunStart:
     card = AgentCard(

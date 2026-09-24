@@ -5,7 +5,14 @@ import psycopg
 import pytest
 
 from golem.orchestrator.admission import Limits, Rejected, RejectReason
-from golem.orchestrator.runs import RunCreated, RunReused, StartRequest, start_run
+from golem.orchestrator.runs import (
+    RunCreated,
+    RunReused,
+    StartRequest,
+    cancel_run_of_task,
+    run_status,
+    start_run,
+)
 
 LIMITS = Limits(max_runs_per_caller=3, max_runs_per_root=3, budget_per_root=Decimal("10"))
 
@@ -150,3 +157,24 @@ async def test_a_reused_run_reports_its_current_status(runs_db: str) -> None:
     assert await start(runs_db, request("m-1")) == RunReused(
         run_id=first.run_id, root_run_id=first.run_id, status="canceled"
     )
+
+
+async def status_of(dsn: str, run_id: str) -> str | None:
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        return await run_status(conn, run_id)
+
+
+async def test_run_status_reads_the_current_status(runs_db: str) -> None:
+    created = await start(runs_db, request("m-1"))
+    assert isinstance(created, RunCreated)
+    assert await status_of(runs_db, created.run_id) == "running"
+
+    async with await psycopg.AsyncConnection.connect(runs_db, autocommit=True) as conn:
+        await cancel_run_of_task(conn, "task-m-1")
+
+    assert await status_of(runs_db, created.run_id) == "canceled"
+
+
+@pytest.mark.parametrize("run_id", ["00000000-0000-0000-0000-000000000000", "not-a-uuid", ""])
+async def test_run_status_of_an_unknown_or_malformed_id_is_none(runs_db: str, run_id: str) -> None:
+    assert await status_of(runs_db, run_id) is None

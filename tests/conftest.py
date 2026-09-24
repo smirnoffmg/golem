@@ -47,6 +47,11 @@ def audit_dsn(postgres: PostgresContainer) -> str:
     return _audit_dsn(postgres, "golem_edge", "dev-only-golem-edge")
 
 
+@pytest.fixture(scope="session")
+def mcp_audit_dsn(postgres: PostgresContainer) -> str:
+    return _audit_dsn(postgres, "golem_mcp", "dev-only-golem-mcp")
+
+
 @pytest.fixture
 async def audit_admin_dsn(postgres: PostgresContainer) -> AsyncIterator[str]:
     """Superuser DSN: the only way to read audit rows back, since service roles only INSERT."""

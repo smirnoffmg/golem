@@ -3,13 +3,11 @@
 import logging
 import os
 import sys
-import time
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 
 import httpx
-import jwt
 import uvicorn
 from a2a.types.a2a_pb2 import AgentCard
 from starlette.applications import Starlette
@@ -19,75 +17,12 @@ from golem.edge.app import create_edge_app
 from golem.edge.auth import AuthFailure, Principal, authenticate
 from golem.edge.cards import build_public_card
 from golem.edge.policy import ChainLimits
+from golem.jwks import SigningKeys, fetch_jwks, key_id_of
 from golem.settings import EdgeSettings, SettingsError, edge_settings, parse_registry
 
 JWKS_TIMEOUT_SECONDS = 2
 FORWARD_TIMEOUT_SECONDS = 30
-MIN_REFRESH_SECONDS = 60.0
 CATALOG_FILE = "agent.yaml"
-
-log = logging.getLogger("golem.edge")
-
-
-def fetch_jwks(client: httpx.Client, url: str) -> jwt.PyJWKSet:
-    response = client.get(url)
-    response.raise_for_status()
-    return jwt.PyJWKSet.from_dict(response.json())
-
-
-class SigningKeys:
-    """The IdP's signing keys, refetched when a token names an unknown key id.
-
-    Refetching is rate limited so that tokens with made-up key ids cannot turn the edge into
-    a request flood against the IdP; a failed fetch keeps the keys already known. The edge app
-    authenticates synchronously, so a refetch blocks its event loop for at most the JWKS
-    timeout, at most once per interval.
-    """
-
-    def __init__(
-        self,
-        fetch: Callable[[], jwt.PyJWKSet],
-        *,
-        clock: Callable[[], float] = time.monotonic,
-        min_refresh_seconds: float = MIN_REFRESH_SECONDS,
-    ) -> None:
-        self._fetch = fetch
-        self._clock = clock
-        self._min_refresh_seconds = min_refresh_seconds
-        self._keys: jwt.PyJWKSet | None = None
-        self._fetched_at: float | None = None
-
-    def refresh(self) -> None:
-        self._fetched_at = self._clock()
-        try:
-            self._keys = self._fetch()
-        except (httpx.HTTPError, jwt.PyJWKSetError, ValueError) as error:
-            log.warning("could not fetch signing keys: %s", error)
-
-    def for_key_id(self, kid: str | None) -> jwt.PyJWKSet | None:
-        if kid is not None and not self._knows(kid) and self._may_refresh():
-            self.refresh()
-        return self._keys
-
-    def _knows(self, kid: str) -> bool:
-        try:
-            return self._keys is not None and self._keys[kid] is not None
-        except KeyError:
-            return False
-
-    def _may_refresh(self) -> bool:
-        return (
-            self._fetched_at is None
-            or self._clock() - self._fetched_at >= self._min_refresh_seconds
-        )
-
-
-def key_id_of(token: str) -> str | None:
-    try:
-        kid = jwt.get_unverified_header(token).get("kid")
-    except jwt.DecodeError:
-        return None
-    return kid if isinstance(kid, str) else None
 
 
 def authenticator(

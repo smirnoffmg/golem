@@ -11,8 +11,9 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from test_edge_auth import AUDIENCE, ISSUER, claims
 
-from golem.edge.__main__ import SigningKeys, authenticator, fetch_jwks
+from golem.edge.__main__ import authenticator
 from golem.edge.auth import AuthFailure, Principal
+from golem.jwks import SigningKeys, fetch_jwks
 
 JWKS_URL = "https://idp.example.test/realms/golem/protocol/openid-connect/certs"
 OLD_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)

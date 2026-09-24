@@ -14,6 +14,7 @@ from golem.orchestrator.runs import (
     StartRequest,
     cancel_run_of_task,
     fail_run,
+    run_status,
     start_run,
 )
 from golem.run_token import RunClaims, SigningKey, issue
@@ -125,6 +126,10 @@ class PostgresOrchestrator:
                 await fail_run(conn, outcome.run_id)
                 return Refused(reason=f"Could not launch run {outcome.run_id}: {error}")
         return Started(run_id=outcome.run_id)
+
+    async def status(self, run_id: str) -> str | None:
+        async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:
+            return await run_status(conn, run_id)
 
     async def cancel(self, task_id: str) -> None:
         async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:

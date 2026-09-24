@@ -250,3 +250,18 @@ def test_an_agent_the_platform_granted_nothing_gets_a_token_without_tools(
     claims = verified(spec.run_token)
     assert isinstance(claims, RunClaims)
     assert claims.tools == ()
+
+
+def test_the_internal_run_route_reads_the_status_from_golem_runs(
+    client: TestClient, runs_db: str
+) -> None:
+    task = send(client, "m-status")
+    [(run_id, _)] = run_rows(runs_db)
+
+    running = client.get(f"/internal/runs/{run_id}").json()
+    rpc(client, "CancelTask", {"tenant": "discovery", "id": task["id"]})
+    canceled = client.get(f"/internal/runs/{run_id}").json()
+
+    assert running == {"run_id": run_id, "status": "running"}
+    assert canceled == {"run_id": run_id, "status": "canceled"}
+    assert client.get("/internal/runs/not-a-run").status_code == 404

@@ -31,7 +31,7 @@ is the catalog, and the figure is stopped by the platform, not by the model.
 | Orchestrator | `golem_runs` | run admission and quotas; run, process and evaluation workflows; Jobs; merge requests |
 | Runtime Job | none (ephemeral) | one image for every agent: loads the catalog, runs the lead and roles, writes a branch, emits traces |
 | Channel adapters | none | UI, Jira and GitLab webhooks, chat bot, all as A2A clients |
-| Platform MCP servers | none | Jira, Confluence and GitLab tools; hold their own secrets; audit every action |
+| Platform MCP servers | none | Jira, Confluence and GitLab tools; accept run tokens only; hold their own secrets; audit every decision |
 | Postgres cluster | `golem_tasks`, `golem_runs`, `golem_audit` | one cluster, one owner per database |
 
 Details and diagrams: [docs/architecture.md](docs/architecture.md). Decisions:
@@ -71,6 +71,8 @@ src/golem/
   tasks/                   A2A task service: tasks in golem_tasks, run outcomes via an internal route
   evaluation/              the quality gate of catalog merge requests: golden set, runs, gate, CLI
   adapters/jira.py         Jira adapter: signed label webhook to SendMessage, task push to a comment
+  mcp/                     platform MCP servers: run token gate, audit, read-only Jira and Confluence tools
+  jwks.py                  signing keys from a JWKS URL, shared by the edge and the MCP servers
 deploy/
   compose.yaml             local Postgres, edge, task service and reconciler
   postgres/init.sql        databases, roles and grants
@@ -98,11 +100,13 @@ docker compose -f deploy/compose.yaml up --build
 GOLEM_SMOKE=1 uv run pytest tests/test_compose_smoke.py   # builds, starts and removes compose
 ```
 
-One image, four processes: `python -m golem.edge`, `python -m golem.tasks`,
-`python -m golem.orchestrator.reconciler` and the Jira adapter `python -m golem.adapters`.
+One image, five processes: `python -m golem.edge`, `python -m golem.tasks`,
+`python -m golem.orchestrator.reconciler`, the Jira adapter `python -m golem.adapters` and a
+platform MCP server `python -m golem.mcp`.
 Each reads its settings from `GOLEM_*` environment variables (`src/golem/settings.py`) and
 refuses to start with a list of every missing one; `deploy/compose.yaml` sets them all for the
-first three. The Jira adapter is not in compose: it needs Jira and an identity provider.
+first three. The Jira adapter and the MCP servers are not in compose: they need Jira and
+Confluence, and the adapter an identity provider.
 Compose has no Kubernetes, GitLab or identity provider:
 the task service runs with `GOLEM_KUBERNETES=none` and refuses every run with that reason, and
 the edge cannot fetch signing keys, so it serves public agent cards on
@@ -147,9 +151,24 @@ ES256 with the key in `GOLEM_RUN_TOKEN_KEY_FILE` (`GOLEM_RUN_TOKEN_KID`), audien
 naming the run, agent, caller and root run, with the tool groups `GOLEM_AGENT_TOOLS_FILE` grants
 the agent (`discovery: [tracker.read, wiki.read]`), and expiring a minute after the Job's
 deadline. It reaches the Job through a Secret `golem-run-<run id>-token` owned by the Job, so it
-is deleted with it. MCP servers verify it against the JWKS at the task service's internal
-`GET /internal/run-keys`. With `GOLEM_MCP_REGISTRY_CONFIGMAP` set, that ConfigMap is mounted
+is deleted with it. With `GOLEM_MCP_REGISTRY_CONFIGMAP` set, that ConfigMap is mounted
 read-only as the registry.
+
+Golem's own MCP servers (`python -m golem.mcp`, one process per group,
+[ADR 0008](docs/adr/0008-platform-mcp-servers.md)) serve `tracker.read` (`search_issues`,
+`get_issue`: Jira REST API v2) and `wiki.read` (`search_pages`, `get_page`: Confluence REST API
+v1), read only, as compact text. A request is served only with a run token that verifies
+against the task service's `GET /internal/run-keys`, grants the server's group, and names a
+run that `GET /internal/runs/{run_id}` reports as `running` (cached for
+`GOLEM_MCP_RUN_STATUS_TTL_SECONDS`, 10 s); anything else is 401 or 403, and a lookup that fails
+is 503. Jira and Confluence are called with the server's own credentials, never the run token.
+Every request writes one `audit_log` row (caller, tool, bounded arguments, a hash of the token,
+allow or deny with the reason, root and run id) before it is served; without the audit log
+nothing is served. Settings:
+`GOLEM_MCP_GROUP`, `GOLEM_MCP_UPSTREAM_URL`, `GOLEM_MCP_UPSTREAM_TOKEN` (with
+`GOLEM_MCP_UPSTREAM_USER` for Basic auth on Atlassian Cloud), `GOLEM_MCP_JIRA_DEPLOYMENT`
+(`cloud` or `data-center`, for `tracker.read`), `GOLEM_TASK_SERVICE_URL`, `GOLEM_AUDIT_DSN`
+(role `golem_mcp`), `GOLEM_MCP_KEYS_REFRESH_SECONDS`, `GOLEM_PORT`.
 
 ## Jira adapter
 
@@ -195,6 +214,9 @@ Not deployed. The whole run lifecycle above is implemented and tested: Postgres 
 parts against real Postgres 17 and k3s in testcontainers, git against real repositories, the
 model and GitLab through fakes at their boundaries. The Jira adapter is tested against the real
 edge and task service, with Jira and the identity provider faked at their HTTP boundaries.
+The Jira and Confluence MCP servers are tested with the runtime's own MCP client against the
+real task service and audit log, with Jira and Confluence faked at their HTTP boundaries.
 The evaluation of catalog merge requests runs in the catalog's CI job, tested with fake roles
-over the example golden set. Not built yet: the Mattermost and GitLab adapters, a UI, the
-orchestrator's evaluation workflow with a model judge and trace store, and Temporal (target).
+over the example golden set. Not built yet: the Mattermost and GitLab adapters, the GitLab MCP
+server, a UI, the orchestrator's evaluation workflow with a model judge and trace store, and
+Temporal (target).

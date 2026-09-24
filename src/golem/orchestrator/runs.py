@@ -102,6 +102,16 @@ async def cancel_run_of_task(conn: AsyncConnection, task_id: str) -> str | None:
     return None if row is None else str(row[0])
 
 
+async def run_status(conn: AsyncConnection, run_id: str) -> str | None:
+    try:
+        run_uuid = uuid.UUID(run_id)
+    except ValueError:
+        return None
+    cursor = await conn.execute("SELECT status FROM runs WHERE id = %s", (run_uuid,))
+    row = await cursor.fetchone()
+    return None if row is None else row[0]
+
+
 async def fail_run(conn: AsyncConnection, run_id: str) -> None:
     await conn.execute(
         "UPDATE runs SET status = 'failed' WHERE id = %s AND status = 'running'", (run_id,)

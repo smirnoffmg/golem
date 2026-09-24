@@ -41,6 +41,9 @@ OUTCOME_PATH = "/internal/run-outcome"
 # Platform MCP servers verify run tokens against these keys; like the outcome route, it is
 # reachable inside the cluster only, since the edge forwards nothing but the A2A path.
 RUN_KEYS_PATH = "/internal/run-keys"
+# Platform MCP servers ask whether a run is still running before serving its token: a canceled
+# run's token is refused before it expires.
+RUN_STATUS_PATH = "/internal/runs/{run_id}"
 OUTCOME_STATUSES = {"succeeded": True, "failed": False}
 TERMINAL_STATES = {
     TaskState.TASK_STATE_COMPLETED,
@@ -169,12 +172,20 @@ def create_app(
     async def run_signing_keys(_: Request) -> Response:
         return JSONResponse(jwks)
 
+    async def run_status(request: Request) -> Response:
+        run_id = request.path_params["run_id"]
+        status = await orchestrator.status(run_id)
+        if status is None:
+            return JSONResponse({"error": "run not found"}, status_code=404)
+        return JSONResponse({"run_id": run_id, "status": status})
+
     return Starlette(
         routes=create_agent_card_routes(card)
         + create_jsonrpc_routes(handler, RPC_PATH, EdgeContextBuilder())
         + [
             Route(OUTCOME_PATH, run_outcome, methods=["POST"]),
             Route(RUN_KEYS_PATH, run_signing_keys, methods=["GET"]),
+            Route(RUN_STATUS_PATH, run_status, methods=["GET"]),
         ],
         lifespan=lifespan,
     )
