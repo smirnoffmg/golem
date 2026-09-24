@@ -22,6 +22,10 @@ class GitLabError(RuntimeError):
     pass
 
 
+class ProjectNotConfigured(GitLabError):
+    """Configuration, not an outage: retrying would fail the same way every pass."""
+
+
 @dataclass(frozen=True)
 class GitLabProject:
     path: str
@@ -74,7 +78,7 @@ class GitLabMergeRequests:
     def _project(self, agent: str) -> GitLabProject:
         project = self.project_for_agent.get(agent)
         if project is None:
-            raise GitLabError(f"no GitLab project is configured for agent {agent!r}")
+            raise ProjectNotConfigured(f"no GitLab project is configured for agent {agent!r}")
         return project
 
     def _url(self, project: GitLabProject, resource: str) -> str:
@@ -98,7 +102,10 @@ def idle_detail(run_id: str) -> str:
 
 
 async def propose_merge_request(gitlab: GitLabMergeRequests, run: SucceededRun) -> str:
-    branch = await gitlab.find_branch(run.agent, run.run_id)
+    try:
+        branch = await gitlab.find_branch(run.agent, run.run_id)
+    except ProjectNotConfigured as error:
+        return f"Run {run.run_id} succeeded, but {error}; its branch was not proposed."
     if branch is None:
         return idle_detail(run.run_id)
     target = target_of(branch)

@@ -197,6 +197,15 @@ async def test_an_agent_without_a_project_is_a_gitlab_error(
         await merge_requests.find_branch("reviewer", "run-1")
 
 
+async def test_a_run_of_an_agent_without_a_project_settles_instead_of_retrying_forever(
+    merge_requests: GitLabMergeRequests,
+) -> None:
+    detail = await propose_merge_request(merge_requests, SucceededRun("run-1", "reviewer"))
+
+    assert "no GitLab project is configured for agent 'reviewer'" in detail
+    assert "not proposed" in detail
+
+
 async def test_a_run_without_a_branch_proposed_nothing(
     merge_requests: GitLabMergeRequests,
 ) -> None:
