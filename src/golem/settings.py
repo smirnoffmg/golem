@@ -52,6 +52,7 @@ class EdgeSettings:
 @dataclass(frozen=True)
 class TaskServiceSettings:
     runs_dsn: str
+    tasks_db_url: str
     limits: Limits
     estimated_cost: Decimal
     template: JobTemplate
@@ -106,6 +107,7 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
     v = _values(
         env,
         "GOLEM_RUNS_DSN",
+        "GOLEM_TASKS_DB_URL",
         "GOLEM_MAX_RUNS_PER_CALLER",
         "GOLEM_MAX_RUNS_PER_ROOT",
         "GOLEM_BUDGET_PER_ROOT",
@@ -123,6 +125,7 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
     )
     return TaskServiceSettings(
         runs_dsn=v["GOLEM_RUNS_DSN"],
+        tasks_db_url=v["GOLEM_TASKS_DB_URL"],
         limits=_checked(
             "GOLEM_MAX_RUNS_PER_CALLER, GOLEM_MAX_RUNS_PER_ROOT, GOLEM_BUDGET_PER_ROOT",
             lambda: Limits(

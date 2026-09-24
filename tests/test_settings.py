@@ -32,6 +32,7 @@ EDGE_ENV = {
 
 TASKS_ENV = {
     "GOLEM_RUNS_DSN": "host=db dbname=golem_runs user=golem_runs",
+    "GOLEM_TASKS_DB_URL": "postgresql+asyncpg://golem_tasks@db/golem_tasks",
     "GOLEM_MAX_RUNS_PER_CALLER": "5",
     "GOLEM_MAX_RUNS_PER_ROOT": "10",
     "GOLEM_BUDGET_PER_ROOT": "100.50",
@@ -107,6 +108,7 @@ def test_task_service_settings_build_limits_and_job_template() -> None:
     assert settings.template.namespace == "team-jobs"
     assert settings.template.active_deadline_seconds == 3600
     assert settings.kubernetes is Kubernetes.IN_CLUSTER
+    assert settings.tasks_db_url == "postgresql+asyncpg://golem_tasks@db/golem_tasks"
 
 
 def test_task_service_accepts_no_cluster() -> None:

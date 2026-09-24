@@ -5,7 +5,7 @@ description = "A runtime for autonomous agents: agents are text in a catalog, ru
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "a2a-sdk[http-server]>=1.1,<2",
+    "a2a-sdk[http-server,postgresql]>=1.1,<2",
     "deepagents>=0.7",
     "kubernetes>=33",
     "langchain-openai>=0.3",

@@ -110,6 +110,8 @@ def create_app(
                     message=Message(
                         message_id=f"run-outcome-{outcome.run_id}-{body['task_id']}",
                         task_id=body["task_id"],
+                        # A restarted service has no live task to infer the context from.
+                        context_id=task.context_id,
                         role=Role.ROLE_USER,
                         parts=[Part(text=outcome.detail)],
                     ),

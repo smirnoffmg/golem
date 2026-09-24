@@ -19,6 +19,7 @@ from golem.settings import (
     task_service_settings,
 )
 from golem.tasks.app import create_app
+from golem.tasks.store import tasks_engine, tasks_store
 
 
 def service_card(public_base_url: str) -> AgentCard:
@@ -46,7 +47,11 @@ def build_app(settings: TaskServiceSettings) -> Starlette:
         template=settings.template,
         catalogs=parse_catalog_refs(settings.catalogs_file.read_text()),
     )
-    return create_app(service_card(settings.public_base_url), orchestrator)
+    return create_app(
+        service_card(settings.public_base_url),
+        orchestrator,
+        tasks_store(tasks_engine(settings.tasks_db_url)),
+    )
 
 
 def main() -> None:
