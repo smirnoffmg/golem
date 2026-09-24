@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "a2a-sdk[http-server]>=1.1,<2",
+    "kubernetes>=33",
     "psycopg[binary]>=3.2",
     "pydantic>=2.11,<3",
+    "pyjwt[crypto]>=2.10",
     "pyyaml>=6",
     "uvicorn>=0.35",
 ]
@@ -18,7 +20,7 @@ dev = [
     "pytest-asyncio>=1",
     "httpx>=0.28",
     "ruff>=0.13",
-    "testcontainers[postgres]>=4",
+    "testcontainers[k3s,postgres]>=4",
 ]
 
 [build-system]
