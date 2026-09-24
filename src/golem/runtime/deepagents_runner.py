@@ -1,7 +1,7 @@
 """A role runner on deepagents: one agent loop over the context repository clone, no shell."""
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from deepagents import FilesystemPermission, SubAgent, create_deep_agent
@@ -12,15 +12,22 @@ from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph.state import CompiledStateGraph
 
 from golem.runtime.ports import Brief, RoleResult
+from golem.runtime.tools import McpToolbox, ToolAccessError
 
 SKILLS_ROUTE = "/.golem/skills/"
 ARTIFACTS_ROOT = "/.golem/artifacts"
 # wcmatch's `**` skips dot-segments, so `/**` alone would leave `/.git/...` writable.
 EVERYWHERE = ["/**", "/**/.*", "/**/.*/**"]
+# Names deepagents may bind itself; `execute` included so no MCP tool can bring a shell in.
+BUILTIN_TOOLS = frozenset(
+    {"ls", "read_file", "write_file", "edit_file", "delete", "glob", "grep", "execute"}
+    | {"write_todos", "task"}
+)
 
 
 @dataclass(frozen=True)
@@ -34,9 +41,11 @@ class DeepAgentsRunner:
     model: BaseChatModel
     limits: Limits = Limits()
     callbacks: Sequence[BaseCallbackHandler] = ()
+    toolbox: McpToolbox = field(default_factory=McpToolbox)
 
     async def run(self, brief: Brief) -> RoleResult:
-        agent = build_agent(self.model, brief, self.limits)
+        tools = await self.toolbox.tools_for(brief.role)
+        agent = build_agent(self.model, brief, self.limits, tools)
         state = await agent.ainvoke(
             {"messages": [HumanMessage(task(brief))]},
             config={"recursion_limit": self.limits.recursion_limit, "callbacks": [*self.callbacks]},
@@ -54,10 +63,13 @@ def gateway_model(settings: Mapping[str, str]) -> ChatOpenAI:
     )
 
 
-def build_agent(model: BaseChatModel, brief: Brief, limits: Limits) -> CompiledStateGraph:
+def build_agent(
+    model: BaseChatModel, brief: Brief, limits: Limits, tools: Sequence[BaseTool] = ()
+) -> CompiledStateGraph:
     skills = [SKILLS_ROUTE] if has_skills(brief) else None
     return create_deep_agent(
         model=model,
+        tools=unshadowed(tools),
         system_prompt=f"{brief.instructions}\n\n{preamble(brief)}",
         backend=workspace_backend(brief.workspace, brief.skills_dir if skills else None),
         permissions=role_permissions(brief.role.writes),
@@ -66,6 +78,13 @@ def build_agent(model: BaseChatModel, brief: Brief, limits: Limits) -> CompiledS
         subagents=[general_purpose(limits, skills)],
         name=brief.role.name,
     )
+
+
+def unshadowed(tools: Sequence[BaseTool]) -> list[BaseTool]:
+    clashing = sorted(tool.name for tool in tools if tool.name in BUILTIN_TOOLS)
+    if clashing:
+        raise ToolAccessError(f"MCP tools {clashing} would shadow built-in tools of the runner")
+    return list(tools)
 
 
 def call_limit(limits: Limits) -> ModelCallLimitMiddleware:

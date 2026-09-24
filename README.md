@@ -56,6 +56,7 @@ src/golem/
   runtime/validate.py      checks a role's change before anything leaves the Job
   runtime/workspace.py     git operations (the token never appears in a URL or command line)
   runtime/deepagents_runner.py  a role on deepagents: no shell, writes only under its directory
+  runtime/tools.py         a role's tools from platform MCP servers: registry, run token, limits
   orchestrator/admission.py  run admission: Job quotas per caller and per root chain
   orchestrator/runs.py       idempotent run start on Postgres (schema.sql)
   orchestrator/service.py    the task service's orchestrator port: record a run, launch its Job
@@ -77,6 +78,7 @@ examples/
   discovery/               an example agent catalog: kinds, roles, rules, role instructions
   discovery/evals/         its golden set; discovery/.gitlab-ci.yml runs the gate on merge requests
   context/                 an example context repository the discovery agent works on
+  mcp-registry.yaml        an example platform MCP registry for the discovery roles
 docs/
   architecture.md          C4 diagrams (PlantUML)
   adr/                     architecture decision records
@@ -124,6 +126,20 @@ A target stays pending while its proposal branch exists. Merged merge requests d
 branch. A merge request closed without merging keeps it on purpose: deleting it would make the
 lead propose the same target again. A rejected proposal is recorded as a status change on the
 record, which is a human decision.
+
+## Tools of a role
+
+A role's `tools` in the catalog name tool groups of the platform's MCP registry, a YAML file
+the platform mounts into the Job at `GOLEM_MCP_REGISTRY` (example:
+[examples/mcp-registry.yaml](examples/mcp-registry.yaml)): group name to the server's
+streamable HTTP URL and the tool names the group allows. A role gets exactly the groups it
+names and, from each server, only the allowed tools. The run fails before the first model
+call when a named group is missing from the registry, a server is down or lacks an allowed
+tool, two of the role's groups offer the same tool name, or a tool would shadow a built-in
+one (`execute` included). Every call carries `GOLEM_RUN_TOKEN` as a bearer token; the servers
+hold the secrets to the systems behind them. A call is bounded by a timeout (the model gets
+an error result) and a result by a size cap (cut with a `[truncated: ...]` marker); large
+results that fit are offloaded to agent state, never to the clone.
 
 ## Jira adapter
 
