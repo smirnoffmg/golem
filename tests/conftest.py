@@ -62,7 +62,10 @@ def k3s_api_client() -> Iterator[ApiClient]:
     from kubernetes.config import new_client_from_config_dict
     from testcontainers.community.k3s import K3SContainer
 
-    with K3SContainer("rancher/k3s:v1.33.4-k3s1") as k3s:
+    # Mounting the host's /sys/fs/cgroup (the module's default) breaks pod sandboxes on cgroup v2
+    # hosts such as CI runners: "cgroup.procs: no such file or directory" (testcontainers-python
+    # issue 591).
+    with K3SContainer("rancher/k3s:v1.33.4-k3s1", enable_cgroup_mount=False) as k3s:
         api_client = new_client_from_config_dict(
             yaml.safe_load(k3s.config_yaml()), persist_config=False
         )
