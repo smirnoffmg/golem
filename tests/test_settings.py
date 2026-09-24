@@ -111,6 +111,42 @@ def test_task_service_settings_build_limits_and_job_template() -> None:
     assert settings.tasks_db_url == "postgresql+asyncpg://golem_tasks@db/golem_tasks"
 
 
+def test_push_delivery_is_off_unless_receivers_are_allowed() -> None:
+    assert task_service_settings(TASKS_ENV).push_allowed_prefixes == ()
+
+
+def test_push_receivers_and_the_key_for_stored_tokens() -> None:
+    settings = task_service_settings(
+        {
+            **TASKS_ENV,
+            "GOLEM_PUSH_ALLOWED_PREFIXES": "http://adapter:8080/, https://hooks.example.test/a2a/",
+            "GOLEM_PUSH_CONFIG_KEY": "k" * 43 + "=",
+        }
+    )
+
+    assert settings.push_allowed_prefixes == (
+        "http://adapter:8080/",
+        "https://hooks.example.test/a2a/",
+    )
+    assert settings.push_config_key == "k" * 43 + "="
+
+
+def test_push_receivers_must_end_with_a_slash() -> None:
+    with pytest.raises(SettingsError, match="GOLEM_PUSH_ALLOWED_PREFIXES"):
+        task_service_settings(
+            {
+                **TASKS_ENV,
+                "GOLEM_PUSH_ALLOWED_PREFIXES": "http://adapter:8080",
+                "GOLEM_PUSH_CONFIG_KEY": "k" * 43 + "=",
+            }
+        )
+
+
+def test_push_receivers_need_a_key_for_stored_tokens() -> None:
+    with pytest.raises(SettingsError, match="GOLEM_PUSH_CONFIG_KEY"):
+        task_service_settings({**TASKS_ENV, "GOLEM_PUSH_ALLOWED_PREFIXES": "http://adapter:8080/"})
+
+
 def test_task_service_accepts_no_cluster() -> None:
     settings = task_service_settings({**TASKS_ENV, "GOLEM_KUBERNETES": "none"})
 

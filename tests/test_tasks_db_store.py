@@ -98,3 +98,40 @@ async def test_another_caller_cannot_see_the_task(engine: AsyncEngine) -> None:
         )
 
     assert "error" in response.json()
+
+
+async def test_push_tokens_are_stored_encrypted(engine: AsyncEngine) -> None:
+    from cryptography.fernet import Fernet
+    from sqlalchemy import text
+
+    from golem.tasks.app import PushDelivery
+    from golem.tasks.store import push_config_store
+
+    push = PushDelivery(
+        config_store=push_config_store(engine, Fernet.generate_key().decode()),
+        client=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(204))),
+        allowed_prefixes=("http://adapter:8080/",),
+    )
+    app = create_app(make_card(), FakeOrchestrator(), tasks_store(engine), push)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://tasks"
+    ) as client:
+        await rpc(
+            client,
+            "SendMessage",
+            {
+                "tenant": "reviewer",
+                "message": {"role": "ROLE_USER", "messageId": "m-3", "parts": [{"text": "go"}]},
+                "configuration": {
+                    "taskPushNotificationConfig": {
+                        "url": "http://adapter:8080/a2a/push",
+                        "token": "secret-push-token",
+                    }
+                },
+            },
+        )
+
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text("SELECT * FROM push_notification_configs"))).all()
+    assert rows
+    assert all("secret-push-token" not in str(row) for row in rows)

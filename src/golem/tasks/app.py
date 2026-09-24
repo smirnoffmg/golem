@@ -1,6 +1,8 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
+import httpx
 from a2a.auth.user import UnauthenticatedUser, User
 from a2a.server.context import ServerCallContext
 from a2a.server.request_handlers import DefaultRequestHandler
@@ -9,7 +11,12 @@ from a2a.server.routes import (
     create_agent_card_routes,
     create_jsonrpc_routes,
 )
-from a2a.server.tasks import InMemoryTaskStore, TaskStore
+from a2a.server.tasks import (
+    BasePushNotificationSender,
+    InMemoryTaskStore,
+    PushNotificationConfigStore,
+    TaskStore,
+)
 from a2a.types.a2a_pb2 import (
     AgentCard,
     GetTaskRequest,
@@ -63,13 +70,43 @@ class EdgeContextBuilder(DefaultServerCallContextBuilder):
         return super().build_user(request)
 
 
+@dataclass(frozen=True)
+class PushDelivery:
+    config_store: PushNotificationConfigStore
+    client: httpx.AsyncClient
+    # Callers choose the push URL, so without an allowlist any caller could make the task
+    # service send requests to anything it can reach inside the cluster.
+    allowed_prefixes: tuple[str, ...]
+
+
+def push_url_allowed(url: str, allowed_prefixes: tuple[str, ...]) -> bool:
+    return any(url.startswith(prefix) for prefix in allowed_prefixes if prefix.endswith("/"))
+
+
 def create_app(
-    card: AgentCard, orchestrator: Orchestrator, task_store: TaskStore | None = None
+    card: AgentCard,
+    orchestrator: Orchestrator,
+    task_store: TaskStore | None = None,
+    push: PushDelivery | None = None,
 ) -> Starlette:
+    push_options = {}
+    if push is not None:
+
+        async def validate(url: str) -> bool:
+            return push_url_allowed(url, push.allowed_prefixes)
+
+        push_options = {
+            "push_config_store": push.config_store,
+            "push_sender": BasePushNotificationSender(
+                push.client, push.config_store, push_url_validator=validate
+            ),
+            "push_url_validator": validate,
+        }
     handler = DefaultRequestHandler(
         agent_executor=RunExecutor(orchestrator),
         task_store=task_store or InMemoryTaskStore(),
         agent_card=card,
+        **push_options,
     )
 
     @asynccontextmanager

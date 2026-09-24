@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 
+import httpx
 import uvicorn
 from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface
 from starlette.applications import Starlette
@@ -18,11 +19,11 @@ from golem.settings import (
     parse_catalog_refs,
     task_service_settings,
 )
-from golem.tasks.app import create_app
-from golem.tasks.store import tasks_engine, tasks_store
+from golem.tasks.app import PushDelivery, create_app
+from golem.tasks.store import push_config_store, tasks_engine, tasks_store
 
 
-def service_card(public_base_url: str) -> AgentCard:
+def service_card(public_base_url: str, push_notifications: bool = False) -> AgentCard:
     return AgentCard(
         name="golem",
         description="Runs catalog agents as A2A tasks.",
@@ -32,7 +33,7 @@ def service_card(public_base_url: str) -> AgentCard:
                 url=f"{public_base_url}/a2a", protocol_binding="JSONRPC", protocol_version="1.0"
             )
         ],
-        capabilities=AgentCapabilities(streaming=False),
+        capabilities=AgentCapabilities(streaming=False, push_notifications=push_notifications),
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
     )
@@ -47,10 +48,21 @@ def build_app(settings: TaskServiceSettings) -> Starlette:
         template=settings.template,
         catalogs=parse_catalog_refs(settings.catalogs_file.read_text()),
     )
+    engine = tasks_engine(settings.tasks_db_url)
+    push = (
+        PushDelivery(
+            config_store=push_config_store(engine, settings.push_config_key or ""),
+            client=httpx.AsyncClient(timeout=10),
+            allowed_prefixes=settings.push_allowed_prefixes,
+        )
+        if settings.push_allowed_prefixes
+        else None
+    )
     return create_app(
-        service_card(settings.public_base_url),
+        service_card(settings.public_base_url, push_notifications=push is not None),
         orchestrator,
-        tasks_store(tasks_engine(settings.tasks_db_url)),
+        tasks_store(engine),
+        push,
     )
 
 

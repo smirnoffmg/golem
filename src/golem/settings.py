@@ -60,6 +60,8 @@ class TaskServiceSettings:
     kubernetes: Kubernetes
     public_base_url: str
     port: int
+    push_allowed_prefixes: tuple[str, ...] = ()
+    push_config_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,26 @@ def edge_settings(env: Env) -> EdgeSettings:
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
     )
+
+
+def _push_prefixes(env: Env) -> tuple[str, ...]:
+    raw = env.get("GOLEM_PUSH_ALLOWED_PREFIXES", "")
+    prefixes = tuple(p.strip() for p in raw.split(",") if p.strip())
+    # Without the trailing slash "http://adapter:8080" would also allow "http://adapter:8080.evil".
+    bad = [p for p in prefixes if not p.endswith("/")]
+    if bad:
+        raise SettingsError(f"GOLEM_PUSH_ALLOWED_PREFIXES: each prefix must end with '/': {bad}")
+    return prefixes
+
+
+def _push_config_key(env: Env) -> str | None:
+    key = env.get("GOLEM_PUSH_CONFIG_KEY") or None
+    if env.get("GOLEM_PUSH_ALLOWED_PREFIXES") and key is None:
+        raise SettingsError(
+            "GOLEM_PUSH_CONFIG_KEY is required with GOLEM_PUSH_ALLOWED_PREFIXES:"
+            " push tokens are stored encrypted"
+        )
+    return key
 
 
 def task_service_settings(env: Env) -> TaskServiceSettings:
@@ -148,6 +170,8 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
         kubernetes=_kubernetes(v),
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
+        push_allowed_prefixes=_push_prefixes(env),
+        push_config_key=_push_config_key(env),
     )
 
 
