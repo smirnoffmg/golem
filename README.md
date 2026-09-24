@@ -53,12 +53,16 @@ src/golem/
   runtime/lead.py          the lead: a pure function from a snapshot to the next role command
   orchestrator/admission.py  run admission: Job quotas per caller and per root chain
   orchestrator/runs.py       idempotent run start on Postgres (schema.sql)
+  orchestrator/reconcile.py  finished Jobs to run outcomes; the task notification outbox
+  orchestrator/merge_requests.py  merge requests for succeeded runs (GitLab REST API)
+  orchestrator/reconciler.py the reconciler process: a reconcile pass every interval
+  settings.py              process settings parsed from the environment
   edge/policy.py           chain policy: allowed calls, depth, cycles, budget
   edge/cards.py            A2A Agent Cards generated from the catalog
   tasks/                   A2A task service
   adapters/                channel adapters (A2A clients)
 deploy/
-  compose.yaml             local Postgres (the single cluster)
+  compose.yaml             local Postgres, edge, task service and reconciler
   postgres/init.sql        databases, roles and grants
 docs/
   architecture.md          C4 diagrams (PlantUML)
@@ -74,8 +78,17 @@ Requires [uv](https://docs.astral.sh/uv/) and Docker.
 uv sync
 uv run pytest               # needs Docker: Postgres tests run in testcontainers
 uv run ruff check .
-docker compose -f deploy/compose.yaml up
+docker compose -f deploy/compose.yaml up --build
+GOLEM_SMOKE=1 uv run pytest tests/test_compose_smoke.py   # builds, starts and removes compose
 ```
+
+One image, three processes: `python -m golem.edge`, `python -m golem.tasks` and
+`python -m golem.orchestrator.reconciler`. Each reads its settings from `GOLEM_*` environment
+variables (`src/golem/settings.py`) and refuses to start with a list of every missing one;
+`deploy/compose.yaml` sets them all. Compose has no Kubernetes, GitLab or identity provider:
+the task service runs with `GOLEM_KUBERNETES=none` and refuses every run with that reason, and
+the edge cannot fetch signing keys, so it serves public agent cards on
+`http://127.0.0.1:8480` (`GOLEM_EDGE_PORT`) and answers 401 to every call.
 
 Passwords in `deploy/` are placeholders for local development only.
 

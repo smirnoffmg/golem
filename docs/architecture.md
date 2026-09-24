@@ -458,3 +458,15 @@ Rel(git, orch, "done: branch, version, cost", "Job exit")
   removed exactly those two tests fail. Idempotent handling is "the correct first step in dealing
   with repeat messages" (*Cloud Architecture Patterns*, p. 34). Still open: wiring the task
   service to `start_run`, and where the cost estimate comes from.
+- **Merge requests and the notification outbox — implemented in `orchestrator/reconcile.py` and
+  `orchestrator/merge_requests.py`.** A succeeded run's result is branch
+  `golem/<target_id>/<run_id>` in the agent's context repository. The reconciler, not knowing
+  the target, finds the branch through the GitLab branches API (`search=/<run_id>$`, the exact
+  shape checked locally) and opens the merge request idempotently: an open merge request for
+  the source branch is reused, so a crash between opening it and recording it opens nothing
+  twice. No branch means the run proposed nothing, and the task hears so. A succeeded run's
+  tasks are notified only after its proposal is settled (`runs.proposal_settled_at`); while
+  GitLab fails, the run stays unsettled, is retried every pass, and its notifications wait.
+  Still open: a run whose agent has no configured GitLab project is retried forever (logged
+  every pass), and the edge refetches signing keys synchronously, blocking its event loop for
+  at most two seconds once a minute.

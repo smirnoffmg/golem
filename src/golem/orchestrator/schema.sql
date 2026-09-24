@@ -25,3 +25,7 @@ CREATE TABLE IF NOT EXISTS run_tasks (
 -- Outbox for task notifications: a finished run's tasks are notified until delivery succeeds.
 ALTER TABLE run_tasks ADD COLUMN IF NOT EXISTS notified_at timestamptz;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS detail text;
+
+-- A succeeded run's merge request is opened (or found unnecessary) before its tasks hear of
+-- it; until then the run stays unsettled and its notifications wait in the outbox.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS proposal_settled_at timestamptz;

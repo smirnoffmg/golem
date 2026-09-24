@@ -1,6 +1,14 @@
-# Local development only. Application services are not defined yet: their entrypoints
-# do not exist. The single Postgres service stands for the one shared cluster.
+# Local development only. The single Postgres service stands for the one shared cluster.
+# Kubernetes, GitLab and the identity provider are not part of compose: the task service runs
+# with GOLEM_KUBERNETES=none and refuses every run, and the edge, unable to fetch signing
+# keys, rejects every token. Enough to see the containers start, serve cards and fail closed.
 name: golem
+
+x-app: &app
+  build:
+    context: ..
+  image: golem:dev
+  restart: unless-stopped
 
 services:
   postgres:
@@ -20,6 +28,96 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  edge:
+    <<: *app
+    command: ["python", "-m", "golem.edge"]
+    environment:
+      GOLEM_OIDC_ISSUER: http://idp.invalid/realms/golem
+      GOLEM_OIDC_AUDIENCE: golem-edge
+      GOLEM_OIDC_JWKS_URL: http://idp.invalid/realms/golem/protocol/openid-connect/certs
+      GOLEM_OIDC_DISCOVERY_URL: http://idp.invalid/realms/golem/.well-known/openid-configuration
+      GOLEM_CALL_REGISTRY_FILE: /etc/golem/registry.yaml
+      GOLEM_MAX_CHAIN_DEPTH: "4"
+      GOLEM_AUDIT_DSN: host=postgres dbname=golem_audit user=golem_edge password=dev-only-golem-edge
+      GOLEM_TASK_SERVICE_URL: http://tasks:8000
+      GOLEM_CATALOGS_DIR: /app/examples
+      GOLEM_PUBLIC_BASE_URL: http://127.0.0.1:${GOLEM_EDGE_PORT:-8480}
+    configs:
+      - source: registry
+        target: /etc/golem/registry.yaml
+    ports:
+      - "127.0.0.1:${GOLEM_EDGE_PORT:-8480}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/agents/discovery/.well-known/agent-card.json')"
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      tasks:
+        condition: service_started
+
+  tasks:
+    <<: *app
+    command: ["python", "-m", "golem.tasks"]
+    environment:
+      GOLEM_RUNS_DSN: &runs-dsn host=postgres dbname=golem_runs user=golem_runs password=dev-only-golem-runs
+      GOLEM_MAX_RUNS_PER_CALLER: "3"
+      GOLEM_MAX_RUNS_PER_ROOT: "5"
+      GOLEM_BUDGET_PER_ROOT: "100"
+      GOLEM_ESTIMATED_RUN_COST: "1"
+      GOLEM_JOB_IMAGE: golem:dev
+      GOLEM_JOB_SECRET: golem-run-secrets
+      GOLEM_JOB_DEADLINE_SECONDS: "3600"
+      GOLEM_JOB_TTL_SECONDS: "600"
+      GOLEM_JOB_CPU: "1"
+      GOLEM_JOB_MEMORY: 1Gi
+      GOLEM_CATALOGS_FILE: /etc/golem/catalogs.yaml
+      GOLEM_KUBERNETES_NAMESPACE: golem-jobs
+      GOLEM_KUBERNETES: none
+      GOLEM_PUBLIC_BASE_URL: http://127.0.0.1:${GOLEM_EDGE_PORT:-8480}
+    configs:
+      - source: catalogs
+        target: /etc/golem/catalogs.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  reconciler:
+    <<: *app
+    command: ["python", "-m", "golem.orchestrator.reconciler"]
+    environment:
+      GOLEM_RUNS_DSN: *runs-dsn
+      GOLEM_RECONCILE_INTERVAL_SECONDS: "5"
+      GOLEM_TASK_SERVICE_URL: http://tasks:8000
+      GOLEM_GITLAB_URL: http://gitlab.invalid
+      GOLEM_GITLAB_TOKEN: dev-only-no-gitlab
+      GOLEM_GITLAB_PROJECTS_FILE: /etc/golem/projects.yaml
+      GOLEM_KUBERNETES_NAMESPACE: golem-jobs
+      GOLEM_KUBERNETES: none
+    configs:
+      - source: projects
+        target: /etc/golem/projects.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+configs:
+  registry:
+    content: |
+      discovery: ["user:*"]
+  catalogs:
+    content: |
+      discovery: https://git.example.com/agents/discovery.git#main
+  projects:
+    content: |
+      discovery:
+        project: product/discovery-context
+        target_branch: main
 
 volumes:
   pgdata:
