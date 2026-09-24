@@ -173,3 +173,24 @@ def test_api_server_accepts_the_network_policy(k3s_api_client: ApiClient, namesp
     )
 
     assert len(created.spec.egress) == 6
+
+
+def test_the_termination_message_of_a_finished_run_is_read_back(
+    launcher: KubernetesJobLauncher,
+) -> None:
+    job = busybox_spec(
+        launcher.namespace,
+        'echo \'{"outcome": "invalid", "reasons": ["wrote outside solutions/"]}\''
+        " > /dev/termination-log; exit 2",
+    )
+
+    launcher.launch(job)
+    wait_for(lambda: launcher.status(job.run_id), JobStatus.FAILED)
+
+    message = launcher.termination_message(job.run_id)
+    assert message is not None
+    assert '"outcome": "invalid"' in message
+
+
+def test_an_unknown_run_has_no_termination_message(launcher: KubernetesJobLauncher) -> None:
+    assert launcher.termination_message("no-such-run") is None

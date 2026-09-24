@@ -327,3 +327,19 @@ async def test_a_merge_request_opened_before_a_crash_is_not_opened_twice(
     assert len(gitlab.merge_requests) == 1
     [outcome] = inbox.received
     assert gitlab.merge_requests[0]["web_url"] in outcome.detail
+
+
+async def test_an_idle_run_keeps_the_reasons_from_its_report(
+    runs_db: str, merge_requests: GitLabMergeRequests
+) -> None:
+    board, inbox = StatusBoard(), Inbox()
+    run_id = await new_run(runs_db, "m-1")
+    board.statuses[run_id] = JobStatus.SUCCEEDED
+    board.messages[run_id] = '{"outcome": "idle", "reasons": ["researcher: all pending"]}'
+
+    await reconcile(runs_db, board, inbox, merge_requests)
+
+    [outcome] = inbox.received
+    assert outcome.detail == (
+        f"Run {run_id} succeeded and proposed no changes: researcher: all pending."
+    )

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
-from kubernetes.client import ApiClient, BatchV1Api, V1Job
+from kubernetes.client import ApiClient, BatchV1Api, CoreV1Api, V1Job, V1Pod
 from kubernetes.client.exceptions import ApiException
 
 APP_LABEL = "app.kubernetes.io/name"
@@ -304,6 +304,18 @@ class JobLauncher(Protocol):
 
     def delete(self, run_id: str) -> None: ...
 
+    def termination_message(self, run_id: str) -> str | None: ...
+
+
+def termination_message_of(pods: list[V1Pod]) -> str | None:
+    """The run's report, which the runtime writes to /dev/termination-log before exiting."""
+    for pod in pods:
+        for container in (pod.status and pod.status.container_statuses) or []:
+            terminated = container.state and container.state.terminated
+            if terminated is not None and terminated.message:
+                return terminated.message
+    return None
+
 
 HTTP_NOT_FOUND = 404
 HTTP_CONFLICT = 409
@@ -340,6 +352,12 @@ class KubernetesJobLauncher:
                 return JobStatus.MISSING
             raise
         return job_status_of(job)
+
+    def termination_message(self, run_id: str) -> str | None:
+        pods = CoreV1Api(self.api_client).list_namespaced_pod(
+            self.namespace, label_selector=f"{RUN_ID_LABEL}={run_id}"
+        )
+        return termination_message_of(pods.items)
 
     def delete(self, run_id: str) -> None:
         try:

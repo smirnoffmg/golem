@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 import httpx
 
-from golem.orchestrator.reconcile import SucceededRun
+from golem.orchestrator.reconcile import SucceededRun, idle_detail
 
 BRANCH_PREFIX = "golem"
 
@@ -95,10 +95,6 @@ class GitLabMergeRequests:
         if not response.is_success:
             raise GitLabError(f"{method} {url}: {response.status_code} {response.text[:200]}")
         return response.json()
-
-
-def idle_detail(run_id: str) -> str:
-    return f"Run {run_id} succeeded and proposed no changes."
 
 
 async def propose_merge_request(gitlab: GitLabMergeRequests, run: SucceededRun) -> str:

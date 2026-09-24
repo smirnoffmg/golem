@@ -6,7 +6,7 @@ import pytest
 
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import JobSpec, JobStatus
-from golem.orchestrator.reconcile import TaskOutcome, reconcile_once
+from golem.orchestrator.reconcile import TaskOutcome, outcome_detail, reconcile_once
 from golem.orchestrator.runs import RunCreated, StartRequest, cancel_run_of_task, start_run
 
 LIMITS = Limits(max_runs_per_caller=5, max_runs_per_root=5, budget_per_root=Decimal("100"))
@@ -17,6 +17,7 @@ class StatusBoard:
     """Job statuses as the Kubernetes API would report them; the real launcher runs on k3s."""
 
     statuses: dict[str, JobStatus] = field(default_factory=dict)
+    messages: dict[str, str] = field(default_factory=dict)
 
     def launch(self, spec: JobSpec) -> None: ...
 
@@ -24,6 +25,9 @@ class StatusBoard:
         return self.statuses.get(run_id, JobStatus.RUNNING)
 
     def delete(self, run_id: str) -> None: ...
+
+    def termination_message(self, run_id: str) -> str | None:
+        return self.messages.get(run_id)
 
 
 @dataclass
@@ -191,3 +195,40 @@ async def test_a_canceled_run_is_left_alone(runs_db: str, board: StatusBoard, in
 
     assert await run_status(runs_db, run_id) == "canceled"
     assert inbox.received == []
+
+
+async def test_the_runtime_report_explains_a_failed_run(
+    runs_db: str, board: StatusBoard, inbox: Inbox
+):
+    run_id = await new_run(runs_db, "m-1")
+    board.statuses[run_id] = JobStatus.FAILED
+    board.messages[run_id] = (
+        '{"outcome": "invalid", "reasons": ["solutions/S-9.md is outside hypotheses/"]}'
+    )
+
+    await reconcile(runs_db, board, inbox)
+
+    [outcome] = inbox.received
+    assert "rejected by validation" in outcome.detail
+    assert "solutions/S-9.md is outside hypotheses/" in outcome.detail
+
+
+def test_an_idle_report_says_why_nothing_was_proposed():
+    detail = outcome_detail(
+        "r-1", JobStatus.SUCCEEDED, '{"outcome": "idle", "reasons": ["researcher: all pending"]}'
+    )
+
+    assert detail == "Run r-1 succeeded and proposed no changes: researcher: all pending."
+
+
+def test_a_runner_failure_report_carries_its_summary():
+    detail = outcome_detail(
+        "r-1", JobStatus.FAILED, '{"outcome": "failed", "summary": "model gateway timed out"}'
+    )
+
+    assert detail == "Run r-1 failed: model gateway timed out."
+
+
+def test_an_unreadable_report_falls_back_to_the_job_status():
+    assert outcome_detail("r-1", JobStatus.FAILED, "not json") == "Run r-1 failed."
+    assert outcome_detail("r-1", JobStatus.FAILED, None) == "Run r-1 failed."

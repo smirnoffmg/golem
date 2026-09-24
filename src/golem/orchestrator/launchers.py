@@ -20,6 +20,9 @@ class NoCluster:
     def delete(self, run_id: str) -> None:
         raise RuntimeError(NO_CLUSTER)
 
+    def termination_message(self, run_id: str) -> str | None:
+        raise RuntimeError(NO_CLUSTER)
+
 
 def launcher_for(kubernetes: Kubernetes, namespace: str) -> JobLauncher:
     match kubernetes:

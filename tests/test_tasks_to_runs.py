@@ -46,6 +46,9 @@ class FakeLauncher:
     def delete(self, run_id: str) -> None:
         self.deleted.append(run_id)
 
+    def termination_message(self, run_id: str) -> str | None:
+        return None
+
 
 @pytest.fixture
 def launcher() -> FakeLauncher:
