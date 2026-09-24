@@ -1,8 +1,9 @@
 # Architecture
 
 The intended architecture of Golem in C4 notation: context, containers, and components of the
-four containers that matter most. There is no code level on purpose. Nothing here is deployed
-yet; the diagrams describe what the scaffold is growing toward.
+four containers that matter most. There is no code level on purpose. Nothing here is deployed;
+the run lifecycle is implemented (see the README), the channel adapters, UI and evaluation
+workflow are not.
 
 **Pilot and target on the same diagrams.** Pale elements and dashed relationships are the
 target picture and are not part of the pilot. Everything else is the pilot: entry over A2A,

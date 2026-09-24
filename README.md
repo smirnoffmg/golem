@@ -51,19 +51,30 @@ extension. See [ADR 0005](docs/adr/0005-pilot-and-target.md).
 src/golem/
   catalog.py               agent catalog schema and loading
   runtime/lead.py          the lead: a pure function from a snapshot to the next role command
+  runtime/snapshot.py      records of a context repository (Markdown + front matter) as a snapshot
+  runtime/main.py          one Job = one run: clone, decide, brief, run the role, validate, push
+  runtime/validate.py      checks a role's change before anything leaves the Job
+  runtime/workspace.py     git operations (the token never appears in a URL or command line)
+  runtime/deepagents_runner.py  a role on deepagents: no shell, writes only under its directory
   orchestrator/admission.py  run admission: Job quotas per caller and per root chain
   orchestrator/runs.py       idempotent run start on Postgres (schema.sql)
+  orchestrator/service.py    the task service's orchestrator port: record a run, launch its Job
+  orchestrator/jobs.py       hardened Job manifests, egress NetworkPolicy, the Kubernetes launcher
   orchestrator/reconcile.py  finished Jobs to run outcomes; the task notification outbox
   orchestrator/merge_requests.py  merge requests for succeeded runs (GitLab REST API)
   orchestrator/reconciler.py the reconciler process: a reconcile pass every interval
   settings.py              process settings parsed from the environment
   edge/policy.py           chain policy: allowed calls, depth, cycles, budget
   edge/cards.py            A2A Agent Cards generated from the catalog
-  tasks/                   A2A task service
+  edge/auth.py, audit.py, app.py  the A2A edge: JWT check, audit row, forwarding; fails closed
+  tasks/                   A2A task service: tasks in golem_tasks, run outcomes via an internal route
   adapters/                channel adapters (A2A clients)
 deploy/
   compose.yaml             local Postgres, edge, task service and reconciler
   postgres/init.sql        databases, roles and grants
+examples/
+  discovery/               an example agent catalog: kinds, roles, rules, role instructions
+  context/                 an example context repository the discovery agent works on
 docs/
   architecture.md          C4 diagrams (PlantUML)
   adr/                     architecture decision records
@@ -92,6 +103,27 @@ the edge cannot fetch signing keys, so it serves public agent cards on
 
 Passwords in `deploy/` are placeholders for local development only.
 
+## A run, end to end
+
+1. A client sends an A2A `SendMessage` to the edge with a bearer token and the agent as `tenant`.
+2. The edge verifies the token, checks the chain policy, writes an audit row and forwards the call.
+3. The task service creates the A2A task; the orchestrator records the run once per
+   (caller, message id), admits it within the caller's and the chain's limits and launches a
+   Kubernetes Job.
+4. In the Job, the runtime clones the agent catalog and the context repository, asks the lead
+   for the next role and target, runs the role, validates its change and pushes
+   `golem/<target>/<run>`. The report goes to the pod's termination message.
+5. The reconciler sees the Job finish, opens a merge request for the branch and tells the task
+   service, which completes or fails the task with the reason.
+
+A target stays pending while its proposal branch exists. Merged merge requests delete their
+branch. A merge request closed without merging keeps it on purpose: deleting it would make the
+lead propose the same target again. A rejected proposal is recorded as a status change on the
+record, which is a human decision.
+
 ## Status
 
-Early scaffold, nothing deployed.
+Not deployed. The whole run lifecycle above is implemented and tested: Postgres and Kubernetes
+parts against real Postgres 17 and k3s in testcontainers, git against real repositories, the
+model and GitLab through fakes at their boundaries. Not built yet: channel adapters (Jira,
+Mattermost), a UI, the evaluation workflow on catalog merge requests, and Temporal (target).
