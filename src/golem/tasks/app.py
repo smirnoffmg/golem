@@ -10,7 +10,15 @@ from a2a.server.routes import (
     create_jsonrpc_routes,
 )
 from a2a.server.tasks import InMemoryTaskStore, TaskStore
-from a2a.types.a2a_pb2 import AgentCard, Message, Part, Role, SendMessageRequest
+from a2a.types.a2a_pb2 import (
+    AgentCard,
+    GetTaskRequest,
+    Message,
+    Part,
+    Role,
+    SendMessageRequest,
+    TaskState,
+)
 from a2a.utils.errors import TaskNotFoundError
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -23,6 +31,12 @@ from golem.tasks.ports import Orchestrator, RunOutcome
 RPC_PATH = "/a2a"
 OUTCOME_PATH = "/internal/run-outcome"
 OUTCOME_STATUSES = {"succeeded": True, "failed": False}
+TERMINAL_STATES = {
+    TaskState.TASK_STATE_COMPLETED,
+    TaskState.TASK_STATE_FAILED,
+    TaskState.TASK_STATE_CANCELED,
+    TaskState.TASK_STATE_REJECTED,
+}
 PRINCIPAL_HEADER = "x-golem-principal"
 
 
@@ -73,6 +87,22 @@ def create_app(
             detail=body.get("detail") or f"Run {body['run_id']} {body['status']}.",
         )
         caller = body.get("caller") or ""
+        context = ServerCallContext(
+            user=EdgePrincipal(caller) if caller else UnauthenticatedUser(),
+            tenant=body["tenant"],
+            state={RUN_OUTCOME: outcome},
+        )
+        try:
+            task = await handler.on_get_task(
+                GetTaskRequest(tenant=body["tenant"], id=body["task_id"]), context
+            )
+        except TaskNotFoundError:
+            task = None
+        if task is None:
+            return JSONResponse({"error": "task not found"}, status_code=404)
+        # Outcomes are delivered at least once; a task that already ended stays as it is.
+        if task.status.state in TERMINAL_STATES:
+            return JSONResponse({"task_id": body["task_id"]})
         try:
             await handler.on_message_send(
                 SendMessageRequest(
@@ -84,11 +114,7 @@ def create_app(
                         parts=[Part(text=outcome.detail)],
                     ),
                 ),
-                ServerCallContext(
-                    user=EdgePrincipal(caller) if caller else UnauthenticatedUser(),
-                    tenant=body["tenant"],
-                    state={RUN_OUTCOME: outcome},
-                ),
+                context,
             )
         except TaskNotFoundError:
             return JSONResponse({"error": "task not found"}, status_code=404)

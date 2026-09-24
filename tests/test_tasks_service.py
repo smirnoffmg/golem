@@ -270,3 +270,13 @@ def test_an_outcome_for_an_unknown_task_is_not_found(client: TestClient) -> None
     response = report_outcome(client, {"id": "no-such-task"}, status="succeeded")
 
     assert response.status_code == 404
+
+
+def test_a_repeated_outcome_is_accepted_and_changes_nothing(client: TestClient) -> None:
+    task = send(client, "fix the flaky test")
+    report_outcome(client, task, status="succeeded", detail="MR !42 opened")
+
+    again = report_outcome(client, task, status="succeeded", detail="MR !42 opened")
+
+    assert again.status_code == 200
+    assert get_task(client, task["id"])["status"]["state"] == "TASK_STATE_COMPLETED"
