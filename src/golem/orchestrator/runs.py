@@ -100,6 +100,12 @@ async def cancel_run_of_task(conn: AsyncConnection, task_id: str) -> str | None:
     return None if row is None else str(row[0])
 
 
+async def fail_run(conn: AsyncConnection, run_id: str) -> None:
+    await conn.execute(
+        "UPDATE runs SET status = 'failed' WHERE id = %s AND status = 'running'", (run_id,)
+    )
+
+
 async def _map_task(conn: AsyncConnection, task_id: str, run_id: str) -> None:
     await conn.execute(
         "INSERT INTO run_tasks (task_id, run_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",

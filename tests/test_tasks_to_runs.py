@@ -1,6 +1,7 @@
 """The task service wired to the Postgres-backed orchestrator, end to end over JSON-RPC."""
 
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
@@ -10,16 +11,56 @@ from starlette.testclient import TestClient
 from test_tasks_service import make_card
 
 from golem.orchestrator.admission import Limits
-from golem.orchestrator.service import PostgresOrchestrator
+from golem.orchestrator.jobs import CatalogRef, JobSpec, JobStatus
+from golem.orchestrator.service import JobTemplate, PostgresOrchestrator
 from golem.tasks.app import create_app
+
+CATALOG = CatalogRef(url="https://git.example.com/agents/discovery.git", revision="v1")
+TEMPLATE = JobTemplate(
+    image="registry.example.com/golem/runtime:0.1.0",
+    namespace="team-jobs",
+    secret_name="golem-run-secrets",
+    active_deadline_seconds=3600,
+    ttl_seconds_after_finished=600,
+    cpu="1",
+    memory="1Gi",
+)
+
+
+@dataclass
+class FakeLauncher:
+    """The Kubernetes API is a boundary; the real launcher is tested against k3s."""
+
+    launched: list[JobSpec] = field(default_factory=list)
+    deleted: list[str] = field(default_factory=list)
+    failure: Exception | None = None
+
+    def launch(self, spec: JobSpec) -> None:
+        if self.failure is not None:
+            raise self.failure
+        self.launched.append(spec)
+
+    def status(self, run_id: str) -> JobStatus:
+        return JobStatus.RUNNING
+
+    def delete(self, run_id: str) -> None:
+        self.deleted.append(run_id)
 
 
 @pytest.fixture
-def client(runs_db: str) -> Iterator[TestClient]:
+def launcher() -> FakeLauncher:
+    return FakeLauncher()
+
+
+@pytest.fixture
+def client(runs_db: str, launcher: FakeLauncher) -> Iterator[TestClient]:
     orchestrator = PostgresOrchestrator(
         dsn=runs_db,
         limits=Limits(max_runs_per_caller=1, max_runs_per_root=3, budget_per_root=Decimal("10")),
         estimated_cost=Decimal("1"),
+        launcher=launcher,
+        template=TEMPLATE,
+        catalogs={"discovery": CATALOG},
     )
     with TestClient(create_app(make_card(), orchestrator)) as test_client:
         yield test_client
@@ -35,12 +76,12 @@ def rpc(client: TestClient, method: str, params: dict[str, Any]) -> dict[str, An
     return body["result"]
 
 
-def send(client: TestClient, message_id: str) -> dict[str, Any]:
+def send(client: TestClient, message_id: str, tenant: str = "discovery") -> dict[str, Any]:
     return rpc(
         client,
         "SendMessage",
         {
-            "tenant": "discovery",
+            "tenant": tenant,
             "message": {"role": "ROLE_USER", "messageId": message_id, "parts": [{"text": "go"}]},
         },
     )["task"]
@@ -109,3 +150,53 @@ def test_a_retry_of_a_canceled_run_is_rejected_not_left_working(client: TestClie
     reason = " ".join(p["text"] for p in retry["status"]["message"]["parts"])
     assert task["metadata"]["runId"] in reason
     assert "canceled" in reason
+
+
+def test_a_started_run_launches_its_job(client: TestClient, launcher: FakeLauncher) -> None:
+    task = send(client, "m-1")
+
+    [spec] = launcher.launched
+    assert spec.run_id == task["metadata"]["runId"]
+    assert spec.agent == "discovery"
+    assert spec.catalog_ref == CATALOG
+    assert spec.goal == "go"
+    assert spec.namespace == TEMPLATE.namespace
+
+
+def test_a_retry_relaunches_the_same_job_so_a_crash_before_launch_heals(
+    client: TestClient, launcher: FakeLauncher
+) -> None:
+    send(client, "m-1")
+    send(client, "m-1")
+
+    assert len({spec.run_id for spec in launcher.launched}) == 1
+
+
+def test_an_agent_without_a_catalog_is_rejected_before_any_run(
+    client: TestClient, launcher: FakeLauncher, runs_db: str
+) -> None:
+    task = send(client, "m-1", tenant="unknown")
+
+    assert task["status"]["state"] == "TASK_STATE_REJECTED"
+    assert run_rows(runs_db) == []
+    assert launcher.launched == []
+
+
+def test_a_failed_launch_rejects_the_task_and_fails_the_run(
+    client: TestClient, launcher: FakeLauncher, runs_db: str
+) -> None:
+    launcher.failure = RuntimeError("quota exceeded")
+
+    task = send(client, "m-1")
+
+    assert task["status"]["state"] == "TASK_STATE_REJECTED"
+    assert "quota exceeded" in " ".join(p["text"] for p in task["status"]["message"]["parts"])
+    assert [status for _, status in run_rows(runs_db)] == ["failed"]
+
+
+def test_canceling_the_task_deletes_the_job(client: TestClient, launcher: FakeLauncher) -> None:
+    task = send(client, "m-1")
+
+    rpc(client, "CancelTask", {"id": task["id"], "tenant": "discovery"})
+
+    assert launcher.deleted == [task["metadata"]["runId"]]
