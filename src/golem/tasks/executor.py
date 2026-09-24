@@ -5,9 +5,12 @@ from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
 from a2a.types.a2a_pb2 import TaskState
 
-from golem.tasks.ports import Orchestrator, Refused, RunStart, Started
+from golem.tasks.ports import Orchestrator, Refused, RunOutcome, RunStart, Started
 
 MISSING_AGENT = "no agent named: the request carries no tenant"
+# Set only by the task service's internal outcome route, never from a request body, so a
+# caller cannot finish a task by sending a message that claims the run is done.
+RUN_OUTCOME = "golem.run_outcome"
 
 
 def caller_of(call_context: ServerCallContext) -> str:
@@ -30,6 +33,14 @@ async def reject(updater: TaskUpdater, reason: str) -> None:
     await updater.reject(updater.new_agent_message([new_text_part(reason)]))
 
 
+async def finish(updater: TaskUpdater, outcome: RunOutcome) -> None:
+    message = updater.new_agent_message([new_text_part(outcome.detail)])
+    if outcome.succeeded:
+        await updater.complete(message)
+    else:
+        await updater.failed(message)
+
+
 class RunExecutor(AgentExecutor):
     def __init__(self, orchestrator: Orchestrator) -> None:
         self._orchestrator = orchestrator
@@ -38,6 +49,12 @@ class RunExecutor(AgentExecutor):
         # a2a-sdk calls execute() again for every message sent into an existing task;
         # one task is one run, so a follow-up must never start a second Job.
         if context.current_task is not None:
+            outcome = context.call_context.state.get(RUN_OUTCOME)
+            if isinstance(outcome, RunOutcome):
+                await finish(
+                    TaskUpdater(event_queue, context.task_id or "", context.context_id or ""),
+                    outcome,
+                )
             return
         if context.message is not None:
             await event_queue.enqueue_event(new_task_from_user_message(context.message))

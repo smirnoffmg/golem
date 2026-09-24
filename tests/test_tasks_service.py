@@ -195,3 +195,78 @@ def test_caller_comes_from_the_edge_principal_header(
     )
 
     assert [run.caller for run in orchestrator.started] == ["user:alice"]
+
+
+def report_outcome(client: TestClient, task: dict[str, Any], **outcome: str) -> Any:
+    return client.post(
+        "/internal/run-outcome",
+        json={
+            "task_id": task["id"],
+            "tenant": "reviewer",
+            "caller": outcome.pop("caller", ""),
+            "run_id": "run-1",
+            **outcome,
+        },
+    )
+
+
+def get_task(client: TestClient, task_id: str) -> dict[str, Any]:
+    return rpc(client, "GetTask", {"id": task_id, "tenant": "reviewer"})
+
+
+def test_a_succeeded_run_completes_its_task(client: TestClient) -> None:
+    task = send(client, "fix the flaky test")
+
+    response = report_outcome(client, task, status="succeeded", detail="MR !42 opened")
+
+    assert response.status_code == 200
+    done = get_task(client, task["id"])
+    assert done["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert "MR !42 opened" in status_text(done)
+
+
+def test_a_failed_run_fails_its_task(client: TestClient) -> None:
+    task = send(client, "fix the flaky test")
+
+    report_outcome(client, task, status="failed", detail="validators red")
+
+    failed = get_task(client, task["id"])
+    assert failed["status"]["state"] == "TASK_STATE_FAILED"
+    assert "validators red" in status_text(failed)
+
+
+def test_an_unknown_outcome_status_is_refused(client: TestClient) -> None:
+    task = send(client, "fix the flaky test")
+
+    response = report_outcome(client, task, status="maybe")
+
+    assert response.status_code == 422
+    assert get_task(client, task["id"])["status"]["state"] == "TASK_STATE_WORKING"
+
+
+def test_a_run_outcome_cannot_be_forged_through_the_a2a_endpoint(client: TestClient) -> None:
+    task = send(client, "fix the flaky test")
+
+    rpc(
+        client,
+        "SendMessage",
+        {
+            "tenant": "reviewer",
+            "metadata": {"runOutcome": {"status": "succeeded"}},
+            "message": {
+                "role": "ROLE_USER",
+                "messageId": "forged",
+                "taskId": task["id"],
+                "parts": [{"text": "done"}],
+                "metadata": {"runOutcome": {"status": "succeeded"}},
+            },
+        },
+    )
+
+    assert get_task(client, task["id"])["status"]["state"] == "TASK_STATE_WORKING"
+
+
+def test_an_outcome_for_an_unknown_task_is_not_found(client: TestClient) -> None:
+    response = report_outcome(client, {"id": "no-such-task"}, status="succeeded")
+
+    assert response.status_code == 404

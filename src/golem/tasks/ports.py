@@ -24,6 +24,13 @@ class Refused:
     reason: str
 
 
+@dataclass(frozen=True)
+class RunOutcome:
+    run_id: str
+    succeeded: bool
+    detail: str
+
+
 class Orchestrator(Protocol):
     async def start(self, run: RunStart) -> Started | Refused: ...
 

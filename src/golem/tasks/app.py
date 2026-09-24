@@ -1,7 +1,8 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from a2a.auth.user import User
+from a2a.auth.user import UnauthenticatedUser, User
+from a2a.server.context import ServerCallContext
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import (
     DefaultServerCallContextBuilder,
@@ -9,14 +10,19 @@ from a2a.server.routes import (
     create_jsonrpc_routes,
 )
 from a2a.server.tasks import InMemoryTaskStore, TaskStore
-from a2a.types.a2a_pb2 import AgentCard
+from a2a.types.a2a_pb2 import AgentCard, Message, Part, Role, SendMessageRequest
+from a2a.utils.errors import TaskNotFoundError
 from starlette.applications import Starlette
 from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 
-from golem.tasks.executor import RunExecutor
-from golem.tasks.ports import Orchestrator
+from golem.tasks.executor import RUN_OUTCOME, RunExecutor
+from golem.tasks.ports import Orchestrator, RunOutcome
 
 RPC_PATH = "/a2a"
+OUTCOME_PATH = "/internal/run-outcome"
+OUTCOME_STATUSES = {"succeeded": True, "failed": False}
 PRINCIPAL_HEADER = "x-golem-principal"
 
 
@@ -57,8 +63,40 @@ def create_app(
         yield
         await handler.aclose()
 
+    async def run_outcome(request: Request) -> Response:
+        body = await request.json()
+        if body.get("status") not in OUTCOME_STATUSES:
+            return JSONResponse({"error": "status must be succeeded or failed"}, status_code=422)
+        outcome = RunOutcome(
+            run_id=body["run_id"],
+            succeeded=OUTCOME_STATUSES[body["status"]],
+            detail=body.get("detail") or f"Run {body['run_id']} {body['status']}.",
+        )
+        caller = body.get("caller") or ""
+        try:
+            await handler.on_message_send(
+                SendMessageRequest(
+                    tenant=body["tenant"],
+                    message=Message(
+                        message_id=f"run-outcome-{outcome.run_id}-{body['task_id']}",
+                        task_id=body["task_id"],
+                        role=Role.ROLE_USER,
+                        parts=[Part(text=outcome.detail)],
+                    ),
+                ),
+                ServerCallContext(
+                    user=EdgePrincipal(caller) if caller else UnauthenticatedUser(),
+                    tenant=body["tenant"],
+                    state={RUN_OUTCOME: outcome},
+                ),
+            )
+        except TaskNotFoundError:
+            return JSONResponse({"error": "task not found"}, status_code=404)
+        return JSONResponse({"task_id": body["task_id"]})
+
     return Starlette(
         routes=create_agent_card_routes(card)
-        + create_jsonrpc_routes(handler, RPC_PATH, EdgeContextBuilder()),
+        + create_jsonrpc_routes(handler, RPC_PATH, EdgeContextBuilder())
+        + [Route(OUTCOME_PATH, run_outcome, methods=["POST"])],
         lifespan=lifespan,
     )
