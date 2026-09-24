@@ -166,3 +166,24 @@ def test_baseline_from_a_missing_or_malformed_report_exits_two(tmp_path):
 
     assert (missing.code, malformed.code) == (2, 2)
     assert "not an evaluation report" in malformed.err
+
+
+def test_the_production_runner_gets_the_platform_tools_from_the_environment(tmp_path) -> None:
+    from golem.evaluation.cli import deepagents_runner
+
+    registry = tmp_path / "mcp-registry.yaml"
+    registry.write_text(
+        "tracker.read:\n  url: http://mcp-tracker.test/mcp\n  tools: [get_issue]\n"
+    )
+    runner = deepagents_runner(
+        {
+            "GOLEM_MODEL_GATEWAY_URL": "http://gateway.test/v1",
+            "GOLEM_MODEL_KEY": "k",
+            "GOLEM_MODEL": "m",
+            "GOLEM_MCP_REGISTRY": str(registry),
+            "GOLEM_RUN_TOKEN": "run-token",
+        }
+    )
+
+    assert [group.name for group in runner.toolbox.registry.groups] == ["tracker.read"]
+    assert runner.toolbox.run_token == "run-token"

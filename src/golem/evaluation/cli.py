@@ -38,8 +38,10 @@ def deepagents_runner(environ: Mapping[str, str]) -> RoleRunner:
         raise ConfigError(f"missing model gateway settings: {', '.join(missing)}")
     # Imported here so that `baseline` and the tests do not load the agent stack.
     from golem.runtime.deepagents_runner import DeepAgentsRunner, gateway_model
+    from golem.runtime.tools import toolbox_from_env
 
-    return DeepAgentsRunner(model=gateway_model(environ))
+    # The same tools as in production: a role that names tools fails closed without them.
+    return DeepAgentsRunner(model=gateway_model(environ), toolbox=toolbox_from_env(environ))
 
 
 def parser() -> argparse.ArgumentParser:
