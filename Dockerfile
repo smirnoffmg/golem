@@ -8,6 +8,11 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=0
 
+# The runtime Job and the evaluation CI job drive the git CLI.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -23,4 +28,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN groupadd --system golem && useradd --system --gid golem --no-create-home golem
 USER golem
 
-ENV PATH="/app/.venv/bin:$PATH"
+# The Job's root filesystem is read-only; git and caches need a writable home.
+ENV PATH="/app/.venv/bin:$PATH" \
+    HOME=/tmp
