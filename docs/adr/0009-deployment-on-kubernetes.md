@@ -34,6 +34,15 @@ Sources:
   controller library", on unless `--disable-network-policy`; the tests rely on it.
 - External Secrets Operator, <https://external-secrets.io/latest/api/externalsecret/>:
   `ExternalSecret` is `external-secrets.io/v1`.
+- *Threat Modeling* (Shostack), с. 50 (PDF 86): when a trust boundary crosses an element rather
+  than a data flow, "break that element into two". The task service was one element behind one
+  port, crossed by three boundaries (the edge, the MCP servers, the reconciler).
+- *Mastering API Architecture*, с. 221 (PDF 259): "Platform security underpins any assumptions
+  that you make at the application level"; the task service's edge token is an application
+  check that does not rest on the NetworkPolicy alone.
+- uvicorn 0.53 (`uvicorn/server.py`): `Server.serve` wraps itself in `capture_signals`, which
+  replaces the SIGINT and SIGTERM handlers with `signal.signal` and restores the previous ones
+  on return.
 
 ## Decision
 
@@ -73,14 +82,39 @@ surface:
 | Process | Ingress from | Egress to |
 | --- | --- | --- |
 | edge | the ingress controller's namespace, runs, the Jira adapter | task service, Postgres, identity provider |
-| tasks | edge, reconciler, MCP servers | Jira adapter (push), Postgres, Kubernetes API |
-| reconciler | nothing | task service, Postgres, Kubernetes API, GitLab |
+| tasks | edge (`a2a`), MCP servers (`internal-read`), reconciler (`internal-write`) | Jira adapter (push), Postgres, Kubernetes API |
+| reconciler | nothing | task service (`internal-write`), Postgres, Kubernetes API, GitLab |
 | jira-adapter | the ingress controller's namespace, task service | edge, identity provider, Jira |
-| MCP servers | runs only | task service, Postgres, Jira and Confluence |
+| MCP servers | runs only | task service (`internal-read`), Postgres, Jira and Confluence |
 
 The Jira adapter calls only the edge, so it has no ingress to the task service. The Kubernetes
 API is reached by its endpoint address, not the `kubernetes` Service's ClusterIP, because
 policies see traffic after the Service address is translated.
+
+**The task service has one listener per kind of caller.** NetworkPolicy admits a caller to an
+address and port, never to a path, so behind one port the MCP servers and the reconciler could
+reach `/a2a` too, where the task service trusts the edge's principal header, and the MCP
+servers could post run outcomes. The process now serves three Starlette apps on three ports,
+each with only its routes (any other path is a 404):
+
+| Port | Name | Routes | Admitted |
+| --- | --- | --- | --- |
+| 8000 | `a2a` | agent card, `/a2a` | the edge |
+| 8001 | `internal-read` | `GET /internal/run-keys`, `GET /internal/runs/{run_id}` | the MCP servers |
+| 8002 | `internal-write` | `POST /internal/run-outcome` | the reconciler |
+
+The public and write apps share one A2A request handler, so an outcome reaches the task that
+`/a2a` created. Three `uvicorn.Server`s run in one event loop under `asyncio.gather`; their
+`capture_signals` is a no-op, and one loop signal handler stops all three, as does any one of
+them stopping, so a half-served process never lingers. Three processes were rejected: the
+in-memory state of a live task (ADR 0002) would have to be shared across them.
+
+On top of the policy, the `a2a` port authenticates the edge: every request must carry
+`X-Golem-Edge-Token` equal to `GOLEM_EDGE_TOKEN` (constant-time comparison), a secret only the
+edge and the task service hold; anything else is a 401 with a JSON-RPC error, before the
+principal header is read. The edge builds its forwarded headers from nothing, so a client's own
+`X-Golem-Edge-Token` or `X-Golem-Principal` never passes. A missing or misapplied policy then
+no longer lets a pod in the namespace act as any principal.
 
 **The manifests are the source of truth for network policy.** `build_network_policy` and its
 types (`EgressAllowList`, `Destination`, `InCluster`, `Cidr`) are removed from `jobs.py`. They
@@ -109,14 +143,20 @@ URLs are `example.com`. The image is `golem`, overridden with kustomize `images`
   every pod template passes `restricted` and an unhardened pod does not, `SubjectAccessReview`
   answers the RBAC table, and real traffic shows a run reaching an MCP server by its Service name
   and resolving names, but not a Postgres listener in `golem-system` nor another run; a pod
-  wearing the run label outside `golem-jobs` cannot reach the MCP server either.
-  `tests/test_k8s_render.py` runs every process's settings parser over the environment the
+  wearing the run label outside `golem-jobs` cannot reach the MCP server either. Stand-ins for
+  the edge, an MCP server and the reconciler each reach their own task service port through the
+  `tasks` Service and are blocked on the other two. `tests/test_k8s_render.py` runs every process's settings parser over the environment the
   manifests give it.
-- NetworkPolicy works on addresses and ports, not paths. The MCP servers and the reconciler can
-  reach the task service for `/internal/*`, and with that they reach `/a2a` too, where the task
-  service trusts the edge's principal header. A compromised MCP server could start runs as any
-  principal. Closing that needs the internal routes on a separate port, or the task service
-  authenticating the edge; until then it is a known gap.
+- The gap of the first version is closed: behind one port, a compromised MCP server could start
+  runs as any principal through `/a2a` and forge run outcomes. Now it reaches only run keys and
+  run status, and the reconciler only run outcomes. The reconciler's port still trusts what it
+  is told: a compromised reconciler can complete or fail any task, which is its job.
+- `GOLEM_EDGE_TOKEN` is one more Secret key, shared by two Deployments; rotating it means
+  changing both and restarting both, with a short window of refused forwards. It proves only
+  that the caller holds the secret, not that it is the edge pod; a leaked token plus a policy
+  gap would again allow forged principals.
+- The task service's probes read the run keys on `internal-read`: they show the process and its
+  loop are alive, not the `a2a` listener itself, which answers only to the edge.
 - SaaS endpoints change addresses, and an `ipBlock` cannot name a host: such destinations need an
   egress proxy with a fixed address or a CNI with DNS-based policies.
 - The External Secrets Operator's controller can create Secrets in both namespaces; its store's

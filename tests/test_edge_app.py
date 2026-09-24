@@ -12,8 +12,9 @@ from test_tasks_service import FakeOrchestrator, make_card
 from golem.edge.app import AUDIT_UNAVAILABLE, CALL_DENIED, UNAUTHENTICATED, create_edge_app
 from golem.edge.auth import AuthFailure, Principal
 from golem.edge.policy import ChainLimits, Registry
-from golem.tasks.app import create_app
+from golem.tasks.app import create_listeners
 
+EDGE_TOKEN = "edge-shared-secret"
 UNREACHABLE_DSN = "host=127.0.0.1 port=1 dbname=golem_audit user=golem_edge connect_timeout=1"
 
 TOKENS = {
@@ -61,7 +62,7 @@ class TaskService:
     received: list[dict[str, str]] = field(default_factory=list)
 
     def app(self) -> ASGIApp:
-        inner = create_app(make_card(), self.orchestrator)
+        inner = create_listeners(make_card(), self.orchestrator, edge_token=EDGE_TOKEN).public
 
         async def recording(scope: Scope, receive: Receive, send: Send) -> None:
             if scope["type"] == "http":
@@ -86,6 +87,7 @@ def edge_client(tasks: TaskService, audit_dsn: str) -> httpx.AsyncClient:
         limits=ChainLimits(max_depth=3),
         audit_dsn=audit_dsn,
         forward=forward,
+        edge_token=EDGE_TOKEN,
         cards={"discovery": discovery_card()},
     )
     return httpx.AsyncClient(
@@ -168,6 +170,39 @@ async def test_forwarded_request_names_the_principal_and_passes_the_version(
     assert headers["a2a-version"] == "1.0"
     assert "authorization" not in headers
     assert "cookie" not in headers
+
+
+async def test_forwarded_request_carries_the_edge_token_and_never_the_clients_one(
+    edge: httpx.AsyncClient, tasks: TaskService
+) -> None:
+    response = await call(edge, send_message(), extra_headers={"X-Golem-Edge-Token": "forged"})
+
+    [headers] = tasks.received
+    assert headers["x-golem-edge-token"] == EDGE_TOKEN
+    assert response.json()["result"]["task"]["status"]["state"] == "TASK_STATE_WORKING"
+
+
+async def test_an_edge_with_the_wrong_token_starts_no_run(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    edge = create_edge_app(
+        authenticate=authenticate,
+        registry=REGISTRY,
+        limits=ChainLimits(max_depth=3),
+        audit_dsn=audit_dsn,
+        forward=httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=tasks.app()), base_url="http://tasks"
+        ),
+        edge_token="not-the-task-services",
+        cards={},
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=edge), base_url="http://edge"
+    ) as client:
+        response = await call(client, send_message())
+
+    assert response.status_code == 401
+    assert tasks.orchestrator.started == []
 
 
 async def test_trace_context_is_forwarded_so_the_run_joins_the_callers_trace(
@@ -382,6 +417,7 @@ async def test_unreachable_task_service_is_an_internal_error(
         limits=ChainLimits(max_depth=3),
         audit_dsn=audit_dsn,
         forward=httpx.AsyncClient(transport=httpx.MockTransport(refuse), base_url="http://tasks"),
+        edge_token=EDGE_TOKEN,
         cards={},
     )
     async with httpx.AsyncClient(

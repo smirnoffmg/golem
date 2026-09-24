@@ -18,7 +18,7 @@ import psycopg
 import pytest
 import uvicorn
 from starlette.types import ASGIApp
-from test_tasks_service import make_card
+from test_tasks_service import read_listener
 from test_tasks_to_runs import CATALOG, TEMPLATE, FakeLauncher
 
 from golem.adapters.jira import jira_authorization
@@ -42,7 +42,6 @@ from golem.runtime.tools import (
     describe,
     load_group,
 )
-from golem.tasks.app import create_app
 
 KEY = SigningKey.generate(kid="run-key-1")
 JIRA = "https://jira.example.test"
@@ -133,7 +132,7 @@ def tasks_url(runs_db: str) -> Iterator[str]:
         signing_key=KEY,
         grants={"discovery": ("tracker.read",)},
     )
-    with serve(create_app(make_card(), orchestrator, run_keys=(KEY,))) as url:
+    with serve(read_listener(orchestrator, (KEY,))) as url:
         yield url
 
 
@@ -468,7 +467,7 @@ async def test_without_run_status_every_call_is_refused(
     )
 
     with (
-        serve(create_app(make_card(), orchestrator, run_keys=(KEY,))) as broken_tasks,
+        serve(read_listener(orchestrator, (KEY,))) as broken_tasks,
         serve(mcp_app(broken_tasks, mcp_audit_dsn, jira)) as url,
     ):
         response = await mcp_post(f"{url}/mcp", LIST_TOOLS, token=token_for(run))

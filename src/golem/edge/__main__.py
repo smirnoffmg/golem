@@ -60,6 +60,7 @@ def build_app(settings: EdgeSettings, jwks_client: httpx.Client) -> Starlette:
         forward=httpx.AsyncClient(
             base_url=settings.task_service_url, timeout=FORWARD_TIMEOUT_SECONDS
         ),
+        edge_token=settings.edge_token,
         cards=load_public_cards(
             settings.catalogs_dir,
             base_url=settings.public_base_url,

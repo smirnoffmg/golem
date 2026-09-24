@@ -6,10 +6,9 @@ from typing import Any
 import httpx
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
-from test_tasks_service import FakeOrchestrator, make_card
+from test_tasks_service import FakeOrchestrator, create_app, make_card
 from testcontainers.community.postgres import PostgresContainer
 
-from golem.tasks.app import create_app
 from golem.tasks.store import tasks_engine, tasks_store
 
 

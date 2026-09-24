@@ -21,6 +21,7 @@ from golem.edge.policy import Call, ChainLimits, Deny, Registry, evaluate
 
 RPC_PATH = "/a2a"
 PRINCIPAL_HEADER = "X-Golem-Principal"
+EDGE_TOKEN_HEADER = "X-Golem-Edge-Token"
 FORWARDED_METHODS = frozenset({"SendMessage", "GetTask", "CancelTask"})
 AUDIT_CONNECT_TIMEOUT_SECONDS = 2
 
@@ -116,8 +117,14 @@ def trace_headers(request: Request) -> dict[str, str]:
     return headers
 
 
-def forward_headers(request: Request, principal: Principal) -> dict[str, str]:
-    headers = {"Content-Type": "application/json", PRINCIPAL_HEADER: principal.name}
+def forward_headers(request: Request, principal: Principal, edge_token: str) -> dict[str, str]:
+    # Built from nothing, so a client's own principal or edge token header never reaches the
+    # task service.
+    headers = {
+        "Content-Type": "application/json",
+        PRINCIPAL_HEADER: principal.name,
+        EDGE_TOKEN_HEADER: edge_token,
+    }
     version = request.headers.get(VERSION_HEADER)
     if version is not None:
         headers[VERSION_HEADER] = version
@@ -152,6 +159,7 @@ def create_edge_app(
     limits: ChainLimits,
     audit_dsn: str,
     forward: httpx.AsyncClient,
+    edge_token: str,
     cards: Mapping[str, AgentCard],
 ) -> Starlette:
     async def audited(request: Request, principal: Principal, call: RpcCall | Rejected) -> bool:
@@ -192,7 +200,7 @@ def create_edge_app(
             return rpc_error(call.id, call.refusal)
         try:
             upstream = await forward.post(
-                RPC_PATH, content=body, headers=forward_headers(request, principal)
+                RPC_PATH, content=body, headers=forward_headers(request, principal, edge_token)
             )
         except httpx.HTTPError:
             return rpc_error(call.id, Refusal(INTERNAL_ERROR, "task service unavailable"))

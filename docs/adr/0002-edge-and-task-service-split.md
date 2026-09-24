@@ -46,6 +46,10 @@ breakers and bulkheads are the countermeasures (*Release It!*, 1st ed., p. 43).
   what an agent does or what state a task is in.
 - Clients retry, so run start must be idempotent: a retried request with the same message id
   creates a new A2A task, and the orchestrator deduplicates by (caller, message id).
+- The task service serves A2A only on a port of its own, and only to requests that carry the
+  edge's shared secret (`GOLEM_EDGE_TOKEN`); its internal routes for the MCP servers and the
+  reconciler are on two more listeners in the same process (ADR 0009). The principal header is
+  trusted only on that port, only with that secret.
 - The task service scales behind a shared task store: cancel works from any replica. Only
   streaming subscription is bound to the replica holding the live task, and Golem does not
   offer streaming.

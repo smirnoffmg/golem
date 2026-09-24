@@ -8,7 +8,7 @@ import httpx
 import psycopg
 import pytest
 from test_reconcile import StatusBoard
-from test_tasks_service import make_card
+from test_tasks_service import create_app, make_card
 from test_tasks_to_runs import CATALOG, GRANTS, SIGNING_KEY, TEMPLATE
 
 from golem.orchestrator.admission import Limits
@@ -16,7 +16,6 @@ from golem.orchestrator.jobs import JobStatus
 from golem.orchestrator.notify import TaskServiceNotifier
 from golem.orchestrator.reconcile import TaskOutcome, reconcile_once
 from golem.orchestrator.service import PostgresOrchestrator
-from golem.tasks.app import create_app
 
 
 @pytest.fixture

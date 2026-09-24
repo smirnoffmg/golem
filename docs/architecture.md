@@ -191,7 +191,7 @@ Rel(adapters, atlassian, "comment with the outcome", "Jira REST API v2")
 
 Rel(edge, keycloak, "token validation and exchange", "OIDC, RFC 8693")
 Rel(edge, gitlab, "catalogs for cards; call registry", "cached")
-Rel(edge, tasks, "authorized request with a hop token", "A2A")
+Rel(edge, tasks, "authorized request with a hop token and the edge token", "A2A, a2a port")
 Rel(edge, audit, "every call")
 Rel(tasks, db_tasks, "tasks")
 Rel(tasks, orch, "task to run; cancel; human answer")
@@ -211,7 +211,7 @@ Rel(job, langfuse, "traces; golden sets and evaluation results", "OTLP, API")
 Rel(mcp, atlassian, "read")
 Rel(mcp, gitlab, "read")
 Rel(mcp, audit, "every decision", "INSERT as golem_mcp")
-Rel(mcp, tasks, "run signing keys; run status", "internal HTTP")
+Rel(mcp, tasks, "run signing keys; run status", "internal HTTP, read port")
 Rel(vault, mcp, "secrets")
 Rel(vault, job, "gateway key, branch token", "secrets operator")
 
@@ -282,7 +282,9 @@ Rel(auditor, audit, "insert")
 
 The A2A task lifecycle. An A2A task is the run: task states map onto run states, the result
 comes back as a task artifact, and long runs answer with a push notification. The task service
-is reachable only from the edge. In the pilot the human answer is an accepted merge request: an
+takes A2A only from the edge, on a port of its own that also wants the edge's shared secret;
+the MCP servers (run keys, run status) and the reconciler (run outcomes) each reach a separate
+listener serving only their routes ([ADR 0009](adr/0009-deployment-on-kubernetes.md)). In the pilot the human answer is an accepted merge request: an
 adapter receives the webhook and sends a continuation as an ordinary A2A message in the same
 task.
 

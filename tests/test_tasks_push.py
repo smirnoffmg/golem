@@ -6,9 +6,9 @@ from typing import Any
 import httpx
 import pytest
 from a2a.server.tasks import InMemoryPushNotificationConfigStore
-from test_tasks_service import FakeOrchestrator, make_card
+from test_tasks_service import FakeOrchestrator, create_app, make_card
 
-from golem.tasks.app import PushDelivery, create_app
+from golem.tasks.app import PushDelivery
 
 ADAPTER = "http://adapter.golem.svc:8080"
 

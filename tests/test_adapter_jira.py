@@ -15,7 +15,7 @@ import jwt
 import pytest
 from a2a.types.a2a_pb2 import SendMessageRequest
 from google.protobuf.json_format import ParseDict
-from test_edge_app import TaskService, discovery_card
+from test_edge_app import EDGE_TOKEN, TaskService, discovery_card
 from test_edge_auth import AUDIENCE, ISSUER, RSA_KEY, claims
 from test_edge_jwks import jwk
 
@@ -810,6 +810,7 @@ async def test_label_starts_a_task_through_the_real_edge_as_the_service_account(
         forward=httpx.AsyncClient(
             transport=httpx.ASGITransport(app=tasks.app()), base_url="http://tasks"
         ),
+        edge_token=EDGE_TOKEN,
         cards={"discovery": discovery_card()},
     )
     adapter_app = create_jira_adapter_app(

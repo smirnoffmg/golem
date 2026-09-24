@@ -41,6 +41,7 @@ services:
       GOLEM_MAX_CHAIN_DEPTH: "4"
       GOLEM_AUDIT_DSN: host=postgres dbname=golem_audit user=golem_edge password=dev-only-golem-edge
       GOLEM_TASK_SERVICE_URL: http://tasks:8000
+      GOLEM_EDGE_TOKEN: &edge-token dev-only-edge-token
       GOLEM_CATALOGS_DIR: /app/examples
       GOLEM_PUBLIC_BASE_URL: http://127.0.0.1:${GOLEM_EDGE_PORT:-8480}
     configs:
@@ -91,6 +92,7 @@ services:
       GOLEM_KUBERNETES_NAMESPACE: golem-jobs
       GOLEM_KUBERNETES: none
       GOLEM_PUBLIC_BASE_URL: http://127.0.0.1:${GOLEM_EDGE_PORT:-8480}
+      GOLEM_EDGE_TOKEN: *edge-token
     configs:
       - source: catalogs
         target: /etc/golem/catalogs.yaml
@@ -106,7 +108,8 @@ services:
     environment:
       GOLEM_RUNS_DSN: *runs-dsn
       GOLEM_RECONCILE_INTERVAL_SECONDS: "5"
-      GOLEM_TASK_SERVICE_URL: http://tasks:8000
+      # The task service's internal-write port: run outcomes only.
+      GOLEM_TASK_SERVICE_URL: http://tasks:8002
       GOLEM_GITLAB_URL: http://gitlab.invalid
       GOLEM_GITLAB_TOKEN: dev-only-no-gitlab
       GOLEM_GITLAB_PROJECTS_FILE: /etc/golem/projects.yaml

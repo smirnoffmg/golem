@@ -9,13 +9,12 @@ import jwt
 import psycopg
 import pytest
 from starlette.testclient import TestClient
-from test_tasks_service import make_card
+from test_tasks_service import create_app, make_card
 
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef, JobSpec, JobStatus
 from golem.orchestrator.service import JobTemplate, PostgresOrchestrator
 from golem.run_token import RunClaims, SigningKey, public_jwks, verify
-from golem.tasks.app import create_app
 
 CATALOG = CatalogRef(url="https://git.example.com/agents/discovery.git", revision="v1")
 TEMPLATE = JobTemplate(

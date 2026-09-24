@@ -14,6 +14,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcess
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind, StatusCode
 from starlette.testclient import TestClient
+from test_tasks_service import create_app
 
 from golem.catalog import Role
 from golem.orchestrator.jobs import CatalogRef, build_job_manifest
@@ -28,7 +29,6 @@ from golem.runtime.tracing import (
     exporter_settings,
     traced_main,
 )
-from golem.tasks.app import create_app
 from golem.tasks.ports import Refused, RunStart, Started
 
 TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"

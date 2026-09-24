@@ -88,8 +88,9 @@ spec:
         - protocol: TCP
           port: 443
 ---
-# Not reachable from outside (ADR 0002). /internal/* serves the reconciler (run outcomes) and
-# the MCP servers (run keys, run status).
+# Not reachable from outside (ADR 0002). Policies work on ports, not paths, so each caller is
+# admitted to its own listener only (ADR 0009): the edge to A2A, the MCP servers to run keys
+# and run status, the reconciler to run outcomes.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -105,15 +106,23 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-edge
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: golem-reconciler
+      ports:
+        - protocol: TCP
+          port: 8000
+    - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-mcp
       ports:
         - protocol: TCP
-          port: 8000
+          port: 8001
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-reconciler
+      ports:
+        - protocol: TCP
+          port: 8002
   egress:
     # Push notifications.
     - to:
@@ -158,7 +167,7 @@ spec:
               app.kubernetes.io/name: golem-tasks
       ports:
         - protocol: TCP
-          port: 8000
+          port: 8002
     # Placeholder: Postgres (golem_runs).
     - to:
         - ipBlock:
@@ -263,7 +272,7 @@ spec:
               app.kubernetes.io/name: golem-tasks
       ports:
         - protocol: TCP
-          port: 8000
+          port: 8001
     # Placeholder: Postgres (golem_audit).
     - to:
         - ipBlock:

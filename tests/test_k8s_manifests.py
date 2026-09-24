@@ -182,7 +182,7 @@ def test_service_accounts_can_do_exactly_what_their_process_needs(
 
 
 def hardened_pod(
-    name: str, labels: dict[str, str], script: str, *, listen: int | None = None
+    name: str, labels: dict[str, str], script: str, *, listen: dict[str, int] | None = None
 ) -> dict:
     """A busybox pod that the ``restricted`` Pod Security Standard admits."""
     spec: dict = {
@@ -200,15 +200,13 @@ def hardened_pod(
         },
         "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}],
     }
-    if listen is not None:
-        # Named like the real containers' port: the Services target it by name.
-        spec["ports"] = [{"name": "http", "containerPort": listen}]
-        # Probed from inside the pod: Ready means the listener works, so a blocked connection
+    if listen:
+        # Named like the real containers' ports: the Services target them by name.
+        spec["ports"] = [{"name": n, "containerPort": port} for n, port in listen.items()]
+        # Probed from inside the pod: Ready means every listener works, so a blocked connection
         # is the policy's doing, not a server that never came up.
-        spec["readinessProbe"] = {
-            "exec": {"command": ["wget", "-q", "-O-", f"http://127.0.0.1:{listen}/"]},
-            "periodSeconds": 1,
-        }
+        probe = " && ".join(f"wget -q -O- http://127.0.0.1:{port}/" for port in listen.values())
+        spec["readinessProbe"] = {"exec": {"command": ["sh", "-c", probe]}, "periodSeconds": 1}
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -228,11 +226,16 @@ def hardened_pod(
     }
 
 
-def http_server(name: str, labels: dict[str, str], port: int) -> dict:
-    script = (
-        f"mkdir -p /tmp/www && echo {name} > /tmp/www/index.html && httpd -f -p {port} -h /tmp/www"
+def http_server(name: str, labels: dict[str, str], ports: dict[str, int]) -> dict:
+    *background, foreground = ports.values()
+    script = "; ".join(
+        [
+            f"mkdir -p /tmp/www && echo {name} > /tmp/www/index.html",
+            *(f"httpd -p {port} -h /tmp/www" for port in background),
+            f"httpd -f -p {foreground} -h /tmp/www",
+        ]
     )
-    return hardened_pod(name, labels, script, listen=port)
+    return hardened_pod(name, labels, script, listen=ports)
 
 
 def pod_state(core: CoreV1Api, namespace: str) -> str:
@@ -294,9 +297,14 @@ def traffic(deployed: list[dict], k3s_api_client: ApiClient) -> dict[str, str]:
     """Stand-ins for the MCP server, Postgres and another run; a run pod tries all three."""
     core = CoreV1Api(k3s_api_client)
     servers = [
-        (SYSTEM, http_server("stand-in-mcp", MCP_TRACKER_LABELS, 8000)),
-        (SYSTEM, http_server("stand-in-postgres", {APP_LABEL: "postgres"}, 5432)),
-        (JOBS, http_server("other-run", {APP_LABEL: APP_NAME, "golem.dev/run-id": "other"}, 8000)),
+        (SYSTEM, http_server("stand-in-mcp", MCP_TRACKER_LABELS, {"http": 8000})),
+        (SYSTEM, http_server("stand-in-postgres", {APP_LABEL: "postgres"}, {"http": 5432})),
+        (
+            JOBS,
+            http_server(
+                "other-run", {APP_LABEL: APP_NAME, "golem.dev/run-id": "other"}, {"http": 8000}
+            ),
+        ),
     ]
     for namespace, pod in servers:
         core.create_namespaced_pod(namespace, pod)
@@ -360,3 +368,56 @@ def test_a_pod_outside_golem_jobs_cannot_reach_the_mcp_server(
     finally:
         core.delete_namespace(namespace)
     assert "mcp=blocked" in log, log
+
+
+# --- The task service's ports, with real traffic ------------------------------------------------
+
+TASK_SERVICE_PORTS = {"a2a": 8000, "internal-read": 8001, "internal-write": 8002}
+# Each caller of the task service, and the one port it must reach; the other two must be
+# blocked. The reached port is tried first (see attempt()).
+CALLERS = {
+    "edge": ({APP_LABEL: "golem-edge"}, "a2a"),
+    "mcp": (MCP_TRACKER_LABELS, "internal-read"),
+    "reconciler": ({APP_LABEL: "golem-reconciler"}, "internal-write"),
+}
+
+
+@pytest.fixture(scope="module")
+def task_service_traffic(deployed: list[dict], k3s_api_client: ApiClient) -> dict[str, str]:
+    """A task service stand-in on its three ports; a stand-in of each caller tries all three."""
+    core = CoreV1Api(k3s_api_client)
+    tasks = http_server("stand-in-tasks", {APP_LABEL: "golem-tasks"}, TASK_SERVICE_PORTS)
+    core.create_namespaced_pod(SYSTEM, tasks)
+    wait_until(core, SYSTEM, "stand-in-tasks", is_ready)
+    for caller, (labels, allowed_port) in CALLERS.items():
+        ordered = [allowed_port, *(p for p in TASK_SERVICE_PORTS if p != allowed_port)]
+        script = "; ".join(
+            reach(
+                f"{caller}_{port.replace('-', '_')}",
+                f"http://tasks.{SYSTEM}.svc:{TASK_SERVICE_PORTS[port]}/",
+            )
+            for port in ordered
+        )
+        core.create_namespaced_pod(SYSTEM, hardened_pod(f"{caller}-client", labels, script))
+    logs = []
+    for caller in CALLERS:
+        wait_until(core, SYSTEM, f"{caller}-client", has_finished)
+        logs.append(pod_log(core, SYSTEM, f"{caller}-client"))
+    log = "\n".join(logs)
+    results = dict(line.split("=", 1) for line in log.split() if "=" in line)
+    return results | {"_log": log}
+
+
+@pytest.mark.parametrize(
+    ("caller", "port", "expected"),
+    [
+        (caller, port, "reached" if port == allowed_port else "blocked")
+        for caller, (_, allowed_port) in CALLERS.items()
+        for port in TASK_SERVICE_PORTS
+    ],
+)
+def test_each_caller_reaches_its_own_task_service_port_only(
+    task_service_traffic: dict[str, str], caller: str, port: str, expected: str
+) -> None:
+    key = f"{caller}_{port.replace('-', '_')}"
+    assert task_service_traffic.get(key) == expected, task_service_traffic["_log"]

@@ -11,6 +11,7 @@ data:
   GOLEM_OIDC_DISCOVERY_URL: https://idp.example.com/realms/golem/.well-known/openid-configuration
   GOLEM_CALL_REGISTRY_FILE: /etc/golem/call-registry.yaml
   GOLEM_MAX_CHAIN_DEPTH: "4"
+  # The task service's a2a port.
   GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8000
   # The example catalogs baked into the image; an environment mounts its own.
   GOLEM_CATALOGS_DIR: /app/examples

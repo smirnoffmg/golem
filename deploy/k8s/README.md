@@ -27,9 +27,20 @@ and checks RBAC and network policies with real traffic.
 | `golem-jobs` (`golem.dev/zone: jobs`) | runs only: the Jobs the task service launches, their token Secrets, the MCP registry, a `ResourceQuota` | `restricted` |
 
 Every process listens on 8000 and its Service exposes 8000, except the reconciler, which has
-no port and so no Service and no probe. Probes: `tasks` uses `GET /.well-known/agent-card.json`;
-the edge, the Jira adapter and the MCP servers have no cheap unauthenticated route, so their
-probes are TCP.
+no port and so no Service and no probe, and the task service, which has three listeners, one
+per kind of caller (ADR 0009):
+
+| Port | Name | Routes | Admitted |
+| --- | --- | --- | --- |
+| 8000 | `a2a` | the agent card, `/a2a`; every request needs `GOLEM_EDGE_TOKEN` | the edge |
+| 8001 | `internal-read` | `GET /internal/run-keys`, `GET /internal/runs/{run_id}` | the MCP servers |
+| 8002 | `internal-write` | `POST /internal/run-outcome` | the reconciler |
+
+`GOLEM_PORT`, `GOLEM_INTERNAL_READ_PORT` and `GOLEM_INTERNAL_WRITE_PORT` move them; the
+Deployment's container ports, the Service and the `tasks` policy must move with them. Probes:
+`tasks` uses `GET /internal/run-keys` on `internal-read`, since the `a2a` port answers only to
+the edge; the edge, the Jira adapter and the MCP servers have no cheap unauthenticated route, so
+their probes are TCP.
 
 ## Image
 
@@ -59,13 +70,19 @@ Without the operator, create the same Secrets with the same keys some other way.
 
 | Namespace | Secret | Keys | Used by |
 | --- | --- | --- | --- |
-| golem-system | `golem-edge` | `GOLEM_AUDIT_DSN` (role `golem_edge`) | edge |
-| golem-system | `golem-tasks` | `GOLEM_RUNS_DSN` (role `golem_runs`), `GOLEM_TASKS_DB_URL` (`postgresql+asyncpg://golem_tasks:...`), `GOLEM_PUSH_CONFIG_KEY` | task service |
+| golem-system | `golem-edge` | `GOLEM_AUDIT_DSN` (role `golem_edge`), `GOLEM_EDGE_TOKEN` | edge |
+| golem-system | `golem-tasks` | `GOLEM_RUNS_DSN` (role `golem_runs`), `GOLEM_TASKS_DB_URL` (`postgresql+asyncpg://golem_tasks:...`), `GOLEM_PUSH_CONFIG_KEY`, `GOLEM_EDGE_TOKEN` | task service |
 | golem-system | `golem-run-token-key` | `key.pem`: unencrypted EC P-256 private key, the run token signing key (kid `GOLEM_RUN_TOKEN_KID`) | task service, mounted as a file |
 | golem-system | `golem-reconciler` | `GOLEM_RUNS_DSN`, `GOLEM_GITLAB_TOKEN` (merge requests) | reconciler |
 | golem-system | `golem-jira-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_JIRA_TOKEN`, `GOLEM_JIRA_WEBHOOK_SECRET`, `GOLEM_PUSH_TOKEN_SECRET` | Jira adapter |
 | golem-system | `golem-mcp-tracker-read`, `golem-mcp-wiki-read` | `GOLEM_MCP_UPSTREAM_TOKEN` (Jira, Confluence), `GOLEM_AUDIT_DSN` (role `golem_mcp`) | MCP servers |
 | golem-jobs | `golem-run-secrets` (`GOLEM_JOB_SECRET`) | `GOLEM_MODEL_GATEWAY_URL`, `GOLEM_MODEL`, `GOLEM_MODEL_KEY`, `GOLEM_GIT_TOKEN` (branch-only), `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | every run's Job |
+
+`GOLEM_EDGE_TOKEN` is one value in both Secrets (the overlay reads it from one remote key): the
+edge sends it with every forwarded request, and the task service trusts the principal header
+only together with it. Any long random string will do, for example
+`python -c "import secrets; print(secrets.token_urlsafe(32))"`; to rotate it, change both
+Secrets and restart both Deployments.
 
 The run Secret also carries the two non-secret model settings, because a Job's environment
 comes only from Secrets. A key pair for the run tokens:

@@ -31,6 +31,7 @@ EDGE_ENV = {
     "GOLEM_TASK_SERVICE_URL": "http://tasks:8000",
     "GOLEM_CATALOGS_DIR": "/app/examples",
     "GOLEM_PUBLIC_BASE_URL": "https://golem.example.test",
+    "GOLEM_EDGE_TOKEN": "edge-shared-secret",
 }
 
 TASKS_ENV = {
@@ -53,6 +54,7 @@ TASKS_ENV = {
     "GOLEM_AGENT_TOOLS_FILE": "/etc/golem/agent-tools.yaml",
     "GOLEM_RUN_TOKEN_KEY_FILE": "/etc/golem/run-token/key.pem",
     "GOLEM_RUN_TOKEN_KID": "run-2026-09",
+    "GOLEM_EDGE_TOKEN": "edge-shared-secret",
 }
 
 RECONCILER_ENV = {
@@ -115,6 +117,57 @@ def test_task_service_settings_build_limits_and_job_template() -> None:
     assert settings.template.active_deadline_seconds == 3600
     assert settings.kubernetes is Kubernetes.IN_CLUSTER
     assert settings.tasks_db_url == "postgresql+asyncpg://golem_tasks@db/golem_tasks"
+
+
+def test_the_edge_and_the_task_service_share_the_edge_token() -> None:
+    edge = edge_settings(EDGE_ENV)
+    tasks = task_service_settings(TASKS_ENV)
+
+    assert edge.edge_token == tasks.edge_token == "edge-shared-secret"
+    assert "edge-shared-secret" not in repr(edge) + repr(tasks)
+
+
+@pytest.mark.parametrize("parse", [edge_settings, task_service_settings])
+def test_the_edge_token_is_required(parse) -> None:
+    env = EDGE_ENV if parse is edge_settings else TASKS_ENV
+
+    with pytest.raises(SettingsError, match="GOLEM_EDGE_TOKEN"):
+        parse({k: v for k, v in env.items() if k != "GOLEM_EDGE_TOKEN"})
+
+
+def test_the_task_service_listens_on_three_ports() -> None:
+    default = task_service_settings(TASKS_ENV)
+    moved = task_service_settings(
+        {
+            **TASKS_ENV,
+            "GOLEM_PORT": "9000",
+            "GOLEM_INTERNAL_READ_PORT": "9001",
+            "GOLEM_INTERNAL_WRITE_PORT": "9002",
+        }
+    )
+
+    assert (default.port, default.internal_read_port, default.internal_write_port) == (
+        8000,
+        8001,
+        8002,
+    )
+    assert (moved.port, moved.internal_read_port, moved.internal_write_port) == (9000, 9001, 9002)
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("GOLEM_INTERNAL_READ_PORT", "read", "GOLEM_INTERNAL_READ_PORT"),
+        ("GOLEM_INTERNAL_WRITE_PORT", "70000", "GOLEM_INTERNAL_WRITE_PORT"),
+        ("GOLEM_INTERNAL_WRITE_PORT", "8001", "distinct"),
+        ("GOLEM_INTERNAL_READ_PORT", "8000", "distinct"),
+    ],
+)
+def test_the_task_service_ports_must_be_valid_and_distinct(
+    name: str, value: str, message: str
+) -> None:
+    with pytest.raises(SettingsError, match=message):
+        task_service_settings({**TASKS_ENV, name: value})
 
 
 def test_push_delivery_is_off_unless_receivers_are_allowed() -> None:

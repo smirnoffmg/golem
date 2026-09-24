@@ -55,6 +55,13 @@ FILE_PARSERS: dict[str, Callable[[str], object]] = {
     "GOLEM_JIRA_LABELS_FILE": parse_label_agents,
 }
 KUBERNETES_API_USERS = {"tasks": "golem-tasks", "reconciler": "golem-reconciler"}
+# Who may call the task service, and on which of its ports (ADR 0009): NetworkPolicy admits a
+# caller to a port, and each port serves only that caller's routes.
+TASK_SERVICE_PORTS = {
+    "golem-edge": "a2a",
+    "golem-mcp": "internal-read",
+    "golem-reconciler": "internal-write",
+}
 SERVICE_URL = re.compile(r"^http://([a-z0-9-]+)\.([a-z0-9-]+)\.svc:(\d+)(/.*)?$")
 
 
@@ -196,6 +203,55 @@ def test_every_in_cluster_url_names_a_service_and_its_port() -> None:
         assert int(match[3]) in [p["port"] for p in service["spec"]["ports"]], url
 
 
+def task_service_port(objects: list[dict], name: str) -> int:
+    [port] = [
+        p["port"]
+        for p in find(objects, "Service", "tasks", SYSTEM)["spec"]["ports"]
+        if p["name"] == name
+    ]
+    return port
+
+
+def test_the_task_service_listens_where_its_service_and_settings_say() -> None:
+    objects = render(EXTERNAL_SECRETS)
+    deployment = find(objects, "Deployment", "tasks", SYSTEM)
+    settings = task_service_settings(env_of(deployment, objects, secret_keys(objects)))
+    container_ports = {p["name"]: p["containerPort"] for p in container(deployment)["ports"]}
+    service_ports = find(objects, "Service", "tasks", SYSTEM)["spec"]["ports"]
+
+    assert container_ports == {
+        "a2a": settings.port,
+        "internal-read": settings.internal_read_port,
+        "internal-write": settings.internal_write_port,
+    }
+    assert {p["name"]: p["targetPort"] for p in service_ports} == {n: n for n in container_ports}
+    assert {p["name"]: p["port"] for p in service_ports} == container_ports
+
+
+@pytest.mark.parametrize("name", ["edge", "reconciler", "mcp-tracker-read", "mcp-wiki-read"])
+def test_each_caller_of_the_task_service_is_pointed_at_its_own_port(name: str) -> None:
+    objects = render(EXTERNAL_SECRETS)
+    deployment = find(objects, "Deployment", name, SYSTEM)
+    url = env_of(deployment, objects, secret_keys(objects))["GOLEM_TASK_SERVICE_URL"]
+    app = deployment["spec"]["template"]["metadata"]["labels"][APP_LABEL]
+
+    match = SERVICE_URL.fullmatch(url)
+    assert match and (match[1], match[2]) == ("tasks", SYSTEM), url
+    assert int(match[3]) == task_service_port(objects, TASK_SERVICE_PORTS[app])
+
+
+def test_the_edge_and_the_task_service_get_the_edge_token_from_the_same_secret_key() -> None:
+    objects = render(EXTERNAL_SECRETS)
+    sources = {}
+    for secret in of_kind(objects, "ExternalSecret"):
+        for data in secret["spec"]["data"]:
+            if data["secretKey"] == "GOLEM_EDGE_TOKEN":
+                sources[secret["spec"]["target"]["name"]] = data["remoteRef"]
+
+    assert set(sources) == {"golem-edge", "golem-tasks"}
+    assert sources["golem-edge"] == sources["golem-tasks"]
+
+
 def test_the_job_gets_the_mcp_registry_and_secret_the_task_service_names() -> None:
     objects = render(EXTERNAL_SECRETS)
     env = env_of(find(objects, "Deployment", "tasks"), objects, secret_keys(objects))
@@ -307,6 +363,39 @@ def test_every_policy_either_denies_all_or_selects_by_labels() -> None:
     for policy in policies():
         if policy["metadata"]["name"] != "default-deny-all":
             assert policy["spec"]["podSelector"].get("matchLabels"), policy["metadata"]["name"]
+
+
+def ports_by_peer(rules: list[dict], side: str) -> dict[str, set[int]]:
+    """The app label of each same-namespace pod peer, to the ports the rules open to it."""
+    opened: dict[str, set[int]] = {}
+    for rule in rules:
+        for peer in rule.get(side, []):
+            if set(peer) == {"podSelector"}:
+                app = peer["podSelector"]["matchLabels"][APP_LABEL]
+                opened.setdefault(app, set()).update(p["port"] for p in rule["ports"])
+    return opened
+
+
+def test_the_task_service_admits_each_caller_on_its_own_port_only() -> None:
+    objects = render(BASE)
+    policy = find(objects, "NetworkPolicy", "tasks", SYSTEM)
+
+    assert ports_by_peer(policy["spec"]["ingress"], "from") == {
+        app: {task_service_port(objects, port)} for app, port in TASK_SERVICE_PORTS.items()
+    }
+
+
+@pytest.mark.parametrize("app", sorted(TASK_SERVICE_PORTS))
+def test_each_caller_may_send_to_its_own_task_service_port_only(app: str) -> None:
+    objects = render(BASE)
+    [policy] = [
+        p
+        for p in of_kind(objects, "NetworkPolicy")
+        if p["spec"]["podSelector"].get("matchLabels") == {APP_LABEL: app}
+    ]
+
+    egress = ports_by_peer(policy["spec"]["egress"], "to")
+    assert egress["golem-tasks"] == {task_service_port(objects, TASK_SERVICE_PORTS[app])}
 
 
 def run_egress() -> list[dict]:

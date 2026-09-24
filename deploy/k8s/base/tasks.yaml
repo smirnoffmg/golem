@@ -1,4 +1,6 @@
 # The task service with the orchestrator port: A2A tasks, run admission, Job launch.
+# Three listeners, one per kind of caller (ADR 0009): a2a for the edge, internal-read for the
+# MCP servers (run keys, run status), internal-write for the reconciler (run outcomes).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -60,8 +62,12 @@ spec:
           image: golem
           command: ["python", "-m", "golem.tasks"]
           ports:
-            - name: http
+            - name: a2a
               containerPort: 8000
+            - name: internal-read
+              containerPort: 8001
+            - name: internal-write
+              containerPort: 8002
           envFrom:
             - configMapRef:
                 name: golem-tasks-env
@@ -74,15 +80,17 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
+          # The a2a port answers only to the edge token, so the probes read the run keys; the
+          # three listeners share one process and one event loop.
           readinessProbe:
             httpGet:
-              path: /.well-known/agent-card.json
-              port: http
+              path: /internal/run-keys
+              port: internal-read
             periodSeconds: 5
           livenessProbe:
             httpGet:
-              path: /.well-known/agent-card.json
-              port: http
+              path: /internal/run-keys
+              port: internal-read
             initialDelaySeconds: 10
             periodSeconds: 20
           securityContext:
@@ -127,6 +135,12 @@ spec:
   selector:
     app.kubernetes.io/name: golem-tasks
   ports:
-    - name: http
+    - name: a2a
       port: 8000
-      targetPort: http
+      targetPort: a2a
+    - name: internal-read
+      port: 8001
+      targetPort: internal-read
+    - name: internal-write
+      port: 8002
+      targetPort: internal-write

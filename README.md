@@ -68,7 +68,8 @@ src/golem/
   edge/policy.py           chain policy: allowed calls, depth, cycles, budget
   edge/cards.py            A2A Agent Cards generated from the catalog
   edge/auth.py, audit.py, app.py  the A2A edge: JWT check, audit row, forwarding; fails closed
-  tasks/                   A2A task service: tasks in golem_tasks, run outcomes via an internal route
+  tasks/                   A2A task service: tasks in golem_tasks; three listeners (A2A for the
+                           edge, run keys and status for MCP servers, run outcomes for the reconciler)
   evaluation/              the quality gate of catalog merge requests: golden set, runs, gate, CLI
   adapters/jira.py         Jira adapter: signed label webhook to SendMessage, task push to a comment
   mcp/                     platform MCP servers: run token gate, audit, read-only Jira and Confluence tools

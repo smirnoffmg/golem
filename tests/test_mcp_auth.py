@@ -7,7 +7,7 @@ from functools import partial
 import httpx
 import pytest
 from starlette.testclient import TestClient
-from test_tasks_service import FakeOrchestrator, make_card
+from test_tasks_service import FakeOrchestrator, read_listener
 
 from golem.jwks import SigningKeys, fetch_jwks
 from golem.mcp.auth import (
@@ -20,7 +20,6 @@ from golem.mcp.auth import (
 )
 from golem.mcp.groups import GROUPS
 from golem.run_token import RunClaims, RunTokenError, SigningKey, issue
-from golem.tasks.app import create_app
 
 KEY = SigningKey.generate(kid="run-key-1")
 OTHER_KEY = SigningKey.generate(kid="run-key-2")
@@ -68,7 +67,7 @@ def orchestrator() -> StatusOrchestrator:
 
 @pytest.fixture
 def task_service(orchestrator: StatusOrchestrator) -> Iterator[TestClient]:
-    app = create_app(make_card(), orchestrator, run_keys=(KEY,))
+    app = read_listener(orchestrator, (KEY,))
     with TestClient(app, raise_server_exceptions=False) as client:
         yield client
 

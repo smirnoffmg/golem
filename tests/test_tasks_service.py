@@ -4,14 +4,17 @@ from typing import Any
 
 import jwt
 import pytest
+from a2a.server.tasks import TaskStore
 from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface
 from starlette.authentication import SimpleUser
 from starlette.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from golem.run_token import RunClaims, SigningKey, issue, verify
-from golem.tasks.app import create_app
-from golem.tasks.ports import Refused, RunStart, Started
+from golem.tasks.app import EDGE_TOKEN_HEADER, OUTCOME_PATH, PushDelivery, create_listeners
+from golem.tasks.ports import Orchestrator, Refused, RunStart, Started
+
+TEST_EDGE_TOKEN = "test-edge-token"
 
 
 @dataclass
@@ -45,6 +48,48 @@ def make_card() -> AgentCard:
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
     )
+
+
+def create_app(
+    card: AgentCard,
+    orchestrator: Orchestrator,
+    task_store: TaskStore | None = None,
+    push: PushDelivery | None = None,
+    run_keys: tuple[SigningKey, ...] = (),
+) -> ASGIApp:
+    """The three listeners behind one test client, each path routed to the port serving it.
+
+    Public requests get the edge token, as if the edge had forwarded them; the listeners on
+    their own ports are tested in test_tasks_listeners.py.
+    """
+    listeners = create_listeners(
+        card,
+        orchestrator,
+        edge_token=TEST_EDGE_TOKEN,
+        task_store=task_store,
+        push=push,
+        run_keys=run_keys,
+    )
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await listeners.public(scope, receive, send)
+        elif scope["path"] == OUTCOME_PATH:
+            await listeners.internal_write(scope, receive, send)
+        elif scope["path"].startswith("/internal/"):
+            await listeners.internal_read(scope, receive, send)
+        else:
+            token = (EDGE_TOKEN_HEADER.encode(), TEST_EDGE_TOKEN.encode())
+            await listeners.public({**scope, "headers": [*scope["headers"], token]}, receive, send)
+
+    return app
+
+
+def read_listener(orchestrator: Orchestrator, run_keys: tuple[SigningKey, ...]) -> ASGIApp:
+    """The port the MCP servers are admitted to: run keys and run status."""
+    return create_listeners(
+        make_card(), orchestrator, edge_token=TEST_EDGE_TOKEN, run_keys=run_keys
+    ).internal_read
 
 
 @pytest.fixture

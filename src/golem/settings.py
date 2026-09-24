@@ -4,7 +4,7 @@ Every missing variable is reported in one error, so a deployment is fixed in one
 """
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
@@ -21,6 +21,8 @@ from golem.orchestrator.service import JobTemplate
 from golem.run_token import SigningKey
 
 DEFAULT_PORT = "8000"
+DEFAULT_INTERNAL_READ_PORT = "8001"
+DEFAULT_INTERNAL_WRITE_PORT = "8002"
 
 Env = Mapping[str, str]
 
@@ -49,6 +51,9 @@ class EdgeSettings:
     catalogs_dir: Path
     public_base_url: str
     port: int
+    # Sent with every forwarded request; the task service trusts the principal header only
+    # together with it.
+    edge_token: str = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -64,7 +69,12 @@ class TaskServiceSettings:
     run_token_kid: str
     kubernetes: Kubernetes
     public_base_url: str
+    # The edge's port (A2A); the MCP servers' port (run keys, run status); the reconciler's
+    # port (run outcomes). ADR 0009.
     port: int
+    internal_read_port: int
+    internal_write_port: int
+    edge_token: str = field(repr=False)
     push_allowed_prefixes: tuple[str, ...] = ()
     push_config_key: str | None = None
 
@@ -94,6 +104,7 @@ def edge_settings(env: Env) -> EdgeSettings:
         "GOLEM_TASK_SERVICE_URL",
         "GOLEM_CATALOGS_DIR",
         "GOLEM_PUBLIC_BASE_URL",
+        "GOLEM_EDGE_TOKEN",
     )
     return EdgeSettings(
         issuer=v["GOLEM_OIDC_ISSUER"],
@@ -107,6 +118,7 @@ def edge_settings(env: Env) -> EdgeSettings:
         catalogs_dir=Path(v["GOLEM_CATALOGS_DIR"]),
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
+        edge_token=v["GOLEM_EDGE_TOKEN"],
     )
 
 
@@ -152,7 +164,9 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
         "GOLEM_KUBERNETES_NAMESPACE",
         "GOLEM_KUBERNETES",
         "GOLEM_PUBLIC_BASE_URL",
+        "GOLEM_EDGE_TOKEN",
     )
+    port, read_port, write_port = _task_service_ports(env)
     return TaskServiceSettings(
         runs_dsn=v["GOLEM_RUNS_DSN"],
         tasks_db_url=v["GOLEM_TASKS_DB_URL"],
@@ -181,7 +195,10 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
         run_token_kid=v["GOLEM_RUN_TOKEN_KID"],
         kubernetes=_kubernetes(v),
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
-        port=_port(env),
+        port=port,
+        internal_read_port=read_port,
+        internal_write_port=write_port,
+        edge_token=v["GOLEM_EDGE_TOKEN"],
         push_allowed_prefixes=_push_prefixes(env),
         push_config_key=_push_config_key(env),
     )
@@ -315,11 +332,25 @@ def _decimal(v: Mapping[str, str], name: str) -> Decimal:
     return value
 
 
-def _port(env: Env) -> int:
-    port = _parsed({"GOLEM_PORT": env.get("GOLEM_PORT", DEFAULT_PORT)}, "GOLEM_PORT", int, "a port")
+def _port(env: Env, name: str = "GOLEM_PORT", default: str = DEFAULT_PORT) -> int:
+    port = _parsed({name: env.get(name, default)}, name, int, "a port")
     if not 0 < port < 65536:
-        raise SettingsError(f"GOLEM_PORT must be a TCP port, got {port}")
+        raise SettingsError(f"{name} must be a TCP port, got {port}")
     return port
+
+
+def _task_service_ports(env: Env) -> tuple[int, int, int]:
+    ports = (
+        _port(env),
+        _port(env, "GOLEM_INTERNAL_READ_PORT", DEFAULT_INTERNAL_READ_PORT),
+        _port(env, "GOLEM_INTERNAL_WRITE_PORT", DEFAULT_INTERNAL_WRITE_PORT),
+    )
+    if len(set(ports)) != len(ports):
+        raise SettingsError(
+            "GOLEM_PORT, GOLEM_INTERNAL_READ_PORT and GOLEM_INTERNAL_WRITE_PORT must be distinct,"
+            f" got {ports}"
+        )
+    return ports
 
 
 def _base_url(v: Mapping[str, str], name: str) -> str:

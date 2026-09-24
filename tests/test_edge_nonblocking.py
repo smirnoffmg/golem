@@ -4,7 +4,7 @@ import asyncio
 import time
 
 import httpx
-from test_edge_app import discovery_card
+from test_edge_app import EDGE_TOKEN, discovery_card
 
 from golem.edge.app import create_edge_app
 from golem.edge.auth import AuthFailure, Principal
@@ -23,6 +23,7 @@ async def test_a_slow_token_check_does_not_block_the_event_loop() -> None:
         limits=ChainLimits(max_depth=3),
         audit_dsn="host=unused",
         forward=httpx.AsyncClient(),
+        edge_token=EDGE_TOKEN,
         cards={"discovery": discovery_card()},
     )
     async with httpx.AsyncClient(

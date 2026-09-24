@@ -11,7 +11,8 @@ data:
   # Cloud: the account's email, and the token is its API token (Basic).
   GOLEM_MCP_UPSTREAM_USER: ""
   GOLEM_MCP_JIRA_DEPLOYMENT: data-center
-  GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8000
+  # The task service's internal-read port: run keys and run status only.
+  GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8001
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -111,7 +112,8 @@ data:
   # Empty: Data Center, the upstream token is a personal access token (Bearer). Atlassian
   # Cloud: the account's email, and the token is its API token (Basic).
   GOLEM_MCP_UPSTREAM_USER: ""
-  GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8000
+  # The task service's internal-read port: run keys and run status only.
+  GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8001
 ---
 apiVersion: apps/v1
 kind: Deployment
