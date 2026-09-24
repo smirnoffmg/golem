@@ -2,7 +2,7 @@
 
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import replace
 
 import pytest
@@ -62,13 +62,31 @@ def busybox_spec(namespace: str, script: str) -> JobSpec:
     )
 
 
-def wait_for(read: Callable[[], JobStatus], expected: JobStatus, timeout: float = 120) -> None:
+def cluster_state(launcher: KubernetesJobLauncher) -> str:
+    core = CoreV1Api(launcher.api_client)
+    lines = []
+    for pod in core.list_namespaced_pod(launcher.namespace).items:
+        waiting = [
+            f"{c.name}: {c.state.waiting.reason} {c.state.waiting.message or ''}"
+            for c in (pod.status.container_statuses or [])
+            if c.state and c.state.waiting
+        ]
+        lines.append(f"pod {pod.metadata.name} {pod.status.phase} {waiting}")
+    for event in core.list_namespaced_event(launcher.namespace).items[-15:]:
+        lines.append(f"event {event.involved_object.name}: {event.reason} {event.message}")
+    return "\n".join(lines)
+
+
+def wait_for_job(
+    launcher: KubernetesJobLauncher, run_id: str, expected: JobStatus, timeout: float = 300
+) -> None:
+    # CI runners pull images into a fresh cluster slowly; the state explains a timeout there.
     deadline = time.monotonic() + timeout
-    seen = read()
+    seen = launcher.status(run_id)
     while seen is not expected and time.monotonic() < deadline:
         time.sleep(1)
-        seen = read()
-    assert seen is expected
+        seen = launcher.status(run_id)
+    assert seen is expected, f"{seen} after {timeout}s\n{cluster_state(launcher)}"
 
 
 def test_successful_command_is_observed_as_succeeded(launcher: KubernetesJobLauncher) -> None:
@@ -82,7 +100,7 @@ def test_successful_command_is_observed_as_succeeded(launcher: KubernetesJobLaun
 
     launcher.launch(job)
 
-    wait_for(lambda: launcher.status(job.run_id), JobStatus.SUCCEEDED)
+    wait_for_job(launcher, job.run_id, JobStatus.SUCCEEDED)
 
 
 def test_failing_command_is_observed_as_failed(launcher: KubernetesJobLauncher) -> None:
@@ -90,7 +108,7 @@ def test_failing_command_is_observed_as_failed(launcher: KubernetesJobLauncher) 
 
     launcher.launch(job)
 
-    wait_for(lambda: launcher.status(job.run_id), JobStatus.FAILED)
+    wait_for_job(launcher, job.run_id, JobStatus.FAILED)
 
 
 def test_long_command_is_observed_as_running(launcher: KubernetesJobLauncher) -> None:
@@ -98,7 +116,7 @@ def test_long_command_is_observed_as_running(launcher: KubernetesJobLauncher) ->
 
     launcher.launch(job)
 
-    wait_for(lambda: launcher.status(job.run_id), JobStatus.RUNNING)
+    wait_for_job(launcher, job.run_id, JobStatus.RUNNING)
     launcher.delete(job.run_id)
 
 
@@ -134,7 +152,7 @@ def test_delete_makes_the_job_missing(launcher: KubernetesJobLauncher) -> None:
 
     launcher.delete(job.run_id)
 
-    wait_for(lambda: launcher.status(job.run_id), JobStatus.MISSING, timeout=30)
+    wait_for_job(launcher, job.run_id, JobStatus.MISSING, timeout=30)
 
 
 def test_unknown_run_is_missing_and_deleting_it_is_quiet(launcher: KubernetesJobLauncher) -> None:
@@ -185,7 +203,7 @@ def test_the_termination_message_of_a_finished_run_is_read_back(
     )
 
     launcher.launch(job)
-    wait_for(lambda: launcher.status(job.run_id), JobStatus.FAILED)
+    wait_for_job(launcher, job.run_id, JobStatus.FAILED)
 
     message = launcher.termination_message(job.run_id)
     assert message is not None

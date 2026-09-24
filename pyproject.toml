@@ -27,6 +27,7 @@ dev = [
     "httpx>=0.28",
     "ruff>=0.13",
     "testcontainers[k3s,postgres]>=4",
+    "pre-commit>=4",
 ]
 
 [build-system]

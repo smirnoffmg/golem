@@ -91,6 +91,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Docker.
 
 ```sh
 uv sync
+uv run pre-commit install    # ruff, YAML/TOML, private keys on every commit; CI runs the same
 uv run pytest               # needs Docker: Postgres tests run in testcontainers
 uv run ruff check .
 docker compose -f deploy/compose.yaml up --build

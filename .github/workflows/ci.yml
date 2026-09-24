@@ -15,6 +15,6 @@ jobs:
       # setup-uv publishes no floating major tag, so it is pinned to a commit.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - run: uv sync --frozen
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
+      # The same hooks as locally (ruff at the version in uv.lock, YAML/TOML, private keys).
+      - run: uv run pre-commit run --all-files --show-diff-on-failure
       - run: uv run pytest
