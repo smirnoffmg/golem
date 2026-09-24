@@ -41,6 +41,14 @@ class Rule(_Frozen):
     conditions: tuple[Condition, ...] = ()
 
 
+class Kind(_Frozen):
+    """A kind of record in the context repository, with the statuses and sections it may have."""
+
+    name: str
+    statuses: frozenset[str]
+    sections: frozenset[str] = frozenset()
+
+
 class Role(_Frozen):
     name: str = Field(pattern=SLUG)
     writes: str
@@ -52,17 +60,43 @@ class AgentCatalog(_Frozen):
     description: str
     version: str
     skills: tuple[Skill, ...] = ()
+    kinds: tuple[Kind, ...] = ()
     roles: tuple[Role, ...] = ()
     # Order is priority: the lead takes the first rule that has a target.
     rules: tuple[Rule, ...] = ()
 
     @model_validator(mode="after")
-    def _rules_name_declared_roles(self) -> "AgentCatalog":
-        declared = {role.name for role in self.roles}
+    def _rules_use_declared_names(self) -> "AgentCatalog":
+        # A misspelt kind, status or section would otherwise leave a rule idle forever.
+        roles = {role.name for role in self.roles}
+        kinds = {kind.name: kind for kind in self.kinds}
         for rule in self.rules:
-            if rule.role not in declared:
+            if rule.role not in roles:
                 raise ValueError(f"rule refers to undeclared role {rule.role!r}")
+            kind = _declared_kind(kinds, rule.kind)
+            _check_statuses(kind, rule.statuses)
+            for condition in rule.conditions:
+                match condition:
+                    case EmptySection(section=section) if section not in kind.sections:
+                        raise ValueError(
+                            f"rule for {rule.role!r} checks undeclared section {section!r}"
+                            f" of kind {kind.name!r}"
+                        )
+                    case NoLinked(kind=linked, statuses=statuses):
+                        _check_statuses(_declared_kind(kinds, linked), statuses)
         return self
+
+
+def _declared_kind(kinds: dict[str, Kind], name: str) -> Kind:
+    if name not in kinds:
+        raise ValueError(f"rule refers to undeclared kind {name!r}")
+    return kinds[name]
+
+
+def _check_statuses(kind: Kind, statuses: frozenset[str]) -> None:
+    unknown = sorted(statuses - kind.statuses)
+    if unknown:
+        raise ValueError(f"rule refers to undeclared status {unknown} of kind {kind.name!r}")
 
 
 def load_catalog(path: Path) -> AgentCatalog:

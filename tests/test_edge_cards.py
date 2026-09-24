@@ -20,6 +20,7 @@ CATALOG = AgentCatalog.model_validate(
                 "tags": ["discovery"],
             }
         ],
+        "kinds": [{"name": "hypothesis", "statuses": ["proposed"], "sections": ["Evidence"]}],
         "roles": [
             {
                 "name": "researcher",
@@ -90,10 +91,17 @@ def test_card_default_modes_are_plain_text():
     assert list(result.default_output_modes) == ["text/plain"]
 
 
-def test_card_hides_roles_rules_write_paths_and_tools():
+def test_card_hides_kinds_roles_rules_write_paths_and_tools():
     serialized = str(MessageToDict(card()))
 
-    for secret in ("researcher", "hypotheses/", "tracker.read", "wiki.read", "proposed"):
+    for secret in (
+        "researcher",
+        "hypotheses/",
+        "tracker.read",
+        "wiki.read",
+        "proposed",
+        "Evidence",
+    ):
         assert secret not in serialized
 
 
