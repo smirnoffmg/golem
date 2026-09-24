@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -158,7 +159,8 @@ def create_edge_app(
         token = bearer_token(request.headers.get("Authorization"))
         if token is None:
             return unauthenticated(None)
-        principal = authenticate(token)
+        # Verification may refetch the identity provider's keys; that must not stall the loop.
+        principal = await asyncio.to_thread(authenticate, token)
         if isinstance(principal, AuthFailure):
             return unauthenticated(principal)
         body = await request.body()
