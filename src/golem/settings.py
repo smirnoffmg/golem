@@ -286,3 +286,61 @@ def _yaml_mapping(text: str, what: str) -> dict[Any, Any]:
     if not isinstance(data, dict):
         raise SettingsError(f"{what}: must be a mapping at the top level")
     return data
+
+
+@dataclass(frozen=True)
+class AdapterSettings:
+    edge_url: str
+    token_url: str
+    client_id: str
+    client_secret: str
+    jira_url: str
+    # Set: Basic auth with the account's email and an API token (Jira Cloud).
+    # Unset: the token is a personal access token sent as Bearer (Jira Data Center).
+    jira_user: str | None
+    jira_token: str
+    webhook_secret: bytes
+    push_secret: bytes
+    labels_file: Path
+    public_base_url: str
+    port: int
+
+
+def adapter_settings(env: Env) -> AdapterSettings:
+    v = _values(
+        env,
+        "GOLEM_EDGE_URL",
+        "GOLEM_OIDC_TOKEN_URL",
+        "GOLEM_OIDC_CLIENT_ID",
+        "GOLEM_OIDC_CLIENT_SECRET",
+        "GOLEM_JIRA_URL",
+        "GOLEM_JIRA_TOKEN",
+        "GOLEM_JIRA_WEBHOOK_SECRET",
+        "GOLEM_PUSH_TOKEN_SECRET",
+        "GOLEM_JIRA_LABELS_FILE",
+        "GOLEM_PUBLIC_BASE_URL",
+    )
+    return AdapterSettings(
+        edge_url=_base_url(v, "GOLEM_EDGE_URL"),
+        token_url=v["GOLEM_OIDC_TOKEN_URL"],
+        client_id=v["GOLEM_OIDC_CLIENT_ID"],
+        client_secret=v["GOLEM_OIDC_CLIENT_SECRET"],
+        jira_url=_base_url(v, "GOLEM_JIRA_URL"),
+        jira_user=env.get("GOLEM_JIRA_USER", "").strip() or None,
+        jira_token=v["GOLEM_JIRA_TOKEN"],
+        webhook_secret=v["GOLEM_JIRA_WEBHOOK_SECRET"].encode(),
+        push_secret=v["GOLEM_PUSH_TOKEN_SECRET"].encode(),
+        labels_file=Path(v["GOLEM_JIRA_LABELS_FILE"]),
+        public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
+        port=_port(env),
+    )
+
+
+def parse_label_agents(text: str) -> dict[str, str]:
+    """``<jira label>: <agent name>``."""
+    labels: dict[str, str] = {}
+    for label, agent in _yaml_mapping(text, "Jira labels").items():
+        if not isinstance(agent, str) or not agent:
+            raise SettingsError(f"Jira labels: {label!r} must map to an agent name, got {agent!r}")
+        labels[str(label)] = agent
+    return labels
