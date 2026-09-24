@@ -170,6 +170,30 @@ async def test_forwarded_request_names_the_principal_and_passes_the_version(
     assert "cookie" not in headers
 
 
+async def test_trace_context_is_forwarded_so_the_run_joins_the_callers_trace(
+    edge: httpx.AsyncClient, tasks: TaskService
+) -> None:
+    traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    await call(
+        edge,
+        send_message(),
+        extra_headers={"traceparent": traceparent, "tracestate": "vendor=1"},
+    )
+
+    [headers] = tasks.received
+    assert headers["traceparent"] == traceparent
+    assert headers["tracestate"] == "vendor=1"
+
+
+async def test_a_malformed_traceparent_is_dropped(
+    edge: httpx.AsyncClient, tasks: TaskService
+) -> None:
+    await call(edge, send_message(), extra_headers={"traceparent": "../../etc/passwd"})
+
+    [headers] = tasks.received
+    assert "traceparent" not in headers
+
+
 async def test_task_service_runs_on_behalf_of_the_edge_principal(
     edge: httpx.AsyncClient, tasks: TaskService
 ) -> None:

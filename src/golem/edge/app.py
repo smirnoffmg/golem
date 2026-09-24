@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -99,12 +100,28 @@ def policy_refusal(
     return None
 
 
+TRACEPARENT = re.compile(r"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
+TRACESTATE_MAX = 512
+
+
+def trace_headers(request: Request) -> dict[str, str]:
+    """W3C Trace Context, so a run joins its caller's trace; only well-formed values pass."""
+    traceparent = request.headers.get("traceparent", "")
+    if not TRACEPARENT.fullmatch(traceparent):
+        return {}
+    headers = {"traceparent": traceparent}
+    tracestate = request.headers.get("tracestate", "")
+    if tracestate and len(tracestate) <= TRACESTATE_MAX and tracestate.isascii():
+        headers["tracestate"] = tracestate
+    return headers
+
+
 def forward_headers(request: Request, principal: Principal) -> dict[str, str]:
     headers = {"Content-Type": "application/json", PRINCIPAL_HEADER: principal.name}
     version = request.headers.get(VERSION_HEADER)
     if version is not None:
         headers[VERSION_HEADER] = version
-    return headers
+    return headers | trace_headers(request)
 
 
 def rpc_error(rpc_id: RpcId, refusal: Refusal, status_code: int = 200) -> JSONResponse:
