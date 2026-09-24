@@ -59,6 +59,7 @@ async def start_run(
 
         existing = await _find_run(conn, request.caller, request.message_id)
         if existing is not None:
+            await _map_task(conn, request.task_id, existing)
             return RunReused(run_id=existing)
 
         decision = admit(
@@ -82,7 +83,26 @@ async def start_run(
                 request.estimated_cost,
             ),
         )
+        await _map_task(conn, request.task_id, run_id)
     return RunCreated(run_id=run_id)
+
+
+async def cancel_run_of_task(conn: AsyncConnection, task_id: str) -> str | None:
+    cursor = await conn.execute(
+        "UPDATE runs SET status = 'canceled' FROM run_tasks"
+        " WHERE run_tasks.run_id = runs.id AND run_tasks.task_id = %s"
+        " AND runs.status = 'running' RETURNING runs.id",
+        (task_id,),
+    )
+    row = await cursor.fetchone()
+    return None if row is None else str(row[0])
+
+
+async def _map_task(conn: AsyncConnection, task_id: str, run_id: str) -> None:
+    await conn.execute(
+        "INSERT INTO run_tasks (task_id, run_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+        (task_id, run_id),
+    )
 
 
 async def _find_run(conn: AsyncConnection, caller: str, message_id: str) -> str | None:

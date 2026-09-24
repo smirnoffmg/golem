@@ -14,3 +14,10 @@ CREATE TABLE IF NOT EXISTS runs (
 
 CREATE INDEX IF NOT EXISTS runs_running_by_caller ON runs (caller) WHERE status = 'running';
 CREATE INDEX IF NOT EXISTS runs_by_root ON runs (root_run_id);
+
+-- Retries create new A2A tasks for the same run; every task maps to its run so that
+-- canceling any of them reaches the run.
+CREATE TABLE IF NOT EXISTS run_tasks (
+    task_id text PRIMARY KEY,
+    run_id  uuid NOT NULL REFERENCES runs (id)
+);
