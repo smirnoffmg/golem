@@ -4,7 +4,7 @@ from decimal import Decimal
 from psycopg import AsyncConnection
 
 from golem.orchestrator.admission import Limits, Rejected
-from golem.orchestrator.runs import StartRequest, cancel_run_of_task, start_run
+from golem.orchestrator.runs import RunReused, StartRequest, cancel_run_of_task, start_run
 from golem.tasks.ports import Refused, RunStart, Started
 
 
@@ -31,6 +31,11 @@ class PostgresOrchestrator:
             outcome = await start_run(conn, request, self.limits)
         if isinstance(outcome, Rejected):
             return Refused(reason=outcome.detail)
+        if isinstance(outcome, RunReused) and outcome.status != "running":
+            # A retry of a finished run must not leave a task WORKING that nothing will finish.
+            return Refused(
+                reason=f"Run {outcome.run_id} for this message is already {outcome.status}."
+            )
         return Started(run_id=outcome.run_id)
 
     async def cancel(self, task_id: str) -> None:

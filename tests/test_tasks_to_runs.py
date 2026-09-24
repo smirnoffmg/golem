@@ -97,3 +97,15 @@ def test_canceling_a_retry_task_cancels_the_shared_run(client: TestClient, runs_
     rpc(client, "CancelTask", {"id": retry["id"], "tenant": "discovery"})
 
     assert [status for _, status in run_rows(runs_db)] == ["canceled"]
+
+
+def test_a_retry_of_a_canceled_run_is_rejected_not_left_working(client: TestClient) -> None:
+    task = send(client, "m-1")
+    rpc(client, "CancelTask", {"id": task["id"], "tenant": "discovery"})
+
+    retry = send(client, "m-1")
+
+    assert retry["status"]["state"] == "TASK_STATE_REJECTED"
+    reason = " ".join(p["text"] for p in retry["status"]["message"]["parts"])
+    assert task["metadata"]["runId"] in reason
+    assert "canceled" in reason

@@ -122,3 +122,12 @@ async def test_the_schema_itself_forbids_a_duplicate_key(runs_db: str) -> None:
                 " estimated_cost) VALUES (gen_random_uuid(), gen_random_uuid(),"
                 " 'user:alice', 'm-1', 't', 'discovery', 1)"
             )
+
+
+async def test_a_reused_run_reports_its_current_status(runs_db: str) -> None:
+    first = await start(runs_db, request("m-1"))
+    assert isinstance(first, RunCreated)
+    async with await psycopg.AsyncConnection.connect(runs_db, autocommit=True) as conn:
+        await conn.execute("UPDATE runs SET status = 'canceled' WHERE id = %s", (first.run_id,))
+
+    assert await start(runs_db, request("m-1")) == RunReused(run_id=first.run_id, status="canceled")

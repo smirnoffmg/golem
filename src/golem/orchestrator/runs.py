@@ -28,6 +28,7 @@ class RunCreated:
 @dataclass(frozen=True)
 class RunReused:
     run_id: str
+    status: str = "running"
 
 
 async def apply_schema(conn: AsyncConnection) -> None:
@@ -59,8 +60,9 @@ async def start_run(
 
         existing = await _find_run(conn, request.caller, request.message_id)
         if existing is not None:
-            await _map_task(conn, request.task_id, existing)
-            return RunReused(run_id=existing)
+            run_id_found, status = existing
+            await _map_task(conn, request.task_id, run_id_found)
+            return RunReused(run_id=run_id_found, status=status)
 
         decision = admit(
             RunRequest(request.caller, root_run_id, request.estimated_cost),
@@ -105,12 +107,12 @@ async def _map_task(conn: AsyncConnection, task_id: str, run_id: str) -> None:
     )
 
 
-async def _find_run(conn: AsyncConnection, caller: str, message_id: str) -> str | None:
+async def _find_run(conn: AsyncConnection, caller: str, message_id: str) -> tuple[str, str] | None:
     cursor = await conn.execute(
-        "SELECT id FROM runs WHERE caller = %s AND message_id = %s", (caller, message_id)
+        "SELECT id, status FROM runs WHERE caller = %s AND message_id = %s", (caller, message_id)
     )
     row = await cursor.fetchone()
-    return None if row is None else str(row[0])
+    return None if row is None else (str(row[0]), row[1])
 
 
 async def _load(conn: AsyncConnection, caller: str, root_run_id: str) -> Load:
