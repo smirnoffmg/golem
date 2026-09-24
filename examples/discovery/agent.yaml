@@ -1,0 +1,46 @@
+name: discovery
+description: Turns a product problem space into evidenced hypotheses and reviewed solutions.
+version: 0.1.0
+skills:
+  - id: research
+    name: Research a hypothesis
+    description: Collects evidence for and against a problem hypothesis.
+    tags: [discovery]
+  - id: design
+    name: Propose a solution
+    description: Drafts a solution for a validated problem hypothesis.
+    tags: [discovery]
+  - id: review
+    name: Review a solution
+    description: Checks a proposed solution against the evidence it relies on.
+    tags: [discovery]
+roles:
+  - name: researcher
+    writes: hypotheses/
+    tools: [tracker.read, wiki.read]
+  - name: designer
+    writes: solutions/
+    tools: [wiki.read]
+  - name: reviewer
+    writes: solutions/
+    tools: [wiki.read]
+rules:
+  - role: researcher
+    kind: hypothesis
+    statuses: [proposed]
+    conditions:
+      - type: empty_section
+        section: Evidence
+  - role: designer
+    kind: hypothesis
+    statuses: [validated]
+    conditions:
+      - type: no_linked
+        kind: solution
+        statuses: [proposed, accepted]
+  - role: reviewer
+    kind: solution
+    statuses: [proposed]
+    conditions:
+      - type: empty_section
+        section: Review
