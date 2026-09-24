@@ -449,8 +449,12 @@ Rel(git, orch, "done: branch, version, cost", "Job exit")
   app instances over one store: the task becomes CANCELED and the cancel reaches the
   orchestrator); what stays replica-bound is subscribing to the event stream, which Golem does
   not offer. Not yet checked: what happens to the stale live task left on the first replica.
-- **Idempotent run start.** A client that retries after a timeout sends the same `messageId`,
-  and every retry becomes a new A2A task (probed). The orchestrator must deduplicate runs by
-  (caller, message id) — a unique key in `golem_runs` — and return the existing run, so a retry
-  never starts a second Job; `RunStart.message_id` carries the key. Idempotent handling is "the
-  correct first step in dealing with repeat messages" (*Cloud Architecture Patterns*, p. 34).
+- **Idempotent run start — implemented in `orchestrator/runs.py`.** A client that retries after
+  a timeout sends the same `messageId`, and every retry becomes a new A2A task. `start_run`
+  returns the existing run for the same (caller, message id) and never starts a second Job.
+  Transaction-scoped advisory locks on the caller and the root chain serialize the check and the
+  insert, and a unique key in `runs` backs them up. Tested against Postgres 17 in
+  testcontainers, including concurrent retries and a burst at the caller limit; with the locks
+  removed exactly those two tests fail. Idempotent handling is "the correct first step in dealing
+  with repeat messages" (*Cloud Architecture Patterns*, p. 34). Still open: wiring the task
+  service to `start_run`, and where the cost estimate comes from.

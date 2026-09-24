@@ -52,6 +52,7 @@ src/golem/
   catalog.py               agent catalog schema and loading
   runtime/lead.py          the lead: a pure function from a snapshot to the next role command
   orchestrator/admission.py  run admission: Job quotas per caller and per root chain
+  orchestrator/runs.py       idempotent run start on Postgres (schema.sql)
   edge/policy.py           chain policy: allowed calls, depth, cycles, budget
   edge/cards.py            A2A Agent Cards generated from the catalog
   tasks/                   A2A task service
@@ -71,7 +72,7 @@ Requires [uv](https://docs.astral.sh/uv/) and Docker.
 
 ```sh
 uv sync
-uv run pytest
+uv run pytest               # needs Docker: Postgres tests run in testcontainers
 uv run ruff check .
 docker compose -f deploy/compose.yaml up
 ```
