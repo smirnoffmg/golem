@@ -21,3 +21,7 @@ CREATE TABLE IF NOT EXISTS run_tasks (
     task_id text PRIMARY KEY,
     run_id  uuid NOT NULL REFERENCES runs (id)
 );
+
+-- Outbox for task notifications: a finished run's tasks are notified until delivery succeeds.
+ALTER TABLE run_tasks ADD COLUMN IF NOT EXISTS notified_at timestamptz;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS detail text;
