@@ -1,6 +1,7 @@
 import asyncio
-from collections.abc import Mapping
-from dataclasses import dataclass
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from psycopg import AsyncConnection
@@ -8,13 +9,19 @@ from psycopg import AsyncConnection
 from golem.orchestrator.admission import Limits, Rejected
 from golem.orchestrator.jobs import CatalogRef, JobLauncher, JobSpec
 from golem.orchestrator.runs import (
+    RunCreated,
     RunReused,
     StartRequest,
     cancel_run_of_task,
     fail_run,
     start_run,
 )
+from golem.run_token import RunClaims, SigningKey, issue
 from golem.tasks.ports import Refused, RunStart, Started
+
+# The token outlives the Job's deadline by this much, so a call made in the run's last second
+# is not refused on clock skew between the orchestrator and an MCP server.
+TOKEN_GRACE_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -26,9 +33,29 @@ class JobTemplate:
     ttl_seconds_after_finished: int
     cpu: str
     memory: str
+    mcp_registry_configmap: str | None = None
 
 
-def job_spec_for(run_id: str, run: RunStart, catalog: CatalogRef, template: JobTemplate) -> JobSpec:
+def run_claims(
+    started: RunCreated | RunReused,
+    run: RunStart,
+    grants: Mapping[str, tuple[str, ...]],
+    template: JobTemplate,
+    now: int,
+) -> RunClaims:
+    return RunClaims(
+        run_id=started.run_id,
+        agent=run.agent,
+        caller=run.caller,
+        root_run_id=started.root_run_id,
+        tools=grants.get(run.agent, ()),
+        expires_at=now + template.active_deadline_seconds + TOKEN_GRACE_SECONDS,
+    )
+
+
+def job_spec_for(
+    run_id: str, run: RunStart, catalog: CatalogRef, template: JobTemplate, run_token: str
+) -> JobSpec:
     return JobSpec(
         run_id=run_id,
         agent=run.agent,
@@ -41,8 +68,10 @@ def job_spec_for(run_id: str, run: RunStart, catalog: CatalogRef, template: JobT
         ttl_seconds_after_finished=template.ttl_seconds_after_finished,
         cpu=template.cpu,
         memory=template.memory,
+        run_token=run_token,
         traceparent=run.traceparent,
         tracestate=run.tracestate,
+        mcp_registry_configmap=template.mcp_registry_configmap,
     )
 
 
@@ -51,6 +80,7 @@ class PostgresOrchestrator:
     """The task service's orchestrator port: records runs in Postgres and runs them as Jobs.
 
     Every run is estimated at the same flat cost until estimates come from the agent catalog.
+    A launched run gets a run token carrying the platform's tool grants for its agent.
     """
 
     dsn: str
@@ -59,6 +89,9 @@ class PostgresOrchestrator:
     launcher: JobLauncher
     template: JobTemplate
     catalogs: Mapping[str, CatalogRef]
+    signing_key: SigningKey
+    grants: Mapping[str, tuple[str, ...]]
+    clock: Callable[[], float] = field(default=time.time)
 
     async def start(self, run: RunStart) -> Started | Refused:
         catalog = self.catalogs.get(run.agent)
@@ -82,7 +115,10 @@ class PostgresOrchestrator:
                 )
             # Launching is idempotent per run id, so a retry of a running run launches again:
             # that heals a crash between recording the run and launching its Job.
-            spec = job_spec_for(outcome.run_id, run, catalog, self.template)
+            now = int(self.clock())
+            claims = run_claims(outcome, run, self.grants, self.template, now)
+            token = issue(claims, self.signing_key, now)
+            spec = job_spec_for(outcome.run_id, run, catalog, self.template, token)
             try:
                 await asyncio.to_thread(self.launcher.launch, spec)
             except Exception as error:

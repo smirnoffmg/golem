@@ -16,7 +16,9 @@ from golem.orchestrator.service import PostgresOrchestrator
 from golem.settings import (
     SettingsError,
     TaskServiceSettings,
+    parse_agent_tools,
     parse_catalog_refs,
+    parse_signing_key,
     task_service_settings,
 )
 from golem.tasks.app import PushDelivery, create_app
@@ -40,6 +42,7 @@ def service_card(public_base_url: str, push_notifications: bool = False) -> Agen
 
 
 def build_app(settings: TaskServiceSettings) -> Starlette:
+    signing_key = parse_signing_key(settings.run_token_key_file.read_text(), settings.run_token_kid)
     orchestrator = PostgresOrchestrator(
         dsn=settings.runs_dsn,
         limits=settings.limits,
@@ -47,6 +50,8 @@ def build_app(settings: TaskServiceSettings) -> Starlette:
         launcher=launcher_for(settings.kubernetes, settings.template.namespace),
         template=settings.template,
         catalogs=parse_catalog_refs(settings.catalogs_file.read_text()),
+        signing_key=signing_key,
+        grants=parse_agent_tools(settings.agent_tools_file.read_text()),
     )
     engine = tasks_engine(settings.tasks_db_url)
     push = (
@@ -63,6 +68,7 @@ def build_app(settings: TaskServiceSettings) -> Starlette:
         orchestrator,
         tasks_store(engine),
         push,
+        run_keys=(signing_key,),
     )
 
 
@@ -72,8 +78,12 @@ def main() -> None:
         settings = task_service_settings(os.environ)
     except SettingsError as error:
         sys.exit(f"golem task service: {error}")
+    try:
+        app = build_app(settings)
+    except SettingsError as error:
+        sys.exit(f"golem task service: {error}")
     asyncio.run(apply_schema_once(settings.runs_dsn))
-    uvicorn.run(build_app(settings), host="0.0.0.0", port=settings.port)
+    uvicorn.run(app, host="0.0.0.0", port=settings.port)
 
 
 if __name__ == "__main__":

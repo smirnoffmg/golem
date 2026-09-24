@@ -394,7 +394,7 @@ CATALOG = CatalogRef(url="https://git.example/catalog.git", revision="a1b2c3d")
 
 
 def job_env(run: RunStart) -> dict[str, str]:
-    manifest = build_job_manifest(job_spec_for("run-1", run, CATALOG, TEMPLATE))
+    manifest = build_job_manifest(job_spec_for("run-1", run, CATALOG, TEMPLATE, "a.b.c"))
     [container] = manifest["spec"]["template"]["spec"]["containers"]
     return {item["name"]: item["value"] for item in container["env"]}
 

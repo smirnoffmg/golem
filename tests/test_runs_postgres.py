@@ -47,7 +47,7 @@ async def test_retry_with_the_same_message_id_returns_the_same_run(runs_db: str)
     retry = await start(runs_db, request("m-1", task_id="task-retry"))
 
     assert isinstance(first, RunCreated)
-    assert retry == RunReused(run_id=first.run_id)
+    assert retry == RunReused(run_id=first.run_id, root_run_id=first.run_id)
     assert await count_runs(runs_db) == 1
 
 
@@ -98,6 +98,23 @@ async def test_child_runs_draw_on_the_root_budget(runs_db: str) -> None:
     assert child.reason is RejectReason.CHAIN_BUDGET
 
 
+async def test_a_run_reports_the_root_of_its_chain_created_or_reused(runs_db: str) -> None:
+    root = await start(runs_db, request("m-root"))
+    assert isinstance(root, RunCreated)
+    assert root.root_run_id == root.run_id
+
+    child = await start(
+        runs_db, request("m-child", caller="agent:discovery", root_run_id=root.run_id)
+    )
+    retry = await start(
+        runs_db, request("m-child", caller="agent:discovery", root_run_id=root.run_id)
+    )
+
+    assert isinstance(child, RunCreated)
+    assert child.root_run_id == root.run_id
+    assert retry == RunReused(run_id=child.run_id, root_run_id=root.run_id)
+
+
 async def test_a_rejected_request_is_not_recorded_so_its_retry_is_reconsidered(
     runs_db: str,
 ) -> None:
@@ -130,4 +147,6 @@ async def test_a_reused_run_reports_its_current_status(runs_db: str) -> None:
     async with await psycopg.AsyncConnection.connect(runs_db, autocommit=True) as conn:
         await conn.execute("UPDATE runs SET status = 'canceled' WHERE id = %s", (first.run_id,))
 
-    assert await start(runs_db, request("m-1")) == RunReused(run_id=first.run_id, status="canceled")
+    assert await start(runs_db, request("m-1")) == RunReused(
+        run_id=first.run_id, root_run_id=first.run_id, status="canceled"
+    )

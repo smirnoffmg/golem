@@ -11,12 +11,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from cryptography.exceptions import UnsupportedAlgorithm
 
 from golem.edge.policy import Registry
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef
 from golem.orchestrator.merge_requests import GitLabProject
 from golem.orchestrator.service import JobTemplate
+from golem.run_token import SigningKey
 
 DEFAULT_PORT = "8000"
 
@@ -57,6 +59,9 @@ class TaskServiceSettings:
     estimated_cost: Decimal
     template: JobTemplate
     catalogs_file: Path
+    agent_tools_file: Path
+    run_token_key_file: Path
+    run_token_kid: str
     kubernetes: Kubernetes
     public_base_url: str
     port: int
@@ -141,6 +146,9 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
         "GOLEM_JOB_CPU",
         "GOLEM_JOB_MEMORY",
         "GOLEM_CATALOGS_FILE",
+        "GOLEM_AGENT_TOOLS_FILE",
+        "GOLEM_RUN_TOKEN_KEY_FILE",
+        "GOLEM_RUN_TOKEN_KID",
         "GOLEM_KUBERNETES_NAMESPACE",
         "GOLEM_KUBERNETES",
         "GOLEM_PUBLIC_BASE_URL",
@@ -165,8 +173,12 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
             ttl_seconds_after_finished=_non_negative_int(v, "GOLEM_JOB_TTL_SECONDS"),
             cpu=v["GOLEM_JOB_CPU"],
             memory=v["GOLEM_JOB_MEMORY"],
+            mcp_registry_configmap=env.get("GOLEM_MCP_REGISTRY_CONFIGMAP", "").strip() or None,
         ),
         catalogs_file=Path(v["GOLEM_CATALOGS_FILE"]),
+        agent_tools_file=Path(v["GOLEM_AGENT_TOOLS_FILE"]),
+        run_token_key_file=Path(v["GOLEM_RUN_TOKEN_KEY_FILE"]),
+        run_token_kid=v["GOLEM_RUN_TOKEN_KID"],
         kubernetes=_kubernetes(v),
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
@@ -222,6 +234,25 @@ def parse_catalog_refs(text: str) -> dict[str, CatalogRef]:
             raise SettingsError(f"catalogs: {agent!r} must be '<url>#<revision>', got {value!r}")
         refs[str(agent)] = CatalogRef(url=url, revision=revision)
     return refs
+
+
+def parse_agent_tools(text: str) -> dict[str, tuple[str, ...]]:
+    """``agent: [tool group, ...]``: the platform's grant, whatever the agent's catalog asks for."""
+    grants: dict[str, tuple[str, ...]] = {}
+    for agent, groups in _yaml_mapping(text, "agent tools").items():
+        if not isinstance(groups, list) or not all(isinstance(g, str) and g for g in groups):
+            raise SettingsError(f"agent tools: {agent!r} must map to a list of tool group names")
+        grants[str(agent)] = tuple(groups)
+    return grants
+
+
+def parse_signing_key(pem: str, kid: str) -> SigningKey:
+    try:
+        return SigningKey.from_pem(pem, kid)
+    except (ValueError, TypeError, UnsupportedAlgorithm) as error:
+        raise SettingsError(
+            f"GOLEM_RUN_TOKEN_KEY_FILE must hold an unencrypted EC P-256 private key: {error}"
+        ) from error
 
 
 def parse_gitlab_projects(text: str) -> dict[str, GitLabProject]:

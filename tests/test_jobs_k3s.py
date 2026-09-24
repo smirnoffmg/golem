@@ -6,7 +6,8 @@ from collections.abc import Iterator
 from dataclasses import replace
 
 import pytest
-from kubernetes.client import ApiClient, BatchV1Api, CoreV1Api, NetworkingV1Api
+from kubernetes.client import ApiClient, BatchV1Api, CoreV1Api, NetworkingV1Api, V1Secret
+from kubernetes.client.exceptions import ApiException
 
 from golem.orchestrator.jobs import (
     CatalogRef,
@@ -21,10 +22,14 @@ from golem.orchestrator.jobs import (
     build_job_manifest,
     build_network_policy,
     job_name,
+    token_secret_name,
 )
+from golem.run_token import RunClaims, SigningKey, issue
 
 NAMESPACE = "golem-jobs-test"
 SECRET = "golem-run-secrets"
+MCP_CONFIGMAP = "golem-mcp-registry"
+SIGNING_KEY = SigningKey.generate(kid="k3s-test")
 
 
 @pytest.fixture(scope="module")
@@ -36,6 +41,14 @@ def namespace(k3s_api_client: ApiClient) -> Iterator[str]:
         NAMESPACE,
         {"metadata": {"name": SECRET}, "stringData": {"MODEL_GATEWAY_KEY": "test-only"}},
     )
+    # The platform's MCP registry, which a deployment keeps in a ConfigMap.
+    core.create_namespaced_config_map(
+        NAMESPACE,
+        {
+            "metadata": {"name": MCP_CONFIGMAP},
+            "data": {"registry.yaml": "wiki.read:\n  url: http://mcp:8080/mcp\n"},
+        },
+    )
     yield NAMESPACE
     core.delete_namespace(NAMESPACE)
 
@@ -45,9 +58,15 @@ def launcher(k3s_api_client: ApiClient, namespace: str) -> KubernetesJobLauncher
     return KubernetesJobLauncher(k3s_api_client, namespace)
 
 
+def token_for(run_id: str) -> str:
+    claims = RunClaims(run_id, "reviewer", "user:alice", run_id, ("wiki.read",), 2_000_000_000)
+    return issue(claims, SIGNING_KEY, now=1_800_000_000)
+
+
 def busybox_spec(namespace: str, script: str) -> JobSpec:
+    run_id = str(uuid.uuid4())
     return JobSpec(
-        run_id=str(uuid.uuid4()),
+        run_id=run_id,
         agent="reviewer",
         image="busybox:1.37",
         namespace=namespace,
@@ -59,6 +78,7 @@ def busybox_spec(namespace: str, script: str) -> JobSpec:
         cpu="100m",
         memory="64Mi",
         command=("sh", "-c", script),
+        run_token=token_for(run_id),
     )
 
 
@@ -212,3 +232,93 @@ def test_the_termination_message_of_a_finished_run_is_read_back(
 
 def test_an_unknown_run_has_no_termination_message(launcher: KubernetesJobLauncher) -> None:
     assert launcher.termination_message("no-such-run") is None
+
+
+def read_token_secret(launcher: KubernetesJobLauncher, run_id: str) -> V1Secret:
+    return CoreV1Api(launcher.api_client).read_namespaced_secret(
+        token_secret_name(run_id), launcher.namespace
+    )
+
+
+def test_the_job_sees_its_run_token_and_the_mounted_mcp_registry(
+    launcher: KubernetesJobLauncher,
+) -> None:
+    job = busybox_spec(launcher.namespace, "exit 1")
+    job = replace(
+        job,
+        mcp_registry_configmap=MCP_CONFIGMAP,
+        command=(
+            "sh",
+            "-c",
+            f'[ "$GOLEM_RUN_TOKEN" = "{job.run_token}" ]'
+            ' && [ "$GOLEM_MCP_REGISTRY" = /etc/golem/mcp/registry.yaml ]'
+            " && grep -q wiki.read /etc/golem/mcp/registry.yaml"
+            " && ! touch /etc/golem/mcp/x 2>/dev/null",
+        ),
+    )
+
+    launcher.launch(job)
+
+    wait_for_job(launcher, job.run_id, JobStatus.SUCCEEDED)
+
+
+def test_the_token_secret_is_owned_by_its_job(
+    launcher: KubernetesJobLauncher, k3s_api_client: ApiClient
+) -> None:
+    job = busybox_spec(launcher.namespace, "exit 0")
+
+    launcher.launch(job)
+
+    created = BatchV1Api(k3s_api_client).read_namespaced_job(job_name(job.run_id), NAMESPACE)
+    [owner] = read_token_secret(launcher, job.run_id).metadata.owner_references
+    assert (owner.kind, owner.name, owner.uid) == (
+        "Job",
+        job_name(job.run_id),
+        created.metadata.uid,
+    )
+
+
+def test_launch_twice_creates_one_token_secret(
+    launcher: KubernetesJobLauncher, k3s_api_client: ApiClient
+) -> None:
+    job = busybox_spec(launcher.namespace, "exit 0")
+
+    launcher.launch(job)
+    launcher.launch(replace(job, run_token=token_for(job.run_id) + "x"))
+
+    secrets = CoreV1Api(k3s_api_client).list_namespaced_secret(
+        launcher.namespace, label_selector=f"golem.dev/run-id={job.run_id}"
+    )
+    assert [s.metadata.name for s in secrets.items] == [token_secret_name(job.run_id)]
+
+
+def test_a_job_left_without_its_token_secret_starts_once_a_relaunch_creates_it(
+    launcher: KubernetesJobLauncher, k3s_api_client: ApiClient
+) -> None:
+    # A crash between creating the Job and its Secret: the pod waits (optional: false) and the
+    # orchestrator's relaunch of the running run heals it.
+    job = busybox_spec(launcher.namespace, '[ -n "$GOLEM_RUN_TOKEN" ]')
+    BatchV1Api(k3s_api_client).create_namespaced_job(NAMESPACE, build_job_manifest(job))
+    time.sleep(5)
+    assert launcher.status(job.run_id) is not JobStatus.SUCCEEDED
+
+    launcher.launch(job)
+
+    wait_for_job(launcher, job.run_id, JobStatus.SUCCEEDED)
+
+
+def test_deleting_the_job_deletes_its_token_secret(launcher: KubernetesJobLauncher) -> None:
+    job = busybox_spec(launcher.namespace, "sleep 300")
+    launcher.launch(job)
+
+    launcher.delete(job.run_id)
+
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            read_token_secret(launcher, job.run_id)
+        except ApiException as error:
+            assert error.status == 404
+            return
+        time.sleep(1)
+    pytest.fail("the token secret outlived its Job")

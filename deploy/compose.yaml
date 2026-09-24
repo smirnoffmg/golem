@@ -63,7 +63,14 @@ services:
 
   tasks:
     <<: *app
-    command: ["python", "-m", "golem.tasks"]
+    # A throwaway run token key per start: nothing outside compose verifies these tokens.
+    command:
+      - sh
+      - -c
+      - >-
+        python -c "from golem.run_token import SigningKey;
+        print(SigningKey.generate('dev').private_pem)" > /tmp/run-token-key.pem
+        && exec python -m golem.tasks
     environment:
       GOLEM_RUNS_DSN: &runs-dsn host=postgres dbname=golem_runs user=golem_runs password=dev-only-golem-runs
       GOLEM_TASKS_DB_URL: postgresql+asyncpg://golem_tasks:dev-only-golem-tasks@postgres/golem_tasks
@@ -78,12 +85,17 @@ services:
       GOLEM_JOB_CPU: "1"
       GOLEM_JOB_MEMORY: 1Gi
       GOLEM_CATALOGS_FILE: /etc/golem/catalogs.yaml
+      GOLEM_AGENT_TOOLS_FILE: /etc/golem/agent-tools.yaml
+      GOLEM_RUN_TOKEN_KEY_FILE: /tmp/run-token-key.pem
+      GOLEM_RUN_TOKEN_KID: dev
       GOLEM_KUBERNETES_NAMESPACE: golem-jobs
       GOLEM_KUBERNETES: none
       GOLEM_PUBLIC_BASE_URL: http://127.0.0.1:${GOLEM_EDGE_PORT:-8480}
     configs:
       - source: catalogs
         target: /etc/golem/catalogs.yaml
+      - source: agent-tools
+        target: /etc/golem/agent-tools.yaml
     depends_on:
       postgres:
         condition: service_healthy
@@ -114,6 +126,9 @@ configs:
   catalogs:
     content: |
       discovery: https://git.example.com/agents/discovery.git#main
+  agent-tools:
+    content: |
+      discovery: [tracker.read, wiki.read]
   projects:
     content: |
       discovery:

@@ -142,6 +142,15 @@ hold the secrets to the systems behind them. A call is bounded by a timeout (the
 an error result) and a result by a size cap (cut with a `[truncated: ...]` marker); large
 results that fit are offloaded to agent state, never to the clone.
 
+The orchestrator issues the run token when it launches the Job ([ADR 0007](docs/adr/0007-run-tokens.md)):
+ES256 with the key in `GOLEM_RUN_TOKEN_KEY_FILE` (`GOLEM_RUN_TOKEN_KID`), audience `golem-mcp`,
+naming the run, agent, caller and root run, with the tool groups `GOLEM_AGENT_TOOLS_FILE` grants
+the agent (`discovery: [tracker.read, wiki.read]`), and expiring a minute after the Job's
+deadline. It reaches the Job through a Secret `golem-run-<run id>-token` owned by the Job, so it
+is deleted with it. MCP servers verify it against the JWKS at the task service's internal
+`GET /internal/run-keys`. With `GOLEM_MCP_REGISTRY_CONFIGMAP` set, that ConfigMap is mounted
+read-only as the registry.
+
 ## Jira adapter
 
 Putting a label on an issue starts an agent; the outcome comes back as a comment.

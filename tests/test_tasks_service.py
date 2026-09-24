@@ -2,12 +2,14 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+import jwt
 import pytest
 from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface
 from starlette.authentication import SimpleUser
 from starlette.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from golem.run_token import RunClaims, SigningKey, issue, verify
 from golem.tasks.app import create_app
 from golem.tasks.ports import Refused, RunStart, Started
 
@@ -280,3 +282,21 @@ def test_a_repeated_outcome_is_accepted_and_changes_nothing(client: TestClient) 
 
     assert again.status_code == 200
     assert get_task(client, task["id"])["status"]["state"] == "TASK_STATE_COMPLETED"
+
+
+def test_run_signing_keys_are_served_on_an_internal_route_the_edge_does_not_forward(
+    orchestrator: FakeOrchestrator,
+) -> None:
+    key = SigningKey.generate(kid="run-2026-09")
+    claims = RunClaims("run-1", "reviewer", "user:alice", "run-1", ("wiki.read",), 2_000)
+    app = create_app(make_card(), orchestrator, run_keys=(key,))
+
+    with TestClient(app) as client:
+        response = client.get("/internal/run-keys")
+
+    assert response.status_code == 200
+    jwks = response.json()
+    [public] = jwks["keys"]
+    assert (public["kid"], public["kty"], public["crv"]) == ("run-2026-09", "EC", "P-256")
+    assert "d" not in public
+    assert verify(issue(claims, key, now=1_000), jwt.PyJWKSet.from_dict(jwks), now=1_000) == claims

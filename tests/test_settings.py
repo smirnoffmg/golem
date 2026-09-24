@@ -6,13 +6,16 @@ import pytest
 from golem.edge.policy import Registry
 from golem.orchestrator.jobs import CatalogRef
 from golem.orchestrator.merge_requests import GitLabProject
+from golem.run_token import SigningKey
 from golem.settings import (
     Kubernetes,
     SettingsError,
     edge_settings,
+    parse_agent_tools,
     parse_catalog_refs,
     parse_gitlab_projects,
     parse_registry,
+    parse_signing_key,
     reconciler_settings,
     task_service_settings,
 )
@@ -47,6 +50,9 @@ TASKS_ENV = {
     "GOLEM_KUBERNETES_NAMESPACE": "team-jobs",
     "GOLEM_KUBERNETES": "in-cluster",
     "GOLEM_PUBLIC_BASE_URL": "https://golem.example.test",
+    "GOLEM_AGENT_TOOLS_FILE": "/etc/golem/agent-tools.yaml",
+    "GOLEM_RUN_TOKEN_KEY_FILE": "/etc/golem/run-token/key.pem",
+    "GOLEM_RUN_TOKEN_KID": "run-2026-09",
 }
 
 RECONCILER_ENV = {
@@ -223,3 +229,72 @@ def test_gitlab_projects_name_the_project_and_target_branch() -> None:
 def test_a_gitlab_project_without_target_branch_is_refused() -> None:
     with pytest.raises(SettingsError, match="discovery"):
         parse_gitlab_projects("discovery:\n  project: product/discovery-context\n")
+
+
+def test_task_service_settings_name_the_run_token_key_and_agent_tools() -> None:
+    settings = task_service_settings(TASKS_ENV)
+
+    assert settings.agent_tools_file == Path("/etc/golem/agent-tools.yaml")
+    assert settings.run_token_key_file == Path("/etc/golem/run-token/key.pem")
+    assert settings.run_token_kid == "run-2026-09"
+
+
+def test_run_token_variables_are_named_with_the_other_missing_ones() -> None:
+    env = {
+        k: v
+        for k, v in TASKS_ENV.items()
+        if k not in {"GOLEM_RUN_TOKEN_KEY_FILE", "GOLEM_RUN_TOKEN_KID", "GOLEM_JOB_IMAGE"}
+    }
+
+    with pytest.raises(SettingsError) as error:
+        task_service_settings(env)
+
+    message = str(error.value)
+    for name in ("GOLEM_RUN_TOKEN_KEY_FILE", "GOLEM_RUN_TOKEN_KID", "GOLEM_JOB_IMAGE"):
+        assert name in message
+
+
+def test_the_mcp_registry_config_map_is_optional() -> None:
+    assert task_service_settings(TASKS_ENV).template.mcp_registry_configmap is None
+
+    settings = task_service_settings({**TASKS_ENV, "GOLEM_MCP_REGISTRY_CONFIGMAP": "golem-mcp"})
+
+    assert settings.template.mcp_registry_configmap == "golem-mcp"
+
+
+def test_a_signing_key_is_loaded_from_its_pem() -> None:
+    pem = SigningKey.generate(kid="ignored").private_pem
+
+    assert parse_signing_key(pem, "run-2026-09") == SigningKey(kid="run-2026-09", private_pem=pem)
+
+
+def rsa_pem() -> str:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+
+
+@pytest.mark.parametrize("pem", ["not a key", "", "rsa"])
+def test_a_bad_signing_key_names_its_variable(pem: str) -> None:
+    with pytest.raises(SettingsError, match="GOLEM_RUN_TOKEN_KEY_FILE"):
+        parse_signing_key(rsa_pem() if pem == "rsa" else pem, "run-2026-09")
+
+
+def test_agent_tools_map_each_agent_to_its_granted_groups() -> None:
+    grants = parse_agent_tools("discovery: [tracker.read, wiki.read]\nreviewer: []\n")
+
+    assert grants == {"discovery": ("tracker.read", "wiki.read"), "reviewer": ()}
+
+
+@pytest.mark.parametrize(
+    "text", ["- discovery\n", "discovery: tracker.read\n", "discovery: [1]\n", "discovery:\n"]
+)
+def test_malformed_agent_tools_are_refused(text: str) -> None:
+    with pytest.raises(SettingsError, match="agent tools"):
+        parse_agent_tools(text)

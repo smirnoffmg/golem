@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 import pytest
-from test_tasks_to_runs import CATALOG, TEMPLATE
+from test_tasks_to_runs import CATALOG, GRANTS, SIGNING_KEY, TEMPLATE
 
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.launchers import NO_CLUSTER, NoCluster, launcher_for
@@ -22,6 +22,8 @@ async def test_without_a_cluster_every_run_is_refused_with_the_reason(runs_db: s
         launcher=NoCluster(),
         template=TEMPLATE,
         catalogs={"discovery": CATALOG},
+        signing_key=SIGNING_KEY,
+        grants=GRANTS,
     )
 
     outcome = await orchestrator.start(

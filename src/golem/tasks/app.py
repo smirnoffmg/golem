@@ -32,11 +32,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from golem.run_token import SigningKey, public_jwks
 from golem.tasks.executor import RUN_OUTCOME, RunExecutor
 from golem.tasks.ports import Orchestrator, RunOutcome
 
 RPC_PATH = "/a2a"
 OUTCOME_PATH = "/internal/run-outcome"
+# Platform MCP servers verify run tokens against these keys; like the outcome route, it is
+# reachable inside the cluster only, since the edge forwards nothing but the A2A path.
+RUN_KEYS_PATH = "/internal/run-keys"
 OUTCOME_STATUSES = {"succeeded": True, "failed": False}
 TERMINAL_STATES = {
     TaskState.TASK_STATE_COMPLETED,
@@ -88,6 +92,7 @@ def create_app(
     orchestrator: Orchestrator,
     task_store: TaskStore | None = None,
     push: PushDelivery | None = None,
+    run_keys: tuple[SigningKey, ...] = (),
 ) -> Starlette:
     push_options = {}
     if push is not None:
@@ -159,9 +164,17 @@ def create_app(
             return JSONResponse({"error": "task not found"}, status_code=404)
         return JSONResponse({"task_id": body["task_id"]})
 
+    jwks = public_jwks(run_keys)
+
+    async def run_signing_keys(_: Request) -> Response:
+        return JSONResponse(jwks)
+
     return Starlette(
         routes=create_agent_card_routes(card)
         + create_jsonrpc_routes(handler, RPC_PATH, EdgeContextBuilder())
-        + [Route(OUTCOME_PATH, run_outcome, methods=["POST"])],
+        + [
+            Route(OUTCOME_PATH, run_outcome, methods=["POST"]),
+            Route(RUN_KEYS_PATH, run_signing_keys, methods=["GET"]),
+        ],
         lifespan=lifespan,
     )

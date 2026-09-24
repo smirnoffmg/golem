@@ -9,7 +9,7 @@ import psycopg
 import pytest
 from test_reconcile import StatusBoard
 from test_tasks_service import make_card
-from test_tasks_to_runs import CATALOG, TEMPLATE
+from test_tasks_to_runs import CATALOG, GRANTS, SIGNING_KEY, TEMPLATE
 
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import JobStatus
@@ -33,6 +33,8 @@ async def task_service(runs_db: str, board: StatusBoard) -> AsyncIterator[httpx.
         launcher=board,
         template=TEMPLATE,
         catalogs={"discovery": CATALOG},
+        signing_key=SIGNING_KEY,
+        grants=GRANTS,
     )
     app = create_app(make_card(), orchestrator)
     async with httpx.AsyncClient(

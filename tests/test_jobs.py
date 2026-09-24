@@ -14,11 +14,14 @@ from golem.orchestrator.jobs import (
     JobStatus,
     build_job_manifest,
     build_network_policy,
+    build_token_secret,
     job_name,
     job_status_of,
+    token_secret_name,
 )
 
 RUN_ID = "3f2b8c1e-8d4a-4c3e-9a57-0b7f2d6e1a90"
+RUN_TOKEN = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJydW4ifQ.c2lnbmF0dXJl"
 
 
 def spec(**changes: object) -> JobSpec:
@@ -34,6 +37,7 @@ def spec(**changes: object) -> JobSpec:
         ttl_seconds_after_finished=600,
         cpu="500m",
         memory="1Gi",
+        run_token=RUN_TOKEN,
     )
     return replace(base, **changes)
 
@@ -138,14 +142,57 @@ def test_run_parameters_are_passed_as_environment() -> None:
     }
 
 
-def test_secrets_come_only_by_reference_to_the_operator_managed_secret() -> None:
+def test_secrets_come_only_by_reference_to_the_shared_and_the_per_run_secret() -> None:
     manifest = build_job_manifest(spec())
 
     assert container(manifest)["envFrom"] == [
-        {"secretRef": {"name": "golem-run-secrets", "optional": False}}
+        {"secretRef": {"name": "golem-run-secrets", "optional": False}},
+        {"secretRef": {"name": f"golem-run-{RUN_ID}-token", "optional": False}},
     ]
     assert all("valueFrom" not in item for item in container(manifest)["env"])
     assert "secret" not in str(pod_spec(manifest)["volumes"]).lower()
+
+
+def test_the_run_token_never_appears_in_the_job_manifest() -> None:
+    assert RUN_TOKEN not in str(build_job_manifest(spec(mcp_registry_configmap="golem-mcp")))
+
+
+def test_the_run_token_is_hidden_from_the_spec_repr() -> None:
+    assert RUN_TOKEN not in repr(spec())
+
+
+def test_without_a_registry_config_map_nothing_is_mounted_for_mcp() -> None:
+    manifest = build_job_manifest(spec())
+
+    assert "GOLEM_MCP_REGISTRY" not in env_of(manifest)
+    assert "configMap" not in str(pod_spec(manifest)["volumes"])
+
+
+def test_the_mcp_registry_is_mounted_read_only_and_named_in_the_environment() -> None:
+    manifest = build_job_manifest(spec(mcp_registry_configmap="golem-mcp"))
+    volumes = {v["name"]: v for v in pod_spec(manifest)["volumes"]}
+    mounts = {m["mountPath"]: m for m in container(manifest)["volumeMounts"]}
+
+    assert mounts["/etc/golem/mcp"]["readOnly"] is True
+    assert volumes[mounts["/etc/golem/mcp"]["name"]]["configMap"] == {"name": "golem-mcp"}
+    assert env_of(manifest)["GOLEM_MCP_REGISTRY"] == "/etc/golem/mcp/registry.yaml"
+
+
+def test_the_token_secret_holds_the_token_and_is_owned_by_the_job() -> None:
+    secret = build_token_secret(spec(), job_uid="0b7f2d6e-1a90-4c3e-9a57-3f2b8c1e8d4a")
+
+    assert secret["metadata"]["name"] == token_secret_name(RUN_ID) == f"golem-run-{RUN_ID}-token"
+    assert secret["metadata"]["namespace"] == "team-a-jobs"
+    assert secret["metadata"]["labels"]["golem.dev/run-id"] == RUN_ID
+    assert secret["stringData"] == {"GOLEM_RUN_TOKEN": RUN_TOKEN}
+    assert secret["metadata"]["ownerReferences"] == [
+        {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "name": job_name(RUN_ID),
+            "uid": "0b7f2d6e-1a90-4c3e-9a57-3f2b8c1e8d4a",
+        }
+    ]
 
 
 def test_default_command_starts_the_runtime() -> None:
@@ -187,6 +234,9 @@ def test_command_can_be_overridden() -> None:
         {"cpu": ""},
         {"memory": ""},
         {"command": ()},
+        {"run_token": ""},
+        {"mcp_registry_configmap": ""},
+        {"mcp_registry_configmap": "Golem_MCP"},
     ],
 )
 def test_invalid_spec_is_rejected(changes: dict) -> None:

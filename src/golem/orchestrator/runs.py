@@ -23,11 +23,13 @@ class StartRequest:
 @dataclass(frozen=True)
 class RunCreated:
     run_id: str
+    root_run_id: str
 
 
 @dataclass(frozen=True)
 class RunReused:
     run_id: str
+    root_run_id: str
     status: str = "running"
 
 
@@ -60,9 +62,9 @@ async def start_run(
 
         existing = await _find_run(conn, request.caller, request.message_id)
         if existing is not None:
-            run_id_found, status = existing
+            run_id_found, root_found, status = existing
             await _map_task(conn, request.task_id, run_id_found)
-            return RunReused(run_id=run_id_found, status=status)
+            return RunReused(run_id=run_id_found, root_run_id=root_found, status=status)
 
         decision = admit(
             RunRequest(request.caller, root_run_id, request.estimated_cost),
@@ -86,7 +88,7 @@ async def start_run(
             ),
         )
         await _map_task(conn, request.task_id, run_id)
-    return RunCreated(run_id=run_id)
+    return RunCreated(run_id=run_id, root_run_id=root_run_id)
 
 
 async def cancel_run_of_task(conn: AsyncConnection, task_id: str) -> str | None:
@@ -113,12 +115,15 @@ async def _map_task(conn: AsyncConnection, task_id: str, run_id: str) -> None:
     )
 
 
-async def _find_run(conn: AsyncConnection, caller: str, message_id: str) -> tuple[str, str] | None:
+async def _find_run(
+    conn: AsyncConnection, caller: str, message_id: str
+) -> tuple[str, str, str] | None:
     cursor = await conn.execute(
-        "SELECT id, status FROM runs WHERE caller = %s AND message_id = %s", (caller, message_id)
+        "SELECT id, root_run_id, status FROM runs WHERE caller = %s AND message_id = %s",
+        (caller, message_id),
     )
     row = await cursor.fetchone()
-    return None if row is None else (str(row[0]), row[1])
+    return None if row is None else (str(row[0]), str(row[1]), row[2])
 
 
 async def _load(conn: AsyncConnection, caller: str, root_run_id: str) -> Load:

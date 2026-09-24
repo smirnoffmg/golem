@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+import jwt
 import psycopg
 import pytest
 from starlette.testclient import TestClient
@@ -13,6 +14,7 @@ from test_tasks_service import make_card
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef, JobSpec, JobStatus
 from golem.orchestrator.service import JobTemplate, PostgresOrchestrator
+from golem.run_token import RunClaims, SigningKey, public_jwks, verify
 from golem.tasks.app import create_app
 
 CATALOG = CatalogRef(url="https://git.example.com/agents/discovery.git", revision="v1")
@@ -25,6 +27,13 @@ TEMPLATE = JobTemplate(
     cpu="1",
     memory="1Gi",
 )
+SIGNING_KEY = SigningKey.generate(kid="test-key")
+GRANTS = {"discovery": ("tracker.read", "wiki.read")}
+NOW = 1_800_000_000
+
+
+def fixed_clock() -> float:
+    return NOW
 
 
 @dataclass
@@ -63,7 +72,10 @@ def client(runs_db: str, launcher: FakeLauncher) -> Iterator[TestClient]:
         estimated_cost=Decimal("1"),
         launcher=launcher,
         template=TEMPLATE,
-        catalogs={"discovery": CATALOG},
+        catalogs={"discovery": CATALOG, "reviewer": CATALOG},
+        signing_key=SIGNING_KEY,
+        grants=GRANTS,
+        clock=fixed_clock,
     )
     with TestClient(create_app(make_card(), orchestrator)) as test_client:
         yield test_client
@@ -203,3 +215,38 @@ def test_canceling_the_task_deletes_the_job(client: TestClient, launcher: FakeLa
     rpc(client, "CancelTask", {"id": task["id"], "tenant": "discovery"})
 
     assert launcher.deleted == [task["metadata"]["runId"]]
+
+
+def verified(token: str) -> object:
+    return verify(token, jwt.PyJWKSet.from_dict(public_jwks([SIGNING_KEY])), now=NOW)
+
+
+def test_a_launched_job_carries_a_run_token_with_the_agents_grants(
+    client: TestClient, launcher: FakeLauncher
+) -> None:
+    client.headers["X-Golem-Principal"] = "user:alice"
+
+    task = send(client, "m-1")
+
+    [spec] = launcher.launched
+    claims = verified(spec.run_token)
+    run_id = task["metadata"]["runId"]
+    assert claims == RunClaims(
+        run_id=run_id,
+        agent="discovery",
+        caller="user:alice",
+        root_run_id=run_id,
+        tools=("tracker.read", "wiki.read"),
+        expires_at=NOW + TEMPLATE.active_deadline_seconds + 60,
+    )
+
+
+def test_an_agent_the_platform_granted_nothing_gets_a_token_without_tools(
+    client: TestClient, launcher: FakeLauncher
+) -> None:
+    send(client, "m-1", tenant="reviewer")
+
+    [spec] = launcher.launched
+    claims = verified(spec.run_token)
+    assert isinstance(claims, RunClaims)
+    assert claims.tools == ()
