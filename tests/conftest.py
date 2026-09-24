@@ -3,6 +3,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from kubernetes.client import ApiClient
 from testcontainers.community.postgres import PostgresContainer
 
 INIT_SQL = Path(__file__).parent.parent / "deploy" / "postgres" / "init.sql"
@@ -53,3 +54,17 @@ async def audit_admin_dsn(postgres: PostgresContainer) -> AsyncIterator[str]:
     async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
         await conn.execute("TRUNCATE audit_log")
     yield dsn
+
+
+@pytest.fixture(scope="session")
+def k3s_api_client() -> Iterator[ApiClient]:
+    import yaml
+    from kubernetes.config import new_client_from_config_dict
+    from testcontainers.community.k3s import K3SContainer
+
+    with K3SContainer("rancher/k3s:v1.33.4-k3s1") as k3s:
+        api_client = new_client_from_config_dict(
+            yaml.safe_load(k3s.config_yaml()), persist_config=False
+        )
+        with api_client:
+            yield api_client
