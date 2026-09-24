@@ -1,0 +1,13 @@
+goal: Work the discovery backlog
+expect:
+  outcome: proposed
+  role: designer
+  target: H-3
+  checks:
+    sections_filled:
+      S-1: [Approach, Risks]
+    files_changed_under: solutions/
+    must_contain:
+      S-1: ["links: [H-3]", "status: proposed"]
+    must_not_contain:
+      S-1: [recommendation]

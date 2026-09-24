@@ -2,8 +2,9 @@
 
 The intended architecture of Golem in C4 notation: context, containers, and components of the
 four containers that matter most. There is no code level on purpose. Nothing here is deployed;
-the run lifecycle is implemented (see the README), the channel adapters, UI and evaluation
-workflow are not.
+the run lifecycle and the Jira channel adapter are implemented (see the README), and
+evaluation runs in its pilot form in the catalog's CI job; the other channel adapters, UI and
+the orchestrator's evaluation workflow are not.
 
 **Pilot and target on the same diagrams.** Pale elements and dashed relationships are the
 target picture and are not part of the pilot. Everything else is the pilot: entry over A2A,
@@ -114,6 +115,15 @@ incoming task spawns a Job in the team namespace:
 - outbound calls to other platforms: timeout and circuit breaker, so a platform that stopped
   answering cannot hold Golem's Jobs.
 
+**The Jira adapter is an A2A client like any other.** A label added to an issue arrives as a
+`jira:issue_updated` webhook signed with a shared secret (`X-Hub-Signature: sha256=<HMAC of the
+body>`); an unsigned or badly signed request is refused. A label from the mapping file becomes
+a `SendMessage` to the edge as `service:<client id>` (OAuth 2.0 client credentials), with the
+agent as `tenant`, a message id derived from the issue, the label and the signed timestamp, so
+Jira's retries start one run, and a push notification config with a per-run token. A terminal
+push becomes one comment on the issue: the comment carries the task id, and the adapter looks
+for it before posting, so a repeated push does not comment twice and the adapter keeps no state.
+
 ```plantuml
 @startuml
 !include <C4/C4_Container>
@@ -168,6 +178,7 @@ Rel(tasks, adapters, "state change", "push")
 BiRel(ext_agents, edge, "tasks both ways; outbound behind a circuit breaker", "A2A 1.0", $tags="target")
 BiRel(adapters, mattermost, "commands, notifications")
 Rel(atlassian, adapters, "Jira webhook")
+Rel(adapters, atlassian, "comment with the outcome", "Jira REST API v2")
 
 Rel(edge, keycloak, "token validation and exchange", "OIDC, RFC 8693")
 Rel(edge, gitlab, "catalogs for cards; call registry", "cached")
@@ -317,6 +328,13 @@ in the same runtime image, compares the scores with the last merged version in L
 experiments, and returns the verdict as a task artifact. Below the threshold the CI job fails
 and "Pipelines must succeed" blocks the merge. An agent changes only through the same gate as
 code.
+
+**Evaluation in the pilot.** Until this workflow exists, the CI job runs the evaluation itself
+([ADR 0006](adr/0006-evaluation-in-ci-first.md)): `python -m golem.evaluation run` in the Golem
+image runs every golden-set case through the runtime's own `run` against local bare
+repositories, applies structural checks to the proposal branch (no judge, no Langfuse), and
+fails the job when the pass rate is below the threshold or a case that passed in the baseline
+fails. Moving it into a Job keeps the same command.
 
 ```plantuml
 @startuml

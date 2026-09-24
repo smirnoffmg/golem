@@ -1,0 +1,5 @@
+goal: Work the discovery backlog
+# Every target the rules would pick already has an open proposal.
+pending: [H-2, H-3, S-1]
+expect:
+  outcome: idle

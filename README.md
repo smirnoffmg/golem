@@ -68,12 +68,14 @@ src/golem/
   edge/cards.py            A2A Agent Cards generated from the catalog
   edge/auth.py, audit.py, app.py  the A2A edge: JWT check, audit row, forwarding; fails closed
   tasks/                   A2A task service: tasks in golem_tasks, run outcomes via an internal route
-  adapters/                channel adapters (A2A clients)
+  evaluation/              the quality gate of catalog merge requests: golden set, runs, gate, CLI
+  adapters/jira.py         Jira adapter: signed label webhook to SendMessage, task push to a comment
 deploy/
   compose.yaml             local Postgres, edge, task service and reconciler
   postgres/init.sql        databases, roles and grants
 examples/
   discovery/               an example agent catalog: kinds, roles, rules, role instructions
+  discovery/evals/         its golden set; discovery/.gitlab-ci.yml runs the gate on merge requests
   context/                 an example context repository the discovery agent works on
 docs/
   architecture.md          C4 diagrams (PlantUML)
@@ -93,10 +95,12 @@ docker compose -f deploy/compose.yaml up --build
 GOLEM_SMOKE=1 uv run pytest tests/test_compose_smoke.py   # builds, starts and removes compose
 ```
 
-One image, three processes: `python -m golem.edge`, `python -m golem.tasks` and
-`python -m golem.orchestrator.reconciler`. Each reads its settings from `GOLEM_*` environment
-variables (`src/golem/settings.py`) and refuses to start with a list of every missing one;
-`deploy/compose.yaml` sets them all. Compose has no Kubernetes, GitLab or identity provider:
+One image, four processes: `python -m golem.edge`, `python -m golem.tasks`,
+`python -m golem.orchestrator.reconciler` and the Jira adapter `python -m golem.adapters`.
+Each reads its settings from `GOLEM_*` environment variables (`src/golem/settings.py`) and
+refuses to start with a list of every missing one; `deploy/compose.yaml` sets them all for the
+first three. The Jira adapter is not in compose: it needs Jira and an identity provider.
+Compose has no Kubernetes, GitLab or identity provider:
 the task service runs with `GOLEM_KUBERNETES=none` and refuses every run with that reason, and
 the edge cannot fetch signing keys, so it serves public agent cards on
 `http://127.0.0.1:8480` (`GOLEM_EDGE_PORT`) and answers 401 to every call.
@@ -121,9 +125,50 @@ branch. A merge request closed without merging keeps it on purpose: deleting it 
 lead propose the same target again. A rejected proposal is recorded as a status change on the
 record, which is a human decision.
 
+## Jira adapter
+
+Putting a label on an issue starts an agent; the outcome comes back as a comment.
+
+- **Jira webhook** (`POST /jira/webhook`): register a `jira:issue_updated` webhook with a
+  secret. Requests without a valid `X-Hub-Signature: sha256=<hex HMAC-SHA256 of the body>` are
+  refused with 401. `GOLEM_JIRA_LABELS_FILE` maps labels to agents (`golem:discovery: discovery`);
+  other labels and removals are ignored.
+- **To the edge**: `SendMessage` with the agent as `tenant`, message id
+  `jira:<issue>:<label>:<webhook timestamp>` (a Jira retry starts no second run) and a push
+  config pointing at `GOLEM_PUBLIC_BASE_URL/a2a/push` with a per-run token. The adapter
+  authenticates with the client credentials grant against `GOLEM_OIDC_TOKEN_URL`; the edge sees
+  it as `service:<GOLEM_OIDC_CLIENT_ID>`, which the call registry must allow for each mapped
+  agent, and the token must carry the edge's audience.
+- **Back to Jira** (`POST /a2a/push`): a terminal task state becomes one comment on the issue
+  through the REST API v2 (`/rest/api/2/issue/{key}/comment`). Jira Cloud: set
+  `GOLEM_JIRA_USER` to the account email and `GOLEM_JIRA_TOKEN` to its API token (Basic auth).
+  Jira Data Center: leave `GOLEM_JIRA_USER` unset and put a personal access token in
+  `GOLEM_JIRA_TOKEN` (Bearer).
+
+The task service does not send push notifications yet (its request handler has no push
+config store or sender), so until it does, a run started from Jira ends without a comment.
+
+Other settings: `GOLEM_EDGE_URL`, `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_JIRA_URL`,
+`GOLEM_JIRA_WEBHOOK_SECRET`, `GOLEM_PUSH_TOKEN_SECRET`, `GOLEM_PORT`.
+
+## Evaluation of a catalog change
+
+A merge request to an agent catalog runs `python -m golem.evaluation run` in the catalog
+repository's CI ([ADR 0006](docs/adr/0006-evaluation-in-ci-first.md)). Each case of the golden
+set in `evals/` is a context repository and a goal with what the run must produce: the outcome,
+the role and target the lead picks, and checks on the proposal branch (sections filled, files
+changed only under a directory, phrases present or absent). Every case runs through the same
+`golem.runtime.main.run` a Job runs, against local bare repositories. The gate passes when the
+pass rate reaches the threshold (0.8 by default) and no case that passed in `evals/baseline.json`
+fails now; the exit code fails the pipeline, and "Pipelines must succeed" blocks the merge. The
+format and the commands: [examples/discovery/evals/README.md](examples/discovery/evals/README.md).
+
 ## Status
 
 Not deployed. The whole run lifecycle above is implemented and tested: Postgres and Kubernetes
 parts against real Postgres 17 and k3s in testcontainers, git against real repositories, the
-model and GitLab through fakes at their boundaries. Not built yet: channel adapters (Jira,
-Mattermost), a UI, the evaluation workflow on catalog merge requests, and Temporal (target).
+model and GitLab through fakes at their boundaries. The Jira adapter is tested against the real
+edge and task service, with Jira and the identity provider faked at their HTTP boundaries.
+The evaluation of catalog merge requests runs in the catalog's CI job, tested with fake roles
+over the example golden set. Not built yet: the Mattermost and GitLab adapters, a UI, the
+orchestrator's evaluation workflow with a model judge and trace store, and Temporal (target).

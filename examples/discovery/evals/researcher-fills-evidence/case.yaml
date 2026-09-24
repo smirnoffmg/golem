@@ -1,0 +1,14 @@
+goal: Work the discovery backlog
+expect:
+  outcome: proposed
+  role: researcher
+  target: H-2
+  checks:
+    sections_filled:
+      H-2: [Evidence]
+    files_changed_under: hypotheses/
+    # The role must list evidence against the hypothesis too, not only for it.
+    must_contain:
+      H-2: [supports, refutes]
+    must_not_contain:
+      H-4: [supports, refutes]

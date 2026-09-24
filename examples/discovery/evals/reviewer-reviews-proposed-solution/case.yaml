@@ -1,0 +1,13 @@
+goal: Work the discovery backlog
+expect:
+  outcome: proposed
+  role: reviewer
+  target: S-1
+  checks:
+    sections_filled:
+      S-1: [Approach, Risks, Review]
+    files_changed_under: solutions/
+    must_contain:
+      S-1: [recommendation]
+    must_not_contain:
+      S-1: ["status: accepted", "status: rejected"]

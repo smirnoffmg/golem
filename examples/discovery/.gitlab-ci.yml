@@ -1,0 +1,26 @@
+# The quality gate of an agent catalog repository (docs/adr/0006-evaluation-in-ci-first.md).
+# With "Pipelines must succeed" enabled, a merge request whose evaluation fails cannot merge.
+#
+# CI/CD variables of the project:
+#   GOLEM_IMAGE              the Golem image; it runs `python -m golem.evaluation`
+#   GOLEM_MODEL_GATEWAY_URL  the model gateway's OpenAI-compatible base URL
+#   GOLEM_MODEL              the model alias the roles run on
+#   GOLEM_MODEL_KEY          masked; a gateway key with its own small budget, see the ADR
+
+evaluate:
+  image: $GOLEM_IMAGE
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - >
+      python -m golem.evaluation run
+      --catalog .
+      --cases evals
+      --threshold 0.8
+      --baseline evals/baseline.json
+      --report eval-report.json
+  artifacts:
+    when: always
+    paths:
+      - eval-report.json
+    expire_in: 30 days
