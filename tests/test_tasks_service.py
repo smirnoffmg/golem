@@ -175,3 +175,23 @@ def test_agent_card_is_served_at_well_known_path(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json()["name"] == "golem"
+
+
+def test_caller_comes_from_the_edge_principal_header(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    client.post(
+        "/a2a",
+        headers={"A2A-Version": "1.0", "X-Golem-Principal": "user:alice"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "SendMessage",
+            "params": {
+                "tenant": "reviewer",
+                "message": {"role": "ROLE_USER", "messageId": "m1", "parts": [{"text": "go"}]},
+            },
+        },
+    )
+
+    assert [run.caller for run in orchestrator.started] == ["user:alice"]
