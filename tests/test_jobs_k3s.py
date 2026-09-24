@@ -6,21 +6,16 @@ from collections.abc import Iterator
 from dataclasses import replace
 
 import pytest
-from kubernetes.client import ApiClient, BatchV1Api, CoreV1Api, NetworkingV1Api, V1Secret
+from kubernetes.client import ApiClient, BatchV1Api, CoreV1Api, V1Secret
 from kubernetes.client.exceptions import ApiException
 
 from golem.orchestrator.jobs import (
     CatalogRef,
-    Cidr,
-    Destination,
-    EgressAllowList,
-    InCluster,
     JobNameTaken,
     JobSpec,
     JobStatus,
     KubernetesJobLauncher,
     build_job_manifest,
-    build_network_policy,
     job_name,
     token_secret_name,
 )
@@ -187,30 +182,6 @@ def test_launch_applies_the_spec_namespace_not_another(
 ) -> None:
     with pytest.raises(ValueError):
         launcher.launch(replace(busybox_spec(launcher.namespace, "exit 0"), namespace="default"))
-
-
-def test_api_server_accepts_the_network_policy(k3s_api_client: ApiClient, namespace: str) -> None:
-    allow = EgressAllowList(
-        a2a_edge=Destination(
-            InCluster(
-                namespace_labels={"kubernetes.io/metadata.name": "golem"},
-                pod_labels={"app.kubernetes.io/name": "golem-edge"},
-            ),
-            ports=(8443,),
-        ),
-        model_gateway=Destination(Cidr("10.20.1.0/24"), ports=(4000,)),
-        trace_store=Destination(Cidr("10.20.2.0/24"), ports=(443,)),
-        mcp_servers=Destination(
-            InCluster(namespace_labels={"kubernetes.io/metadata.name": "golem"}), ports=(8080,)
-        ),
-        git_host=Destination(Cidr("192.0.2.10/32"), ports=(443, 22)),
-    )
-
-    created = NetworkingV1Api(k3s_api_client).create_namespaced_network_policy(
-        namespace, build_network_policy(namespace, allow)
-    )
-
-    assert len(created.spec.egress) == 6
 
 
 def test_the_termination_message_of_a_finished_run_is_read_back(

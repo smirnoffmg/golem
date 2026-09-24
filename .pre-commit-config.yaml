@@ -5,6 +5,8 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-yaml
+        # Kubernetes manifests keep related objects in one file.
+        args: [--allow-multiple-documents]
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files

@@ -1,0 +1,39 @@
+# Platform configuration shared by the golem-system processes; each mounts only the keys it
+# reads. Values are an example for the discovery agent: an environment replaces them.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-config
+  namespace: golem-system
+data:
+  # The edge's call registry: callee agent to the callers allowed to call it. The Jira adapter
+  # calls as service:<its OIDC client id>.
+  call-registry.yaml: |
+    discovery: ["user:*", "service:golem-jira-adapter"]
+  catalogs.yaml: |
+    discovery: https://gitlab.example.com/agents/discovery.git#main
+  # The platform's grant per agent, whatever the agent's catalog asks for (ADR 0007).
+  agent-tools.yaml: |
+    discovery: [tracker.read, wiki.read]
+  gitlab-projects.yaml: |
+    discovery:
+      project: product/discovery-context
+      target_branch: main
+  jira-labels.yaml: |
+    golem:discovery: discovery
+---
+# Lives in golem-jobs because every run's Job mounts it there (GOLEM_MCP_REGISTRY_CONFIGMAP);
+# a Job cannot mount a ConfigMap from another namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-registry
+  namespace: golem-jobs
+data:
+  registry.yaml: |
+    tracker.read:
+      url: http://mcp-tracker-read.golem-system.svc:8000/mcp
+      tools: [search_issues, get_issue]
+    wiki.read:
+      url: http://mcp-wiki-read.golem-system.svc:8000/mcp
+      tools: [search_pages, get_page]

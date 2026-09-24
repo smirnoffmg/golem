@@ -1,0 +1,280 @@
+# Default deny, then one policy per process with both its ingress and its egress, so a
+# process's whole network surface is read in one place. ipBlock entries in the TEST-NET ranges
+# (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) are placeholders an environment replaces;
+# deploy/k8s/README.md lists them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: golem-system
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# Every process calls others by Service name.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: golem
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: edge
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: golem-edge
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        # Placeholder: the namespace of the ingress controller, labelled by the operator.
+        - namespaceSelector:
+            matchLabels:
+              golem.dev/ingress-controller: "true"
+        # Runs asking another agent (ADR 0004).
+        - namespaceSelector:
+            matchLabels:
+              golem.dev/zone: jobs
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-run
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-jira-adapter
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-tasks
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Placeholder: Postgres (golem_audit).
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Placeholder: the identity provider (JWKS).
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.10/32
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# Not reachable from outside (ADR 0002). /internal/* serves the reconciler (run outcomes) and
+# the MCP servers (run keys, run status).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tasks
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: golem-tasks
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-edge
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-reconciler
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-mcp
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # Push notifications.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-jira-adapter
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Placeholder: Postgres (golem_tasks, golem_runs).
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Placeholder: the Kubernetes API server's endpoint address, not the kubernetes Service's
+    # ClusterIP: policies see traffic after the Service address is translated.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: reconciler
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: golem-reconciler
+  policyTypes: ["Ingress", "Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-tasks
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Placeholder: Postgres (golem_runs).
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Placeholder: the Kubernetes API server's endpoint address (see the tasks policy).
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # Placeholder: GitLab (merge requests).
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.30/32
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: jira-adapter
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: golem-jira-adapter
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Jira webhooks, through the ingress controller (placeholder label, as for the edge).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              golem.dev/ingress-controller: "true"
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Push notifications.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-tasks
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-edge
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Placeholder: the identity provider (client credentials).
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.10/32
+      ports:
+        - protocol: TCP
+          port: 443
+    # Placeholder: Jira.
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.20/32
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# Only runs call the MCP servers; the servers call the task service, the audit log and the
+# system behind their group.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: golem-mcp
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              golem.dev/zone: jobs
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-run
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-tasks
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Placeholder: Postgres (golem_audit).
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Placeholder: Jira and Confluence.
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.20/32
+      ports:
+        - protocol: TCP
+          port: 443

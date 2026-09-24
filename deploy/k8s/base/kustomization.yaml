@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Placeholders an environment must replace are listed in deploy/k8s/README.md; override them
+# in an overlay, never here.
+resources:
+  - namespaces.yaml
+  - rbac.yaml
+  - config.yaml
+  - edge.yaml
+  - tasks.yaml
+  - reconciler.yaml
+  - jira-adapter.yaml
+  - mcp-servers.yaml
+  - network-policies-system.yaml
+  - network-policies-jobs.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: golem

@@ -1,0 +1,132 @@
+# The task service with the orchestrator port: A2A tasks, run admission, Job launch.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-tasks-env
+  namespace: golem-system
+data:
+  GOLEM_MAX_RUNS_PER_CALLER: "3"
+  GOLEM_MAX_RUNS_PER_ROOT: "5"
+  GOLEM_BUDGET_PER_ROOT: "100"
+  GOLEM_ESTIMATED_RUN_COST: "1"
+  # kustomize `images` does not reach into env values: an overlay that changes the image
+  # sets this to the same reference.
+  GOLEM_JOB_IMAGE: golem
+  GOLEM_JOB_SECRET: golem-run-secrets
+  GOLEM_JOB_DEADLINE_SECONDS: "3600"
+  GOLEM_JOB_TTL_SECONDS: "600"
+  GOLEM_JOB_CPU: "1"
+  GOLEM_JOB_MEMORY: 1Gi
+  GOLEM_MCP_REGISTRY_CONFIGMAP: golem-mcp-registry
+  GOLEM_CATALOGS_FILE: /etc/golem/catalogs.yaml
+  GOLEM_AGENT_TOOLS_FILE: /etc/golem/agent-tools.yaml
+  GOLEM_RUN_TOKEN_KEY_FILE: /var/run/golem/run-token/key.pem
+  GOLEM_RUN_TOKEN_KID: golem-1
+  GOLEM_KUBERNETES_NAMESPACE: golem-jobs
+  GOLEM_KUBERNETES: in-cluster
+  GOLEM_PUBLIC_BASE_URL: https://golem.example.com
+  GOLEM_PUSH_ALLOWED_PREFIXES: http://jira-adapter.golem-system.svc:8000/
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tasks
+  namespace: golem-system
+  labels:
+    app.kubernetes.io/name: golem-tasks
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: golem-tasks
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-tasks
+        app.kubernetes.io/part-of: golem
+    spec:
+      serviceAccountName: golem-tasks
+      # One of the two Kubernetes API clients (Jobs and token Secrets in golem-jobs).
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tasks
+          image: golem
+          command: ["python", "-m", "golem.tasks"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: golem-tasks-env
+            - secretRef:
+                name: golem-tasks
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /.well-known/agent-card.json
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /.well-known/agent-card.json
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: config
+              mountPath: /etc/golem
+              readOnly: true
+            - name: run-token-key
+              mountPath: /var/run/golem/run-token
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: golem-config
+            items:
+              - key: catalogs.yaml
+                path: catalogs.yaml
+              - key: agent-tools.yaml
+                path: agent-tools.yaml
+        - name: run-token-key
+          secret:
+            secretName: golem-run-token-key
+            # Group-readable through fsGroup; the container user is not the file's owner.
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tasks
+  namespace: golem-system
+spec:
+  selector:
+    app.kubernetes.io/name: golem-tasks
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

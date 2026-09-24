@@ -1,0 +1,35 @@
+# Runs are untrusted (ADR 0004), so they live in a namespace of their own: nothing in it can
+# read Secrets or reach the platform's databases, and quotas apply to runs alone.
+# Both namespaces enforce the restricted Pod Security Standard.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: golem-system
+  labels:
+    golem.dev/zone: system
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: golem-jobs
+  labels:
+    golem.dev/zone: jobs
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+# The last line of admission (ADR 0004): whatever the orchestrator's per-caller quotas allow,
+# runs never take more than this. Sized per environment.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: golem-runs
+  namespace: golem-jobs
+spec:
+  hard:
+    count/jobs.batch: "20"
+    requests.cpu: "20"
+    requests.memory: 20Gi
+    limits.cpu: "20"
+    limits.memory: 20Gi

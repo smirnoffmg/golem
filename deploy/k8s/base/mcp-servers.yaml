@@ -1,0 +1,201 @@
+# Platform MCP servers (ADR 0008), one per tool group; they hold the upstream credentials.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-tracker-read-env
+  namespace: golem-system
+data:
+  GOLEM_MCP_GROUP: tracker.read
+  GOLEM_MCP_UPSTREAM_URL: https://jira.example.com
+  # Empty: Data Center, the upstream token is a personal access token (Bearer). Atlassian
+  # Cloud: the account's email, and the token is its API token (Basic).
+  GOLEM_MCP_UPSTREAM_USER: ""
+  GOLEM_MCP_JIRA_DEPLOYMENT: data-center
+  GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-tracker-read
+  namespace: golem-system
+  labels:
+    app.kubernetes.io/name: golem-mcp
+    app.kubernetes.io/instance: tracker-read
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: golem-mcp
+      app.kubernetes.io/instance: tracker-read
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-mcp
+        app.kubernetes.io/instance: tracker-read
+        app.kubernetes.io/part-of: golem
+    spec:
+      serviceAccountName: golem-mcp
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp
+          image: golem
+          command: ["python", "-m", "golem.mcp"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: golem-mcp-tracker-read-env
+            - secretRef:
+                name: golem-mcp-tracker-read
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # TCP: /mcp answers only to a run token, and there is no health route.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-tracker-read
+  namespace: golem-system
+spec:
+  selector:
+    app.kubernetes.io/name: golem-mcp
+    app.kubernetes.io/instance: tracker-read
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-wiki-read-env
+  namespace: golem-system
+data:
+  GOLEM_MCP_GROUP: wiki.read
+  GOLEM_MCP_UPSTREAM_URL: https://confluence.example.com
+  # Empty: Data Center, the upstream token is a personal access token (Bearer). Atlassian
+  # Cloud: the account's email, and the token is its API token (Basic).
+  GOLEM_MCP_UPSTREAM_USER: ""
+  GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-wiki-read
+  namespace: golem-system
+  labels:
+    app.kubernetes.io/name: golem-mcp
+    app.kubernetes.io/instance: wiki-read
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: golem-mcp
+      app.kubernetes.io/instance: wiki-read
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-mcp
+        app.kubernetes.io/instance: wiki-read
+        app.kubernetes.io/part-of: golem
+    spec:
+      serviceAccountName: golem-mcp
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp
+          image: golem
+          command: ["python", "-m", "golem.mcp"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: golem-mcp-wiki-read-env
+            - secretRef:
+                name: golem-mcp-wiki-read
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # TCP: /mcp answers only to a run token, and there is no health route.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-wiki-read
+  namespace: golem-system
+spec:
+  selector:
+    app.kubernetes.io/name: golem-mcp
+    app.kubernetes.io/instance: wiki-read
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

@@ -68,8 +68,9 @@ class EdgePrincipal(User):
 
 
 class EdgeContextBuilder(DefaultServerCallContextBuilder):
-    # Only the A2A edge can reach the task service (network policy), and the edge has already
-    # authenticated the caller, so its principal header is trusted here and nowhere else.
+    # The edge has already authenticated the caller, so its principal header is trusted here
+    # and nowhere else. The network policy (ADR 0009) admits only the edge, the reconciler and
+    # the MCP servers; it works on ports, not paths, so those two could set the header too.
     def build_user(self, request: Request) -> User:
         principal = request.headers.get(PRINCIPAL_HEADER)
         if principal:

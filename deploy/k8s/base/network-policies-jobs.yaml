@@ -1,0 +1,78 @@
+# Runs are untrusted (ADR 0004): nothing reaches them, and they reach exactly five
+# destinations plus DNS. This file is the source of truth for the runs' network boundary.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: golem-jobs
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: golem-run-egress
+  namespace: golem-jobs
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: golem-run
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              golem.dev/zone: system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-edge
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              golem.dev/zone: system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-mcp
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Placeholder: the model gateway (LiteLLM). An in-cluster gateway is a namespaceSelector
+    # and podSelector instead of an ipBlock.
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.10/32
+      ports:
+        - protocol: TCP
+          port: 4000
+    # Placeholder: the trace store's OTLP endpoint.
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.20/32
+      ports:
+        - protocol: TCP
+          port: 443
+    # Placeholder: the Git host (clone and push of the run's branch), HTTPS and SSH.
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.30/32
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 22
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

@@ -1,0 +1,8 @@
+# Optional: the base plus ExternalSecrets (External Secrets Operator) that create every Secret
+# the base expects. Without it, create those Secrets some other way (deploy/k8s/README.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  - external-secrets.yaml

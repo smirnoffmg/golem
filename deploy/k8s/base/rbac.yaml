@@ -1,0 +1,92 @@
+# Least privilege: two service accounts talk to the Kubernetes API, both only in golem-jobs,
+# and neither can read a Secret there: a run token is readable by anyone with get on Secrets.
+# The others exist so that no pod runs as "default", and carry no token.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: golem-tasks
+  namespace: golem-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: golem-reconciler
+  namespace: golem-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: golem-edge
+  namespace: golem-system
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: golem-jira-adapter
+  namespace: golem-system
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: golem-mcp
+  namespace: golem-system
+automountServiceAccountToken: false
+---
+# The task service launches a run's Job, reads it back on a name conflict, deletes it on cancel,
+# and creates the run token Secret. No get/list/watch on Secrets: it never reads a token back.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: golem-tasks
+  namespace: golem-jobs
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: golem-tasks
+  namespace: golem-jobs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: golem-tasks
+subjects:
+  - kind: ServiceAccount
+    name: golem-tasks
+    namespace: golem-system
+---
+# The reconciler reads a Job's status and its pod's termination message (the run's report).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: golem-reconciler
+  namespace: golem-jobs
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: golem-reconciler
+  namespace: golem-jobs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: golem-reconciler
+subjects:
+  - kind: ServiceAccount
+    name: golem-reconciler
+    namespace: golem-system

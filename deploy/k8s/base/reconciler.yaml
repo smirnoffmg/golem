@@ -1,0 +1,81 @@
+# The reconciler: a loop without a listening port, so it has no Service and no probe; a crash
+# ends the process and the kubelet restarts it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-reconciler-env
+  namespace: golem-system
+data:
+  GOLEM_RECONCILE_INTERVAL_SECONDS: "10"
+  GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8000
+  GOLEM_GITLAB_URL: https://gitlab.example.com
+  GOLEM_GITLAB_PROJECTS_FILE: /etc/golem/gitlab-projects.yaml
+  GOLEM_KUBERNETES_NAMESPACE: golem-jobs
+  GOLEM_KUBERNETES: in-cluster
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reconciler
+  namespace: golem-system
+  labels:
+    app.kubernetes.io/name: golem-reconciler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: golem-reconciler
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-reconciler
+        app.kubernetes.io/part-of: golem
+    spec:
+      serviceAccountName: golem-reconciler
+      # One of the two Kubernetes API clients (Job status and pod reports in golem-jobs).
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reconciler
+          image: golem
+          command: ["python", "-m", "golem.orchestrator.reconciler"]
+          envFrom:
+            - configMapRef:
+                name: golem-reconciler-env
+            - secretRef:
+                name: golem-reconciler
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: config
+              mountPath: /etc/golem
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: golem-config
+            items:
+              - key: gitlab-projects.yaml
+                path: gitlab-projects.yaml

@@ -1,12 +1,11 @@
-"""Runs as Kubernetes Jobs: the manifest, the egress policy and the launcher.
+"""Runs as Kubernetes Jobs: the manifest and the launcher.
 
 Everything inside a Job is untrusted (ADR 0004), so the pod-level part of the security boundary
-lives in the manifest itself and the network part in the namespace's NetworkPolicy.
+lives in the manifest itself and the network part in the Jobs namespace's NetworkPolicies,
+deploy/k8s/base/network-policies-jobs.yaml (ADR 0009).
 """
 
-import ipaddress
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
@@ -245,106 +244,6 @@ def build_token_secret(spec: JobSpec, job_uid: str) -> dict:
         },
         "type": "Opaque",
         "stringData": {RUN_TOKEN_ENV: spec.run_token},
-    }
-
-
-@dataclass(frozen=True)
-class InCluster:
-    namespace_labels: Mapping[str, str]
-    pod_labels: Mapping[str, str] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        # An empty namespaceSelector matches every namespace.
-        _require(bool(self.namespace_labels), "namespace_labels must not be empty")
-
-
-@dataclass(frozen=True)
-class Cidr:
-    cidr: str
-
-    def __post_init__(self) -> None:
-        try:
-            network = ipaddress.ip_network(self.cidr)
-        except ValueError as error:
-            raise ValueError(f"not a CIDR: {self.cidr!r}") from error
-        _require(network.prefixlen > 0, f"catch-all CIDR would allow all egress: {self.cidr}")
-
-
-@dataclass(frozen=True)
-class Destination:
-    peer: InCluster | Cidr
-    ports: tuple[int, ...]
-
-    def __post_init__(self) -> None:
-        _require(bool(self.ports), "a destination needs at least one port")
-        _require(all(0 < port < 65536 for port in self.ports), f"bad port in {self.ports}")
-
-
-@dataclass(frozen=True)
-class EgressAllowList:
-    """The five destinations a Job may reach (ADR 0004); anything else is denied."""
-
-    a2a_edge: Destination
-    model_gateway: Destination
-    trace_store: Destination
-    mcp_servers: Destination
-    git_host: Destination
-
-    def destinations(self) -> tuple[Destination, ...]:
-        return (
-            self.a2a_edge,
-            self.model_gateway,
-            self.trace_store,
-            self.mcp_servers,
-            self.git_host,
-        )
-
-
-def _peer(peer: InCluster | Cidr) -> dict:
-    if isinstance(peer, Cidr):
-        return {"ipBlock": {"cidr": peer.cidr}}
-    selector = {"namespaceSelector": {"matchLabels": dict(peer.namespace_labels)}}
-    if peer.pod_labels:
-        selector["podSelector"] = {"matchLabels": dict(peer.pod_labels)}
-    return selector
-
-
-def _egress_rule(destination: Destination) -> dict:
-    return {
-        "to": [_peer(destination.peer)],
-        "ports": [{"protocol": "TCP", "port": port} for port in destination.ports],
-    }
-
-
-def _dns_rule() -> dict:
-    return {
-        "to": [
-            {
-                "namespaceSelector": {
-                    "matchLabels": {"kubernetes.io/metadata.name": "kube-system"}
-                },
-                "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
-            }
-        ],
-        "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}],
-    }
-
-
-def build_network_policy(namespace: str, egress: EgressAllowList) -> dict:
-    _require(_is_dns_label(namespace), f"namespace is not a DNS label: {namespace!r}")
-    return {
-        "apiVersion": "networking.k8s.io/v1",
-        "kind": "NetworkPolicy",
-        "metadata": {"name": f"{APP_NAME}-egress", "namespace": namespace},
-        "spec": {
-            "podSelector": {"matchLabels": {APP_LABEL: APP_NAME}},
-            "policyTypes": ["Ingress", "Egress"],
-            "ingress": [],
-            "egress": [
-                *(_egress_rule(d) for d in egress.destinations()),
-                _dns_rule(),
-            ],
-        },
     }
 
 

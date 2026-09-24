@@ -60,7 +60,7 @@ src/golem/
   orchestrator/admission.py  run admission: Job quotas per caller and per root chain
   orchestrator/runs.py       idempotent run start on Postgres (schema.sql)
   orchestrator/service.py    the task service's orchestrator port: record a run, launch its Job
-  orchestrator/jobs.py       hardened Job manifests, egress NetworkPolicy, the Kubernetes launcher
+  orchestrator/jobs.py       hardened Job manifests and the Kubernetes launcher
   orchestrator/reconcile.py  finished Jobs to run outcomes; the task notification outbox
   orchestrator/merge_requests.py  merge requests for succeeded runs (GitLab REST API)
   orchestrator/reconciler.py the reconciler process: a reconcile pass every interval
@@ -75,6 +75,7 @@ src/golem/
   jwks.py                  signing keys from a JWKS URL, shared by the edge and the MCP servers
 deploy/
   compose.yaml             local Postgres, edge, task service and reconciler
+  k8s/                     kustomize manifests: namespaces, RBAC, workloads, network policies
   postgres/init.sql        databases, roles and grants
 examples/
   discovery/               an example agent catalog: kinds, roles, rules, role instructions
@@ -113,6 +114,16 @@ the edge cannot fetch signing keys, so it serves public agent cards on
 `http://127.0.0.1:8480` (`GOLEM_EDGE_PORT`) and answers 401 to every call.
 
 Passwords in `deploy/` are placeholders for local development only.
+
+## Deploy
+
+`deploy/k8s/base` deploys every process to Kubernetes with kustomize: `golem-system` for the
+platform, `golem-jobs` for runs, default-deny network policies with explicit allows, and RBAC
+that lets only the task service and the reconciler touch the Kubernetes API, neither able to
+read a Secret. Secrets are not in git; an optional overlay creates them with the External
+Secrets Operator. Secret names and keys, the placeholders to replace and how to apply:
+[deploy/k8s/README.md](deploy/k8s/README.md). Decisions:
+[ADR 0009](docs/adr/0009-deployment-on-kubernetes.md).
 
 ## A run, end to end
 
@@ -212,7 +223,8 @@ format and the commands: [examples/discovery/evals/README.md](examples/discovery
 
 Not deployed. The whole run lifecycle above is implemented and tested: Postgres and Kubernetes
 parts against real Postgres 17 and k3s in testcontainers, git against real repositories, the
-model and GitLab through fakes at their boundaries. The Jira adapter is tested against the real
+model and GitLab through fakes at their boundaries. The Kubernetes manifests are applied to k3s
+in tests: RBAC through access reviews, network policies with real traffic. The Jira adapter is tested against the real
 edge and task service, with Jira and the identity provider faked at their HTTP boundaries.
 The Jira and Confluence MCP servers are tested with the runtime's own MCP client against the
 real task service and audit log, with Jira and Confluence faked at their HTTP boundaries.
