@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "a2a-sdk[http-server]>=1.1,<2",
+    "deepagents>=0.7",
     "kubernetes>=33",
+    "langchain-openai>=0.3",
     "psycopg[binary]>=3.2",
     "pydantic>=2.11,<3",
     "pyjwt[crypto]>=2.10",
