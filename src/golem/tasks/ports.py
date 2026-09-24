@@ -12,6 +12,9 @@ class RunStart:
     # Clients retry after timeouts and every retry becomes a new A2A task; the orchestrator
     # deduplicates runs by (caller, message_id) so a retry never starts a second Job.
     message_id: str
+    # W3C Trace Context of the request, so the run's trace continues the caller's.
+    traceparent: str = ""
+    tracestate: str = ""
 
 
 @dataclass(frozen=True)

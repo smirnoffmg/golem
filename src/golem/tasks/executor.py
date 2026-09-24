@@ -26,7 +26,14 @@ def run_start_of(context: RequestContext) -> RunStart:
         goal=context.get_user_input(),
         caller=caller_of(context.call_context),
         message_id=context.message.message_id if context.message is not None else "",
+        traceparent=header_of(context.call_context, "traceparent"),
+        tracestate=header_of(context.call_context, "tracestate"),
     )
+
+
+def header_of(call_context: ServerCallContext, name: str) -> str:
+    # The edge forwards only a well-formed traceparent and a bounded tracestate.
+    return call_context.state.get("headers", {}).get(name, "")
 
 
 async def reject(updater: TaskUpdater, reason: str) -> None:

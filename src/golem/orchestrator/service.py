@@ -41,6 +41,8 @@ def job_spec_for(run_id: str, run: RunStart, catalog: CatalogRef, template: JobT
         ttl_seconds_after_finished=template.ttl_seconds_after_finished,
         cpu=template.cpu,
         memory=template.memory,
+        traceparent=run.traceparent,
+        tracestate=run.tracestate,
     )
 
 

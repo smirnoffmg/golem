@@ -67,6 +67,8 @@ class JobSpec:
     cpu: str
     memory: str
     command: tuple[str, ...] | None = None
+    traceparent: str = ""
+    tracestate: str = ""
 
     def __post_init__(self) -> None:
         # The run id becomes both the Job name suffix and a label value, so it must fit both.
@@ -106,6 +108,13 @@ def run_labels(spec: JobSpec) -> dict[str, str]:
     return {APP_LABEL: APP_NAME, RUN_ID_LABEL: spec.run_id, AGENT_LABEL: spec.agent}
 
 
+def trace_env(spec: JobSpec) -> list[dict[str, str]]:
+    # Environment-variable carrier names from the OpenTelemetry spec; the runtime's root span
+    # becomes a child of the request's span.
+    pairs = (("TRACEPARENT", spec.traceparent), ("TRACESTATE", spec.tracestate))
+    return [{"name": name, "value": value} for name, value in pairs if value]
+
+
 def _container(spec: JobSpec) -> dict:
     resources = {"cpu": spec.cpu, "memory": spec.memory}
     return {
@@ -118,6 +127,7 @@ def _container(spec: JobSpec) -> dict:
             {"name": "GOLEM_AGENT", "value": spec.agent},
             {"name": "GOLEM_CATALOG_REF", "value": str(spec.catalog_ref)},
             {"name": "GOLEM_GOAL", "value": spec.goal},
+            *trace_env(spec),
         ],
         # optional: False keeps the pod from starting without keys instead of failing mid-run.
         "envFrom": [{"secretRef": {"name": spec.secret_name, "optional": False}}],
