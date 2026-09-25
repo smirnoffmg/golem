@@ -21,6 +21,7 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from golem.metrics import Instrumented, Metrics
 from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
 from golem.ui.edge import TASK_NOT_FOUND, EdgeError, EdgeUnauthorized, agent_card, rpc
 from golem.ui.oidc import (
@@ -129,9 +130,11 @@ def create_ui_app(
     logins: Limiter | None = None,
     starts: Limiter | None = None,
     trusted_proxies: tuple[Network, ...] = (),
+    metrics: Metrics | None = None,
 ) -> ASGIApp:
     if not agents:
         raise ValueError("the UI needs at least one agent")
+    metrics = Metrics("ui") if metrics is None else metrics
     logins = Limiter(LOGIN_RATE) if logins is None else logins
     starts = Limiter(START_RATE) if starts is None else starts
     templates = Environment(loader=PackageLoader("golem.ui", "templates"), autoescape=True)
@@ -202,6 +205,7 @@ def create_ui_app(
         address = client_address(peer, request.headers.getlist("x-forwarded-for"), trusted_proxies)
         decision = logins.take(address or UNKNOWN_ADDRESS)
         if not decision.allowed:
+            metrics.rate_limit_refused("login")
             return too_many(decision)
         try:
             discovery = await oidc.discovery()
@@ -233,11 +237,14 @@ def create_ui_app(
         login = await store.take_login(state) if state else None
         binding = request.cookies.get(LOGIN_COOKIE, "")
         if login is None or not hmac.compare_digest(digest(binding), login.binding):
+            metrics.authentication_failed()
             return error(400, "This sign-in expired or was not started here. Sign in again.")
         if "error" in request.query_params:
+            metrics.authentication_failed()
             return error(400, f"The identity provider refused: {request.query_params['error']}")
         code = request.query_params.get("code", "")
         if not code:
+            metrics.authentication_failed()
             return error(400, "The identity provider sent no authorization code.")
         try:
             tokens = await oidc.exchange(code, login.verifier)
@@ -245,6 +252,7 @@ def create_ui_app(
                 raise OidcError("the token response has no ID token")
             claims = await oidc.verify(tokens.id_token, nonce=login.nonce)
         except OidcError:
+            metrics.authentication_failed()
             return error(400, "Sign-in failed. Sign in again.")
         name = claims.get("preferred_username")
         session_cookie, _ = await store.create(
@@ -294,6 +302,7 @@ def create_ui_app(
     async def start(request: Request, session: Session) -> Response:
         decision = starts.take(session.id)
         if not decision.allowed:
+            metrics.rate_limit_refused("start")
             return too_many(decision, session)
         form = await form_of(request) or {}
         if not csrf_ok(session, form):
@@ -408,4 +417,5 @@ def create_ui_app(
         ],
         exception_handlers={404: not_found},
     )
-    return security_headers(app, hsts=urlsplit(public_base_url).scheme == "https")
+    headed = security_headers(app, hsts=urlsplit(public_base_url).scheme == "https")
+    return Instrumented(headed, routes=app.routes, metrics=metrics)

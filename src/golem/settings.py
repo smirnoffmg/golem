@@ -19,6 +19,7 @@ from golem.adapters.jira import WEBHOOK_RATE
 from golem.adapters.mattermost import COMMAND_RATE
 from golem.edge.app import AUTH_FAILURE_RATE, CALLER_RATE
 from golem.edge.policy import Registry
+from golem.metrics import DEFAULT_METRICS_PORT
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef
 from golem.orchestrator.merge_requests import GitLabProject
@@ -30,6 +31,7 @@ from golem.ui.app import LOGIN_RATE, START_RATE
 DEFAULT_PORT = "8000"
 DEFAULT_INTERNAL_READ_PORT = "8001"
 DEFAULT_INTERNAL_WRITE_PORT = "8002"
+METRICS_PORT = "GOLEM_METRICS_PORT"
 
 Env = Mapping[str, str]
 
@@ -64,6 +66,7 @@ class EdgeSettings:
     caller_rate: Rate = CALLER_RATE
     auth_failure_rate: Rate = AUTH_FAILURE_RATE
     trusted_proxies: tuple[Network, ...] = ()
+    metrics_port: int = DEFAULT_METRICS_PORT
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,8 @@ class TaskServiceSettings:
     edge_token: str = field(repr=False)
     push_allowed_prefixes: tuple[str, ...] = ()
     push_config_key: str | None = None
+    # Scraped from the monitoring namespace only; no caller of the service reaches it (ADR 0013).
+    metrics_port: int = DEFAULT_METRICS_PORT
 
 
 @dataclass(frozen=True)
@@ -99,6 +104,7 @@ class ReconcilerSettings:
     gitlab_projects_file: Path
     namespace: str
     kubernetes: Kubernetes
+    metrics_port: int = DEFAULT_METRICS_PORT
 
 
 def edge_settings(env: Env) -> EdgeSettings:
@@ -129,6 +135,7 @@ def edge_settings(env: Env) -> EdgeSettings:
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
         edge_token=v["GOLEM_EDGE_TOKEN"],
+        metrics_port=metrics_port_setting(env, _port(env)),
         caller_rate=rate_setting(env, "GOLEM_RATE_CALLER", CALLER_RATE),
         auth_failure_rate=rate_setting(env, "GOLEM_RATE_AUTH_FAILURES", AUTH_FAILURE_RATE),
         trusted_proxies=trusted_proxies_setting(env),
@@ -200,7 +207,7 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
         "GOLEM_PUBLIC_BASE_URL",
         "GOLEM_EDGE_TOKEN",
     )
-    port, read_port, write_port = _task_service_ports(env)
+    port, read_port, write_port, metrics_port = _task_service_ports(env)
     return TaskServiceSettings(
         runs_dsn=v["GOLEM_RUNS_DSN"],
         tasks_db_url=v["GOLEM_TASKS_DB_URL"],
@@ -235,6 +242,7 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
         edge_token=v["GOLEM_EDGE_TOKEN"],
         push_allowed_prefixes=_push_prefixes(env),
         push_config_key=_push_config_key(env),
+        metrics_port=metrics_port,
     )
 
 
@@ -262,6 +270,7 @@ def reconciler_settings(env: Env) -> ReconcilerSettings:
         gitlab_projects_file=Path(v["GOLEM_GITLAB_PROJECTS_FILE"]),
         namespace=v["GOLEM_KUBERNETES_NAMESPACE"],
         kubernetes=_kubernetes(v),
+        metrics_port=metrics_port_setting(env),
     )
 
 
@@ -373,18 +382,27 @@ def _port(env: Env, name: str = "GOLEM_PORT", default: str = DEFAULT_PORT) -> in
     return port
 
 
-def _task_service_ports(env: Env) -> tuple[int, int, int]:
+def _task_service_ports(env: Env) -> tuple[int, int, int, int]:
     ports = (
         _port(env),
         _port(env, "GOLEM_INTERNAL_READ_PORT", DEFAULT_INTERNAL_READ_PORT),
         _port(env, "GOLEM_INTERNAL_WRITE_PORT", DEFAULT_INTERNAL_WRITE_PORT),
+        _port(env, METRICS_PORT, str(DEFAULT_METRICS_PORT)),
     )
     if len(set(ports)) != len(ports):
         raise SettingsError(
-            "GOLEM_PORT, GOLEM_INTERNAL_READ_PORT and GOLEM_INTERNAL_WRITE_PORT must be distinct,"
-            f" got {ports}"
+            "GOLEM_PORT, GOLEM_INTERNAL_READ_PORT, GOLEM_INTERNAL_WRITE_PORT and"
+            f" {METRICS_PORT} must be distinct, got {ports}"
         )
     return ports
+
+
+def metrics_port_setting(env: Env, *taken: int) -> int:
+    """``GOLEM_METRICS_PORT`` (9090): never one of ``taken``, the ports callers are admitted to."""
+    port = _port(env, METRICS_PORT, str(DEFAULT_METRICS_PORT))
+    if port in taken:
+        raise SettingsError(f"{METRICS_PORT} must differ from the process's other ports: {port}")
+    return port
 
 
 def _base_url(v: Mapping[str, str], name: str) -> str:
@@ -426,6 +444,7 @@ class AdapterSettings:
     port: int
     webhook_rate: Rate = WEBHOOK_RATE
     trusted_proxies: tuple[Network, ...] = ()
+    metrics_port: int = DEFAULT_METRICS_PORT
 
 
 def adapter_settings(env: Env) -> AdapterSettings:
@@ -456,6 +475,7 @@ def adapter_settings(env: Env) -> AdapterSettings:
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
         webhook_rate=rate_setting(env, "GOLEM_RATE_WEBHOOK", WEBHOOK_RATE),
+        metrics_port=metrics_port_setting(env, _port(env)),
         trusted_proxies=trusted_proxies_setting(env),
     )
 
@@ -488,6 +508,7 @@ class MattermostAdapterSettings:
     port: int
     command_rate: Rate = COMMAND_RATE
     trusted_proxies: tuple[Network, ...] = ()
+    metrics_port: int = DEFAULT_METRICS_PORT
 
 
 def mattermost_adapter_settings(env: Env) -> MattermostAdapterSettings:
@@ -520,6 +541,7 @@ def mattermost_adapter_settings(env: Env) -> MattermostAdapterSettings:
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
         command_rate=rate_setting(env, "GOLEM_RATE_COMMAND", COMMAND_RATE),
+        metrics_port=metrics_port_setting(env, _port(env)),
         trusted_proxies=trusted_proxies_setting(env),
     )
 
@@ -547,6 +569,7 @@ class UiSettings:
     login_rate: Rate = LOGIN_RATE
     start_rate: Rate = START_RATE
     trusted_proxies: tuple[Network, ...] = ()
+    metrics_port: int = DEFAULT_METRICS_PORT
 
 
 UI_CALLBACK_PATH = "/callback"
@@ -606,5 +629,6 @@ def ui_settings(env: Env) -> UiSettings:
         port=_port(env),
         login_rate=rate_setting(env, "GOLEM_RATE_LOGIN", LOGIN_RATE),
         start_rate=rate_setting(env, "GOLEM_RATE_START", START_RATE),
+        metrics_port=metrics_port_setting(env, _port(env)),
         trusted_proxies=trusted_proxies_setting(env),
     )

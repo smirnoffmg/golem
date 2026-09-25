@@ -3,18 +3,20 @@
 Without an argument it is the Jira adapter, as before there was a second one.
 """
 
+import asyncio
 import logging
 import os
 import sys
 
 import httpx
-import uvicorn
-from starlette.applications import Starlette
+from starlette.types import ASGIApp
 
 from golem.adapters.common import ClientCredentials
 from golem.adapters.jira import create_jira_adapter_app, jira_authorization
 from golem.adapters.mattermost import create_mattermost_adapter_app
+from golem.metrics import Metrics, process_registry
 from golem.ratelimit import Limiter
+from golem.serving import serve_all, with_metrics
 from golem.settings import (
     AdapterSettings,
     MattermostAdapterSettings,
@@ -45,7 +47,7 @@ def _credentials(*, token_url: str, client_id: str, client_secret: str) -> Clien
     )
 
 
-def build_app(settings: AdapterSettings) -> Starlette:
+def build_app(settings: AdapterSettings, metrics: Metrics | None = None) -> ASGIApp:
     credentials = _credentials(
         token_url=settings.token_url,
         client_id=settings.client_id,
@@ -70,10 +72,13 @@ def build_app(settings: AdapterSettings) -> Starlette:
         ),
         inbound=Limiter(settings.webhook_rate),
         trusted_proxies=settings.trusted_proxies,
+        metrics=metrics,
     )
 
 
-def build_mattermost_app(settings: MattermostAdapterSettings) -> Starlette:
+def build_mattermost_app(
+    settings: MattermostAdapterSettings, metrics: Metrics | None = None
+) -> ASGIApp:
     credentials = _credentials(
         token_url=settings.token_url,
         client_id=settings.client_id,
@@ -98,23 +103,30 @@ def build_mattermost_app(settings: MattermostAdapterSettings) -> Starlette:
         ),
         inbound=Limiter(settings.command_rate),
         trusted_proxies=settings.trusted_proxies,
+        metrics=metrics,
     )
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    registry = process_registry()
     try:
         adapter = adapter_of(sys.argv[1:])
+        metrics = Metrics(f"{adapter}-adapter", registry=registry)
         if adapter == "mattermost":
             mattermost = mattermost_adapter_settings(os.environ)
-            app, port = build_mattermost_app(mattermost), mattermost.port
+            app = build_mattermost_app(mattermost, metrics)
+            port, metrics_port = mattermost.port, mattermost.metrics_port
         else:
             jira = adapter_settings(os.environ)
-            app, port = build_app(jira), jira.port
+            app, port, metrics_port = build_app(jira, metrics), jira.port, jira.metrics_port
     except SettingsError as error:
         sys.exit(f"golem adapter: {error}")
     # The client address comes from golem.ratelimit with GOLEM_TRUSTED_PROXIES, not uvicorn.
-    uvicorn.run(app, host="0.0.0.0", port=port, proxy_headers=False)
+    servers = with_metrics(
+        app, port, registry=registry, metrics_port=metrics_port, proxy_headers=False
+    )
+    asyncio.run(serve_all(servers))
 
 
 if __name__ == "__main__":

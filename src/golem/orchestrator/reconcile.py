@@ -6,8 +6,9 @@ from dataclasses import dataclass
 
 from psycopg import AsyncConnection
 
+from golem.metrics import ReconcilerMetrics
 from golem.orchestrator.jobs import JobLauncher, JobStatus
-from golem.orchestrator.runs import FINAL_OUTCOME
+from golem.orchestrator.runs import FINAL_OUTCOME, RETURNING_ENDED, EndedRun, ended_run
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,19 @@ FINAL_STATUS = {
 }
 
 
+# What a run's own report may say about its outcome, beyond the Job's status. The report comes
+# from an untrusted Job, so only these words become label values.
+REPORTED_OUTCOMES = frozenset({"idle", "invalid", "failed"})
+
+
+def run_outcome(job: JobStatus, report: str | None = None) -> str:
+    """The outcome label of a finished run: the report's word where it has one of ours."""
+    if job is JobStatus.MISSING:
+        return FINAL_STATUS[job]
+    reported = _parse_report(report).get("outcome")
+    return reported if reported in REPORTED_OUTCOMES else FINAL_STATUS[job]
+
+
 def outcome_detail(run_id: str, job: JobStatus, report: str | None = None) -> str:
     if job is JobStatus.MISSING:
         return f"Run {run_id} failed: its Job disappeared before reporting a result."
@@ -67,10 +81,15 @@ def _parse_report(report: str | None) -> dict:
 
 
 async def reconcile_once(
-    conn: AsyncConnection, launcher: JobLauncher, notify: Notify, propose: Propose | None = None
+    conn: AsyncConnection,
+    launcher: JobLauncher,
+    notify: Notify,
+    propose: Propose | None = None,
+    metrics: ReconcilerMetrics | None = None,
 ) -> None:
     """Move finished Jobs' runs to their final status, settle what succeeded runs propose,
     then deliver pending task outcomes."""
+    metrics = ReconcilerMetrics() if metrics is None else metrics
     cursor = await conn.execute("SELECT id FROM runs WHERE status = 'running'")
     for (run_id,) in await cursor.fetchall():
         job = await asyncio.to_thread(launcher.status, str(run_id))
@@ -80,20 +99,25 @@ async def reconcile_once(
                 if job is JobStatus.MISSING
                 else await asyncio.to_thread(launcher.termination_message, str(run_id))
             )
-            await _finish(
+            ended = await _finish(
                 conn, str(run_id), FINAL_STATUS[job], outcome_detail(str(run_id), job, report)
             )
-    await _settle_proposals(conn, propose)
+            if ended is not None:
+                metrics.runs.run_ended(ended.agent, run_outcome(job, report), ended.seconds)
+    await _settle_proposals(conn, propose, metrics)
     await _deliver(conn, notify)
+    await _count_pending(conn, metrics)
 
 
-async def _finish(conn: AsyncConnection, run_id: str, status: str, detail: str) -> None:
+async def _finish(conn: AsyncConnection, run_id: str, status: str, detail: str) -> EndedRun | None:
     # The status guard makes the transition happen once even if a cancel or another
-    # reconciler got there first.
-    await conn.execute(
-        "UPDATE runs SET status = %s, detail = %s WHERE id = %s AND status = 'running'",
+    # reconciler got there first; only the one that made it records the outcome.
+    cursor = await conn.execute(
+        "UPDATE runs SET status = %s, detail = %s WHERE id = %s AND status = 'running'"
+        + RETURNING_ENDED,
         (status, detail, run_id),
     )
+    return await ended_run(cursor)
 
 
 def idle_detail(run_id: str) -> str:
@@ -107,7 +131,9 @@ def settled_detail(run_id: str, reported: str | None, proposed: str) -> str:
     return proposed
 
 
-async def _settle_proposals(conn: AsyncConnection, propose: Propose | None) -> None:
+async def _settle_proposals(
+    conn: AsyncConnection, propose: Propose | None, metrics: ReconcilerMetrics
+) -> None:
     cursor = await conn.execute(
         "SELECT id, agent, detail FROM runs"
         " WHERE status = 'succeeded' AND proposal_settled_at IS NULL"
@@ -120,13 +146,16 @@ async def _settle_proposals(conn: AsyncConnection, propose: Propose | None) -> N
                 # Left unsettled, the run is proposed again next pass and its tasks wait for it;
                 # other runs must not wait behind it.
                 log.exception("could not propose the result of run %s", run_id)
+                metrics.merge_request_failed()
                 continue
             detail = settled_detail(str(run_id), detail, proposed)
-        await conn.execute(
+        settled = await conn.execute(
             "UPDATE runs SET detail = %s, proposal_settled_at = now()"
             " WHERE id = %s AND proposal_settled_at IS NULL",
             (detail, run_id),
         )
+        if settled.rowcount:
+            metrics.proposal_settled()
 
 
 async def _deliver(conn: AsyncConnection, notify: Notify) -> None:
@@ -139,3 +168,15 @@ async def _deliver(conn: AsyncConnection, notify: Notify) -> None:
             await conn.execute(
                 "UPDATE run_tasks SET notified_at = now() WHERE task_id = %s", (task_id,)
             )
+
+
+async def _count_pending(conn: AsyncConnection, metrics: ReconcilerMetrics) -> None:
+    cursor = await conn.execute(
+        "SELECT"
+        " (SELECT count(*) FROM run_tasks t JOIN runs r ON r.id = t.run_id"
+        "  WHERE t.notified_at IS NULL AND " + FINAL_OUTCOME + "),"
+        " (SELECT count(*) FROM runs WHERE status = 'succeeded' AND proposal_settled_at IS NULL)"
+    )
+    row = await cursor.fetchone()
+    assert row is not None
+    metrics.pending(outbox=row[0], proposals=row[1])

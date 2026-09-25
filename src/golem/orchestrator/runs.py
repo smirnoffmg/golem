@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 
-from psycopg import AsyncConnection
+from psycopg import AsyncConnection, AsyncCursor
 
 from golem.orchestrator.admission import Limits, Load, Rejected, RunRequest, admit
 
@@ -39,6 +39,27 @@ class RunReused:
     run_id: str
     root_run_id: str
     status: str = "running"
+
+
+@dataclass(frozen=True)
+class EndedRun:
+    """A run that has just left 'running', for the run metrics."""
+
+    run_id: str
+    agent: str
+    # From recording the run to now.
+    seconds: float
+
+
+# Appended to an UPDATE of `runs` that moves a run out of 'running'.
+RETURNING_ENDED = (
+    " RETURNING runs.id, runs.agent, extract(epoch FROM now() - runs.created_at)::float8"
+)
+
+
+async def ended_run(cursor: AsyncCursor) -> EndedRun | None:
+    row = await cursor.fetchone()
+    return None if row is None else EndedRun(str(row[0]), row[1], row[2])
 
 
 @dataclass(frozen=True)
@@ -109,15 +130,14 @@ async def start_run(
     return RunCreated(run_id=run_id, root_run_id=root_run_id)
 
 
-async def cancel_run_of_task(conn: AsyncConnection, task_id: str) -> str | None:
+async def cancel_run_of_task(conn: AsyncConnection, task_id: str) -> EndedRun | None:
     cursor = await conn.execute(
         "UPDATE runs SET status = 'canceled' FROM run_tasks"
         " WHERE run_tasks.run_id = runs.id AND run_tasks.task_id = %s"
-        " AND runs.status = 'running' RETURNING runs.id",
+        " AND runs.status = 'running'" + RETURNING_ENDED,
         (task_id,),
     )
-    row = await cursor.fetchone()
-    return None if row is None else str(row[0])
+    return await ended_run(cursor)
 
 
 async def run_status(conn: AsyncConnection, run_id: str) -> str | None:
@@ -143,10 +163,12 @@ async def run_of_task(conn: AsyncConnection, task_id: str) -> RecordedRun | None
     return RecordedRun(str(run_id), caller, agent, status, detail, final)
 
 
-async def fail_run(conn: AsyncConnection, run_id: str) -> None:
-    await conn.execute(
-        "UPDATE runs SET status = 'failed' WHERE id = %s AND status = 'running'", (run_id,)
+async def fail_run(conn: AsyncConnection, run_id: str) -> EndedRun | None:
+    cursor = await conn.execute(
+        "UPDATE runs SET status = 'failed' WHERE id = %s AND status = 'running'" + RETURNING_ENDED,
+        (run_id,),
     )
+    return await ended_run(cursor)
 
 
 async def _map_task(conn: AsyncConnection, task_id: str, run_id: str) -> None:

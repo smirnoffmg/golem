@@ -2,11 +2,13 @@ import asyncio
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from golem.orchestrator.reconciler import run_forever
@@ -44,7 +46,13 @@ async def test_stop_interrupts_the_wait_between_passes() -> None:
     assert time.monotonic() - started < 5
 
 
-def reconciler_env(runs_dsn: str, tmp_path: Path) -> dict[str, str]:
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def reconciler_env(runs_dsn: str, tmp_path: Path, metrics_port: int = 0) -> dict[str, str]:
     projects = tmp_path / "projects.yaml"
     projects.write_text("discovery:\n  project: product/discovery-context\n  target_branch: main\n")
     return {
@@ -57,13 +65,17 @@ def reconciler_env(runs_dsn: str, tmp_path: Path) -> dict[str, str]:
         "GOLEM_GITLAB_PROJECTS_FILE": str(projects),
         "GOLEM_KUBERNETES_NAMESPACE": "team-jobs",
         "GOLEM_KUBERNETES": "none",
+        "GOLEM_METRICS_PORT": str(metrics_port or free_port()),
     }
 
 
-def test_the_reconciler_process_stops_cleanly_on_sigterm(runs_db: str, tmp_path: Path) -> None:
+def test_the_reconciler_process_serves_metrics_and_stops_cleanly_on_sigterm(
+    runs_db: str, tmp_path: Path
+) -> None:
+    port = free_port()
     process = subprocess.Popen(
         [sys.executable, "-m", "golem.orchestrator.reconciler"],
-        env=reconciler_env(runs_db, tmp_path),
+        env=reconciler_env(runs_db, tmp_path, port),
         stderr=subprocess.PIPE,
         text=True,
     )
@@ -76,7 +88,17 @@ def test_the_reconciler_process_stops_cleanly_on_sigterm(runs_db: str, tmp_path:
                 break
         else:
             pytest.fail("".join(lines))
-        time.sleep(0.5)
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                exposed = httpx.get(f"http://127.0.0.1:{port}/metrics", timeout=2)
+                if "golem_reconcile_pass_duration_seconds_count 0.0" not in exposed.text:
+                    break
+            except httpx.TransportError:
+                pass
+            assert time.monotonic() < deadline, "no metrics after a pass"
+            time.sleep(0.2)
+        assert "golem_outbox_pending 0.0" in exposed.text
         process.send_signal(signal.SIGTERM)
         assert process.wait(timeout=10) == 0
         assert "Traceback" not in process.stderr.read()

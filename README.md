@@ -80,9 +80,13 @@ src/golem/
   mcp/                     platform MCP servers: run token gate, audit, read-only Jira and Confluence tools
   jwks.py                  signing keys from a JWKS URL, shared by the edge and the MCP servers
   ratelimit.py             token bucket rate limits per key, and the client address behind proxies
+  metrics.py               Prometheus metrics: RED per listener by route template, run, reconciler
+                           and guard metrics with bounded labels, the /metrics app
+  serving.py               several uvicorn listeners in one process: the public ports and metrics
 deploy/
   compose.yaml             local Postgres, edge, task service and reconciler
-  k8s/                     kustomize manifests: namespaces, RBAC, workloads, network policies
+  k8s/                     kustomize manifests: namespaces, RBAC, workloads, network policies;
+                           overlays for External Secrets and the Prometheus Operator
   postgres/init.sql        databases, roles and grants
 examples/
   discovery/               an example agent catalog: kinds, roles, rules, role instructions
@@ -92,6 +96,7 @@ examples/
 docs/
   architecture.md          C4 diagrams (PlantUML)
   adr/                     architecture decision records
+  operations/alerts.md     the metrics and PrometheusRule examples
 Dockerfile                 one image; the container role is chosen by the command
 ```
 
@@ -296,6 +301,20 @@ on runs. Behind an ingress controller, set `GOLEM_TRUSTED_PROXIES` to its addres
 client address is read from `X-Forwarded-For`. Settings and defaults:
 [deploy/k8s/README.md](deploy/k8s/README.md#rate-limits-and-trusted-proxies).
 
+## Metrics
+
+Every process serves Prometheus metrics at `GET /metrics` on a port of its own
+(`GOLEM_METRICS_PORT`, 9090), never on a port its callers use; only the namespace labelled
+`golem.dev/monitoring: "true"` may reach it ([ADR 0013](docs/adr/0013-metrics.md)). Every HTTP
+listener records the same RED metrics (`golem_http_requests_total`,
+`golem_http_request_duration_seconds`) by route template, never by path. Domain metrics cover
+runs (started, admission rejections, reserved cost, outcomes and duration per agent), the
+reconciler (pass duration and errors, outbox and unsettled proposals, merge request failures)
+and the guards (rate limit refusals, authentication failures, audit write failures, policy
+denials, MCP tool calls). Label values come from closed sets: an unconfigured agent or tool is
+`other`, and no principal, id, address or goal is ever a label. The metrics and alert examples:
+[docs/operations/alerts.md](docs/operations/alerts.md).
+
 ## Evaluation of a catalog change
 
 A merge request to an agent catalog runs `python -m golem.evaluation run` in the catalog
@@ -321,6 +340,8 @@ sessions in real Postgres and the identity provider faked at its HTTP boundary.
 The Jira and Confluence MCP servers are tested with the runtime's own MCP client against the
 real task service and audit log, with Jira and Confluence faked at their HTTP boundaries.
 The evaluation of catalog merge requests runs in the catalog's CI job, tested with fake roles
-over the example golden set. Not built yet: the GitLab adapter, the GitLab MCP
+over the example golden set. Every process exports metrics, tested through its own app (and
+the reconciler as a process); the network check proves on k3s that only the monitoring
+namespace reaches the metrics ports. Not built yet: the GitLab adapter, the GitLab MCP
 server, the UI's decision queue, the orchestrator's evaluation workflow with a model judge and trace store, and
 Temporal (target).

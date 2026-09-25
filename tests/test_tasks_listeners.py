@@ -13,11 +13,15 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
+from prometheus_client import CollectorRegistry
 from starlette.testclient import TestClient
+from test_settings import TASKS_ENV
 from test_tasks_service import FakeOrchestrator, make_card
 
+from golem.metrics import Metrics
 from golem.run_token import SigningKey
-from golem.tasks.__main__ import Listener, serve_all
+from golem.settings import task_service_settings
+from golem.tasks.__main__ import Listener, listener_servers, serve_all
 from golem.tasks.app import Listeners, create_listeners
 
 EDGE_TOKEN = "edge-shared-secret"
@@ -226,3 +230,49 @@ async def test_when_one_server_stops_the_others_stop_too(listeners: Listeners) -
     await asyncio.wait_for(serving, 10)
 
     assert all(s.should_exit for s in servers)
+
+
+# --- Metrics (ADR 0013) --------------------------------------------------------------------------
+
+
+def test_the_three_listeners_count_requests_by_route_template_under_one_process(
+    orchestrator: FakeOrchestrator,
+) -> None:
+    metrics = Metrics("tasks")
+    listeners = create_listeners(
+        make_card(), orchestrator, edge_token=EDGE_TOKEN, run_keys=(KEY,), metrics=metrics
+    )
+    with (
+        TestClient(listeners.public) as public,
+        TestClient(listeners.internal_read) as read,
+        TestClient(listeners.internal_write) as write,
+    ):
+        public.post("/a2a", **send_message(principal=None))
+        for run_id in ("run-1", "run-2", "6f1c0e4e-0000-4000-8000-000000000000"):
+            read.get(f"/internal/runs/{run_id}")
+        write.post("/internal/run-outcome", json=FORGED_OUTCOME)
+
+    routes = {
+        s.labels["route"]
+        for family in metrics.registry.collect()
+        for s in family.samples
+        if s.name == "golem_http_requests_total"
+    }
+    assert routes == {"/a2a", "/internal/runs/{run_id}", "/internal/run-outcome"}
+    assert (
+        metrics.registry.get_sample_value(
+            "golem_authentication_failures_total", {"process": "tasks"}
+        )
+        == 1
+    )
+
+
+def test_the_process_serves_metrics_on_a_fourth_port_of_its_own(listeners: Listeners) -> None:
+    settings = task_service_settings(TASKS_ENV)
+
+    servers = listener_servers(listeners, settings, CollectorRegistry())
+
+    assert [s.config.port for s in servers] == [8000, 8001, 8002, 9090]
+    with TestClient(servers[3].config.app) as metrics, TestClient(listeners.internal_read) as read:
+        assert metrics.get("/metrics").status_code == 200
+        assert read.get("/metrics").status_code == 404

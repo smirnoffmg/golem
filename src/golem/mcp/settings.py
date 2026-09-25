@@ -9,8 +9,14 @@ from dataclasses import dataclass, field
 from golem.mcp.atlassian import JiraDeployment
 from golem.mcp.gate import AUTH_FAILURE_RATE
 from golem.mcp.groups import GROUPS
+from golem.metrics import DEFAULT_METRICS_PORT
 from golem.ratelimit import Network, Rate
-from golem.settings import SettingsError, rate_setting, trusted_proxies_setting
+from golem.settings import (
+    SettingsError,
+    metrics_port_setting,
+    rate_setting,
+    trusted_proxies_setting,
+)
 
 DEFAULTS = {
     "GOLEM_MCP_RUN_STATUS_TTL_SECONDS": "10",
@@ -45,6 +51,7 @@ class McpSettings:
     port: int
     auth_failure_rate: Rate = AUTH_FAILURE_RATE
     trusted_proxies: tuple[Network, ...] = ()
+    metrics_port: int = DEFAULT_METRICS_PORT
 
 
 def mcp_settings(env: Env) -> McpSettings:
@@ -68,6 +75,7 @@ def mcp_settings(env: Env) -> McpSettings:
         port=_port(env),
         auth_failure_rate=rate_setting(env, "GOLEM_RATE_AUTH_FAILURES", AUTH_FAILURE_RATE),
         trusted_proxies=trusted_proxies_setting(env),
+        metrics_port=metrics_port_setting(env, _port(env)),
     )
 
 

@@ -27,6 +27,7 @@ from golem.edge.audit import source_ip_of
 from golem.mcp.audit import Operation, audit_entry, written
 from golem.mcp.auth import Refusal, RunStatuses, grant_refusal, status_refusal
 from golem.mcp.groups import Group
+from golem.metrics import Metrics
 from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
 from golem.run_token import RunClaims, RunTokenError
 
@@ -44,6 +45,10 @@ def _auth_failure_limiter() -> Limiter:
     return Limiter(AUTH_FAILURE_RATE)
 
 
+def _metrics() -> Metrics:
+    return Metrics("mcp")
+
+
 @dataclass(frozen=True)
 class Gate:
     group: Group
@@ -53,6 +58,7 @@ class Gate:
     audit_dsn: str
     auth_failures: Limiter = field(default_factory=_auth_failure_limiter)
     trusted_proxies: tuple[Network, ...] = ()
+    metrics: Metrics = field(default_factory=_metrics)
 
 
 class _TooLarge:
@@ -152,6 +158,24 @@ async def read_body(receive: Receive, limit: int) -> bytes | _TooLarge | None:
             return b"".join(chunks)
 
 
+def decision_of(refusal: Refusal | None) -> str:
+    if refusal is None:
+        return "allow"
+    # The gate could not decide: a dependency of ours failed, not the caller.
+    return "unavailable" if refusal.status_code == 503 else "deny"
+
+
+def count_decision(
+    gate: Gate, operation: Operation, refusal: Refusal | None, audited: bool
+) -> None:
+    if not audited:
+        gate.metrics.audit_write_failed()
+    if operation.tool is not None:
+        gate.metrics.tool_called(
+            gate.group.name, operation.tool, decision_of(refusal), tools=gate.group.tools
+        )
+
+
 def replaying(body: bytes, receive: Receive) -> Receive:
     replayed = False
 
@@ -182,6 +206,8 @@ def gated(app: ASGIApp, gate: Gate) -> ASGIApp:
         address_key = address or UNKNOWN_ADDRESS
         admitted = gate.auth_failures.admits(address_key)
         if not admitted.allowed:
+            gate.metrics.rate_limit_refused("auth_failures")
+            audited = True
             if admitted.first_refusal:
                 entry = audit_entry(
                     group=gate.group,
@@ -192,12 +218,14 @@ def gated(app: ASGIApp, gate: Gate) -> ASGIApp:
                     refusal=RATE_LIMITED,
                     source_ip=source_ip_of(address),
                 )
-                await written(gate.audit_dsn, entry)
+                audited = await written(gate.audit_dsn, entry)
+            count_decision(gate, operation, RATE_LIMITED, audited)
             await too_many(admitted)(scope, receive, send)
             return
         claims, refusal = await decide(gate, token, operation)
         if refusal is not None and refusal.status_code == 401:
             gate.auth_failures.take(address_key)
+            gate.metrics.authentication_failed()
         entry = audit_entry(
             group=gate.group,
             target_system=gate.target_system,
@@ -207,8 +235,10 @@ def gated(app: ASGIApp, gate: Gate) -> ASGIApp:
             refusal=refusal,
             source_ip=source_ip_of(address),
         )
-        if not await written(gate.audit_dsn, entry):
+        audited = await written(gate.audit_dsn, entry)
+        if not audited:
             refusal = AUDIT_UNAVAILABLE
+        count_decision(gate, operation, refusal, audited)
         if refusal is not None:
             await refusal_response(refusal, gate.group)(scope, receive, send)
             return

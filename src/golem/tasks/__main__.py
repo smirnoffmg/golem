@@ -3,18 +3,17 @@
 import asyncio
 import logging
 import os
-import signal
 import sys
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
 
 import httpx
-import uvicorn
 from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface
+from prometheus_client import CollectorRegistry
 
+from golem.metrics import Metrics, metrics_app, process_registry
 from golem.orchestrator.launchers import launcher_for
 from golem.orchestrator.reconciler import apply_schema_once
 from golem.orchestrator.service import PostgresOrchestrator
+from golem.serving import Listener, listener, serve_all
 from golem.settings import (
     SettingsError,
     TaskServiceSettings,
@@ -43,17 +42,23 @@ def service_card(public_base_url: str, push_notifications: bool = False) -> Agen
     )
 
 
-def build_listeners(settings: TaskServiceSettings) -> Listeners:
+def build_listeners(
+    settings: TaskServiceSettings, registry: CollectorRegistry | None = None
+) -> Listeners:
     signing_key = parse_signing_key(settings.run_token_key_file.read_text(), settings.run_token_kid)
+    catalogs = parse_catalog_refs(settings.catalogs_file.read_text())
+    # The registered agents are the bounded set the run metrics name; others are "other".
+    metrics = Metrics("tasks", registry=registry, agents=catalogs)
     orchestrator = PostgresOrchestrator(
         dsn=settings.runs_dsn,
         limits=settings.limits,
         estimated_cost=settings.estimated_cost,
         launcher=launcher_for(settings.kubernetes, settings.template.namespace),
         template=settings.template,
-        catalogs=parse_catalog_refs(settings.catalogs_file.read_text()),
+        catalogs=catalogs,
         signing_key=signing_key,
         grants=parse_agent_tools(settings.agent_tools_file.read_text()),
+        metrics=metrics,
     )
     engine = tasks_engine(settings.tasks_db_url)
     push = (
@@ -72,55 +77,30 @@ def build_listeners(settings: TaskServiceSettings) -> Listeners:
         task_store=tasks_store(engine),
         push=push,
         run_keys=(signing_key,),
+        metrics=metrics,
     )
 
 
-class Listener(uvicorn.Server):
-    # uvicorn.Server.serve installs its own SIGINT and SIGTERM handlers with signal.signal and
-    # restores the previous ones when it returns. With three servers in one loop each would
-    # replace the last, and a signal would stop only one of them; serve_all handles signals.
-    @contextmanager
-    def capture_signals(self) -> Iterator[None]:
-        yield
-
-
-def listener_servers(listeners: Listeners, settings: TaskServiceSettings) -> list[Listener]:
+def listener_servers(
+    listeners: Listeners, settings: TaskServiceSettings, registry: CollectorRegistry
+) -> list[Listener]:
     return [
-        Listener(uvicorn.Config(app, host="0.0.0.0", port=port))
+        listener(app, port)
         for app, port in (
             (listeners.public, settings.port),
             (listeners.internal_read, settings.internal_read_port),
             (listeners.internal_write, settings.internal_write_port),
+            # Not the read port: the MCP servers are admitted to that one (ADR 0013).
+            (metrics_app(registry), settings.metrics_port),
         )
     ]
 
 
-async def serve_all(servers: Sequence[uvicorn.Server]) -> None:
-    """Serve until a signal arrives or any server stops; then all of them stop."""
-    loop = asyncio.get_running_loop()
-
-    def stop_all() -> None:
-        for server in servers:
-            server.should_exit = True
-
-    async def serve_one(server: uvicorn.Server) -> None:
-        try:
-            await server.serve()
-        finally:
-            stop_all()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop_all)
-    try:
-        await asyncio.gather(*(serve_one(server) for server in servers))
-    finally:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.remove_signal_handler(sig)
-
-
-async def serve(settings: TaskServiceSettings, listeners: Listeners) -> None:
+async def serve(
+    settings: TaskServiceSettings, listeners: Listeners, registry: CollectorRegistry
+) -> None:
     await apply_schema_once(settings.runs_dsn)
-    await serve_all(listener_servers(listeners, settings))
+    await serve_all(listener_servers(listeners, settings, registry))
 
 
 def main() -> None:
@@ -129,11 +109,12 @@ def main() -> None:
         settings = task_service_settings(os.environ)
     except SettingsError as error:
         sys.exit(f"golem task service: {error}")
+    registry = process_registry()
     try:
-        listeners = build_listeners(settings)
+        listeners = build_listeners(settings, registry)
     except SettingsError as error:
         sys.exit(f"golem task service: {error}")
-    asyncio.run(serve(settings, listeners))
+    asyncio.run(serve(settings, listeners, registry))
 
 
 if __name__ == "__main__":

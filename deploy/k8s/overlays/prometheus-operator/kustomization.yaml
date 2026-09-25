@@ -1,0 +1,10 @@
+# Optional: the base plus a ServiceMonitor, for clusters running the Prometheus Operator
+# (ADR 0013). Its Prometheus must select the ServiceMonitor (serviceMonitorSelector,
+# serviceMonitorNamespaceSelector) and run in a namespace labelled golem.dev/monitoring: "true",
+# the only one the network policies let scrape. Alert examples: docs/operations/alerts.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  - service-monitor.yaml

@@ -1,0 +1,17 @@
+# Every golem Service with a port named metrics: the platform's processes and nothing else.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: golem
+  namespace: golem-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: golem
+  namespaceSelector:
+    matchNames:
+      - golem-system
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s

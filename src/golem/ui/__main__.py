@@ -7,10 +7,11 @@ import sys
 
 import httpx
 import psycopg
-import uvicorn
 from starlette.types import ASGIApp
 
+from golem.metrics import Metrics, process_registry
 from golem.ratelimit import Limiter
+from golem.serving import serve_all, with_metrics
 from golem.settings import SettingsError, UiSettings, ui_settings
 from golem.ui.app import create_ui_app
 from golem.ui.oidc import OidcClient
@@ -21,7 +22,7 @@ OUTBOUND_TIMEOUT_SECONDS = 10
 IDP_TIMEOUT_SECONDS = 4
 
 
-def build_app(settings: UiSettings) -> ASGIApp:
+def build_app(settings: UiSettings, metrics: Metrics | None = None) -> ASGIApp:
     return create_ui_app(
         oidc=OidcClient(
             http=httpx.AsyncClient(timeout=IDP_TIMEOUT_SECONDS),
@@ -39,6 +40,7 @@ def build_app(settings: UiSettings) -> ASGIApp:
         logins=Limiter(settings.login_rate),
         starts=Limiter(settings.start_rate),
         trusted_proxies=settings.trusted_proxies,
+        metrics=metrics,
     )
 
 
@@ -54,8 +56,16 @@ def main() -> None:
     except SettingsError as error:
         sys.exit(f"golem ui: {error}")
     asyncio.run(prepare(settings.dsn))
+    registry = process_registry()
     # The client address comes from golem.ratelimit with GOLEM_TRUSTED_PROXIES, not uvicorn.
-    uvicorn.run(build_app(settings), host="0.0.0.0", port=settings.port, proxy_headers=False)
+    servers = with_metrics(
+        build_app(settings, Metrics("ui", registry=registry)),
+        settings.port,
+        registry=registry,
+        metrics_port=settings.metrics_port,
+        proxy_headers=False,
+    )
+    asyncio.run(serve_all(servers))
 
 
 if __name__ == "__main__":

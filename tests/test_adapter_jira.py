@@ -37,6 +37,7 @@ from golem.edge.__main__ import authenticator
 from golem.edge.app import create_edge_app
 from golem.edge.policy import ChainLimits, Registry
 from golem.jwks import SigningKeys, fetch_jwks
+from golem.metrics import Metrics
 from golem.ratelimit import Limiter, Rate, parse_networks
 from golem.settings import SettingsError, adapter_settings, parse_label_agents
 
@@ -908,3 +909,29 @@ async def test_behind_a_trusted_proxy_the_webhook_is_limited_per_forwarded_clien
         )
 
     assert (again.status_code, other.status_code) == (429, 401)
+
+
+# --- Metrics (ADR 0013) --------------------------------------------------------------------------
+
+
+async def test_refused_webhooks_and_pushes_are_counted() -> None:
+    metrics = Metrics("jira-adapter")
+    inbound = Limiter(Rate(per_minute=60, burst=2), clock=Clock())
+    client, _ = limited_adapter(inbound, "203.0.113.5", metrics=metrics)
+
+    async with client:
+        for _ in range(3):
+            await client.post("/jira/webhook", json=issue_updated())
+        await client.post("/a2a/push", json={}, headers={"X-A2A-Notification-Token": "forged"})
+
+    value = metrics.registry.get_sample_value
+    process = {"process": "jira-adapter"}
+    assert value("golem_authentication_failures_total", process) == 3
+    assert value("golem_rate_limit_refusals_total", process | {"limit": "webhook"}) == 1
+    assert (
+        value(
+            "golem_http_requests_total",
+            process | {"route": "/jira/webhook", "method": "POST", "status_class": "4xx"},
+        )
+        == 3
+    )

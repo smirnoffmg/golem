@@ -35,6 +35,7 @@ from golem.adapters.common import (
     state_word,
     subject_of_push_token,
 )
+from golem.metrics import Instrumented, Metrics
 from golem.ratelimit import Limiter, Network, Rate
 
 WEBHOOK_PATH = "/jira/webhook"
@@ -149,8 +150,10 @@ def create_jira_adapter_app(
     jira: httpx.AsyncClient,
     inbound: Limiter | None = None,
     trusted_proxies: tuple[Network, ...] = (),
-) -> Starlette:
+    metrics: Metrics | None = None,
+) -> Instrumented:
     push_url = f"{public_base_url}{PUSH_PATH}"
+    metrics = Metrics("jira-adapter") if metrics is None else metrics
     inbound = Limiter(WEBHOOK_RATE) if inbound is None else inbound
 
     async def start(added: LabelAdded, agent: str) -> str | None:
@@ -167,9 +170,11 @@ def create_jira_adapter_app(
     async def webhook(request: Request) -> Response:
         refused = rate_limited(inbound, request, trusted_proxies)
         if refused is not None:
+            metrics.rate_limit_refused("webhook")
             return refused
         body = await request.body()
         if not signature_valid(webhook_secret, body, request.headers.get(SIGNATURE_HEADER)):
+            metrics.authentication_failed()
             return Response(status_code=401)
         try:
             payload = json.loads(body)
@@ -189,6 +194,7 @@ def create_jira_adapter_app(
             push_secret, request.headers.get(NOTIFICATION_TOKEN_HEADER, "")
         )
         if issue_key is None:
+            metrics.authentication_failed()
             return Response(status_code=401)
         try:
             update = push_update(await request.json())
@@ -205,12 +211,13 @@ def create_jira_adapter_app(
             return Response(status_code=502)
         return JSONResponse({"issue": issue_key, "task": update.task_id})
 
-    return Starlette(
+    app = Starlette(
         routes=[
             Route(WEBHOOK_PATH, webhook, methods=["POST"]),
             Route(PUSH_PATH, pushed, methods=["POST"]),
         ]
     )
+    return Instrumented(app, routes=app.routes, metrics=metrics)
 
 
 def _label_set(value: Any) -> frozenset[str]:

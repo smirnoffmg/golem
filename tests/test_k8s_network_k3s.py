@@ -39,7 +39,15 @@ from test_k8s_manifests import (
     pod_state,
     wait_until,
 )
-from test_k8s_netcheck import CANARY_NAMESPACE, CLIENTS, MATRIX, NETCHECK, SETTLED
+from test_k8s_netcheck import (
+    CANARY_NAMESPACE,
+    MATRIX,
+    MONITORING_NAMESPACE,
+    NAMESPACES,
+    NETCHECK,
+    SCRAPER,
+    SETTLED,
+)
 from test_k8s_render import BASE, JOBS, POSTGRES_PLACEHOLDER, SYSTEM, find, of_kind, render
 
 from golem.orchestrator.jobs import APP_LABEL
@@ -143,7 +151,7 @@ def wait_until_available(api_client: ApiClient, name: str) -> None:
 @pytest.fixture(scope="module")
 def cluster(k3s_api_client: ApiClient) -> Iterator[Cluster]:
     core = CoreV1Api(k3s_api_client)
-    namespaces = (SYSTEM, JOBS, POSTGRES_NAMESPACE, CANARY_NAMESPACE)
+    namespaces = (SYSTEM, JOBS, POSTGRES_NAMESPACE, CANARY_NAMESPACE, MONITORING_NAMESPACE)
     # test_k8s_manifests.py deletes the same namespaces on its way out.
     wait_for_namespaces_gone(core, namespaces)
     endpoint = api_server_endpoint(k3s_api_client)
@@ -384,7 +392,7 @@ def run_netcheck(api_client: ApiClient) -> dict[str, tuple[bool, str]]:
     try:
         return {
             name: wait_for_job(api_client, namespace, name)
-            for name, (namespace, _) in CLIENTS.items()
+            for name, namespace in NAMESPACES.items()
         }
     finally:
         delete_jobs(api_client, objects)
@@ -443,6 +451,13 @@ BREAKAGES = {
     ),
     # A policy that allows too much: only a closed check can see it. Postgres is outside the
     # default-deny namespaces, so the runs' egress rules are all that keep runs from it.
+    # Without the scrape policy the metrics ports are as closed as any other port: the scraper's
+    # opens fail, and nothing else changes.
+    "without-metrics-scrape": (
+        remove("allow-metrics-scrape", SYSTEM),
+        ("allow-metrics-scrape", SYSTEM),
+        {SCRAPER: {c for c in MATRIX[SCRAPER] if c.startswith("open:")}},
+    ),
     "run-egress-admits-postgres": (
         admit_runs_to_postgres,
         ("golem-run-egress", JOBS),

@@ -241,6 +241,7 @@ def test_the_task_service_listens_where_its_service_and_settings_say() -> None:
         "a2a": settings.port,
         "internal-read": settings.internal_read_port,
         "internal-write": settings.internal_write_port,
+        "metrics": settings.metrics_port,
     }
     assert {p["name"]: p["targetPort"] for p in service_ports} == {n: n for n in container_ports}
     assert {p["name"]: p["port"] for p in service_ports} == container_ports
@@ -599,3 +600,105 @@ def test_processes_behind_the_ingress_controller_name_it_as_a_trusted_proxy(name
 
     assert env.get("GOLEM_TRUSTED_PROXIES")
     assert SETTINGS[name](env).trusted_proxies
+
+
+# --- Metrics (ADR 0013) --------------------------------------------------------------------------
+
+PROMETHEUS_OPERATOR = K8S / "overlays" / "prometheus-operator"
+MONITORING = {"namespaceSelector": {"matchLabels": {"golem.dev/monitoring": "true"}}}
+METRICS = "metrics"
+
+
+def service_of(objects: list[dict], deployment: dict) -> dict:
+    labels = deployment["spec"]["template"]["metadata"]["labels"]
+    [service] = [
+        s
+        for s in of_kind(objects, "Service")
+        if s["metadata"]["namespace"] == SYSTEM and s["spec"]["selector"].items() <= labels.items()
+    ]
+    return service
+
+
+@pytest.mark.parametrize("name", sorted(SETTINGS))
+def test_every_process_exposes_a_metrics_port_where_its_settings_serve_metrics(name: str) -> None:
+    objects = render(EXTERNAL_SECRETS)
+    deployment = find(objects, "Deployment", name, SYSTEM)
+    settings = SETTINGS[name](env_of(deployment, objects, secret_keys(objects)))
+    container_ports = {p["name"]: p["containerPort"] for p in container(deployment)["ports"]}
+    service_ports = {p["name"]: p for p in service_of(objects, deployment)["spec"]["ports"]}
+
+    assert container_ports[METRICS] == settings.metrics_port
+    assert service_ports[METRICS]["targetPort"] == METRICS
+    assert service_ports[METRICS]["port"] == settings.metrics_port
+
+
+def metrics_ports() -> set[int]:
+    return {
+        p["containerPort"]
+        for d in deployments()
+        for p in container(d)["ports"]
+        if p["name"] == METRICS
+    }
+
+
+def test_the_metrics_port_is_no_port_a_caller_is_admitted_to() -> None:
+    ports = metrics_ports()
+    opened_to_callers = {
+        port["port"]
+        for policy in policies()
+        if policy["metadata"]["name"] != "allow-metrics-scrape"
+        for rule in policy["spec"].get("ingress", [])
+        for port in rule["ports"]
+    }
+
+    assert ports == {9090}
+    assert not ports & opened_to_callers
+
+
+def test_only_the_monitoring_namespace_may_scrape_and_only_the_metrics_port() -> None:
+    policy = find(policies(), "NetworkPolicy", "allow-metrics-scrape", SYSTEM)
+    monitoring_rules = [
+        rule
+        for p in policies()
+        for rule in p["spec"].get("ingress", [])
+        if MONITORING in rule.get("from", [])
+    ]
+
+    assert policy["spec"]["podSelector"] == {"matchLabels": {"app.kubernetes.io/part-of": "golem"}}
+    assert policy["spec"]["policyTypes"] == ["Ingress"]
+    assert policy["spec"]["ingress"] == [
+        {"from": [MONITORING], "ports": [{"protocol": "TCP", "port": 9090}]}
+    ]
+    assert monitoring_rules == policy["spec"]["ingress"]
+
+
+def test_every_process_pod_is_selected_by_the_scrape_policy() -> None:
+    policy = find(policies(), "NetworkPolicy", "allow-metrics-scrape", SYSTEM)
+    selector = policy["spec"]["podSelector"]["matchLabels"]
+
+    for deployment in deployments():
+        labels = deployment["spec"]["template"]["metadata"]["labels"]
+        assert selector.items() <= labels.items(), deployment["metadata"]["name"]
+
+
+def test_the_prometheus_operator_overlay_scrapes_every_metrics_port() -> None:
+    objects = render(PROMETHEUS_OPERATOR)
+    [monitor] = of_kind(objects, "ServiceMonitor")
+    selector = monitor["spec"]["selector"]["matchLabels"]
+    scraped = [
+        s
+        for s in of_kind(objects, "Service")
+        if s["metadata"]["namespace"] == SYSTEM
+        and selector.items() <= s["metadata"].get("labels", {}).items()
+    ]
+
+    assert monitor["apiVersion"] == "monitoring.coreos.com/v1"
+    assert monitor["spec"]["namespaceSelector"] == {"matchNames": [SYSTEM]}
+    assert monitor["spec"]["endpoints"] == [
+        {"port": METRICS, "path": "/metrics", "interval": "30s"}
+    ]
+    assert {s["metadata"]["name"] for s in scraped} == {
+        service_of(objects, d)["metadata"]["name"] for d in deployments()
+    }
+    for service in scraped:
+        assert METRICS in [p["name"] for p in service["spec"]["ports"]]

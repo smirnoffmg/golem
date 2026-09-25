@@ -10,6 +10,7 @@ from golem.mcp import atlassian
 from golem.mcp.atlassian import JiraDeployment
 from golem.mcp.gate import Gate, gated
 from golem.mcp.groups import Group
+from golem.metrics import Instrumented
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True)
 
@@ -65,4 +66,5 @@ def create_mcp_app(
     *, gate: Gate, upstream: httpx.AsyncClient, jira_deployment: JiraDeployment | None
 ) -> ASGIApp:
     server = mcp_server(gate.group, upstream, jira_deployment)
-    return gated(server.streamable_http_app(), gate)
+    app = server.streamable_http_app()
+    return Instrumented(gated(app, gate), routes=app.routes, metrics=gate.metrics)

@@ -48,6 +48,7 @@ from golem.edge.__main__ import authenticator
 from golem.edge.app import create_edge_app
 from golem.edge.policy import ChainLimits, Registry
 from golem.jwks import SigningKeys, fetch_jwks
+from golem.metrics import Metrics
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.service import PostgresOrchestrator
 from golem.ratelimit import Limiter, Rate, parse_networks
@@ -1132,3 +1133,47 @@ async def test_a_malformed_page_token_is_refused(
     response = await browser.get("/tasks", params={"page": token})
 
     assert response.status_code == 400
+
+
+# --- Metrics (ADR 0013) --------------------------------------------------------------------------
+
+
+async def test_ui_requests_are_counted_by_route_template_and_refusals_by_kind(
+    audit_dsn: str, audit_admin_dsn: str, ui_db: str
+) -> None:
+    metrics = Metrics("ui")
+    logins = Limiter(Rate(per_minute=60, burst=2), clock=Clock())
+    starts = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
+    stack = build_stack(
+        audit_dsn, ui_db, FakeOrchestrator(), logins=logins, starts=starts, metrics=metrics
+    )
+
+    async with stack.browser() as browser:
+        await login(stack, browser)
+        await start_task(browser, goal="one")
+        await start_task(browser, goal="two")
+        for task_id in ("t-1", "t-2", "t-3"):
+            await browser.get(f"/tasks/discovery/{task_id}")
+        await browser.get("/admin")
+        await browser.get("/login")
+        await browser.get("/login")
+        await browser.get("/callback", params={"code": "x", "state": "made-up"})
+
+    routes = {
+        s.labels["route"]
+        for family in metrics.registry.collect()
+        for s in family.samples
+        if s.name == "golem_http_requests_total"
+    }
+    assert routes == {
+        "/login",
+        "/callback",
+        "/tasks",
+        "/tasks/new",
+        "/tasks/{agent}/{task_id}",
+        "unmatched",
+    }
+    value = metrics.registry.get_sample_value
+    assert value("golem_rate_limit_refusals_total", {"process": "ui", "limit": "start"}) == 1
+    assert value("golem_rate_limit_refusals_total", {"process": "ui", "limit": "login"}) == 1
+    assert value("golem_authentication_failures_total", {"process": "ui"}) == 1

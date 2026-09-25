@@ -37,6 +37,7 @@ from golem.edge.__main__ import authenticator
 from golem.edge.app import create_edge_app
 from golem.edge.policy import ChainLimits, Registry
 from golem.jwks import SigningKeys, fetch_jwks
+from golem.metrics import Metrics
 from golem.ratelimit import Limiter, Rate
 from golem.settings import SettingsError, mattermost_adapter_settings
 from golem.tasks.app import PushDelivery, create_listeners
@@ -875,3 +876,31 @@ async def test_commands_are_limited_per_address_before_the_token_check() -> None
     assert flooded.status_code == 429 and int(flooded.headers["retry-after"]) >= 1
     assert valid_but_late.status_code == 429
     assert edge.calls == []
+
+
+# --- Metrics (ADR 0013) --------------------------------------------------------------------------
+
+
+async def test_refused_commands_and_pushes_are_counted() -> None:
+    edge, idp, mattermost = FakeEdge(), IdP(client_id="mattermost-adapter"), FakeMattermost()
+    metrics = Metrics("mattermost-adapter")
+    inbound = Limiter(Rate(per_minute=60, burst=2), clock=FrozenClock())
+    app = adapter_app(
+        edge=fake_edge_client(edge),
+        idp=idp,
+        mattermost=mattermost,
+        inbound=inbound,
+        metrics=metrics,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("203.0.113.5", 4000)), base_url=PUBLIC_URL
+    ) as client:
+        for _ in range(3):
+            await command(client, headers=command_headers("guessed"))
+        await client.post("/a2a/push", json={}, headers={"X-A2A-Notification-Token": "forged"})
+
+    value = metrics.registry.get_sample_value
+    process = {"process": "mattermost-adapter"}
+    assert value("golem_authentication_failures_total", process) == 3
+    assert value("golem_rate_limit_refusals_total", process | {"limit": "command"}) == 1

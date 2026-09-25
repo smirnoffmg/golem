@@ -14,10 +14,12 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
+from starlette.types import ASGIApp
 
 from golem.edge.audit import audit_entry, record, source_ip_of
 from golem.edge.auth import AuthFailure, Principal
 from golem.edge.policy import Call, ChainLimits, Deny, Registry, evaluate
+from golem.metrics import Instrumented, Metrics
 from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
 
 RPC_PATH = "/a2a"
@@ -99,15 +101,17 @@ def parse_call(body: bytes) -> RpcCall | Rejected:
     return RpcCall(rpc_id, method, tenant)
 
 
-def policy_refusal(
+def policy_denial(
     principal: Principal, call: RpcCall, registry: Registry, limits: ChainLimits
-) -> Refusal | None:
+) -> Deny | None:
     decision = evaluate(
         Call(caller=principal.name, callee=call.tenant, chain=principal.chain), registry, limits
     )
-    if isinstance(decision, Deny):
-        return Refusal(CALL_DENIED, f"{decision.reason.value}: {decision.detail}")
-    return None
+    return decision if isinstance(decision, Deny) else None
+
+
+def denial_refusal(denial: Deny) -> Refusal:
+    return Refusal(CALL_DENIED, f"{denial.reason.value}: {denial.detail}")
 
 
 TRACEPARENT = re.compile(r"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
@@ -188,9 +192,11 @@ def create_edge_app(
     callers: Limiter | None = None,
     auth_failures: Limiter | None = None,
     trusted_proxies: tuple[Network, ...] = (),
-) -> Starlette:
+    metrics: Metrics | None = None,
+) -> ASGIApp:
     callers = Limiter(CALLER_RATE) if callers is None else callers
     auth_failures = Limiter(AUTH_FAILURE_RATE) if auth_failures is None else auth_failures
+    metrics = Metrics("edge") if metrics is None else metrics
 
     async def audited(address: str | None, principal: Principal, call: RpcCall | Rejected) -> bool:
         refusal = call.refusal if isinstance(call, Rejected) else None
@@ -207,6 +213,7 @@ def create_edge_app(
             ) as conn:
                 await record(conn, entry)
         except (psycopg.Error, OSError):
+            metrics.audit_write_failed()
             return False
         return True
 
@@ -216,20 +223,24 @@ def create_edge_app(
         # An address that keeps failing is refused before its tokens cost a verification.
         admitted = auth_failures.admits(address_key)
         if not admitted.allowed:
+            metrics.rate_limit_refused("auth_failures")
             return too_many(None, admitted)
         token = bearer_token(request.headers.get("Authorization"))
         if token is None:
             auth_failures.take(address_key)
+            metrics.authentication_failed()
             return unauthenticated(None)
         # Verification may refetch the identity provider's keys; that must not stall the loop.
         principal = await asyncio.to_thread(authenticate, token)
         if isinstance(principal, AuthFailure):
             auth_failures.take(address_key)
+            metrics.authentication_failed()
             return unauthenticated(principal)
         body = await request.body()
         call = parse_call(body)
         decision = callers.take(principal.name)
         if not decision.allowed:
+            metrics.rate_limit_refused("caller")
             # One row per streak of refusals: the first shows the caller hit the limit, the
             # rest would only grow the insert-only log at the rate of the flood.
             if decision.first_refusal:
@@ -239,9 +250,10 @@ def create_edge_app(
                 )
             return too_many(call.id, decision)
         if isinstance(call, RpcCall):
-            refusal = policy_refusal(principal, call, registry, limits)
-            if refusal is not None:
-                call = Rejected(call.id, call.method, call.tenant, refusal)
+            denial = policy_denial(principal, call, registry, limits)
+            if denial is not None:
+                metrics.policy_denied(denial.reason.value)
+                call = Rejected(call.id, call.method, call.tenant, denial_refusal(denial))
         if not await audited(address, principal, call):
             return rpc_error(call.id, Refusal(AUDIT_UNAVAILABLE, "audit log unavailable"))
         if isinstance(call, Rejected):
@@ -264,12 +276,13 @@ def create_edge_app(
             return JSONResponse({"error": "unknown agent"}, status_code=404)
         return JSONResponse(agent_card_to_dict(card))
 
-    return Starlette(
+    app = Starlette(
         routes=[
             Route(RPC_PATH, a2a, methods=["POST"]),
             Route(f"/agents/{{name}}{AGENT_CARD_WELL_KNOWN_PATH}", agent_card, methods=["GET"]),
         ]
     )
+    return Instrumented(app, routes=app.routes, metrics=metrics)
 
 
 def _rpc_id(value: Any) -> RpcId:

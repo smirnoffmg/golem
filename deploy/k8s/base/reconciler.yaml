@@ -1,5 +1,5 @@
-# The reconciler: a loop without a listening port, so it has no Service and no probe; a crash
-# ends the process and the kubelet restarts it.
+# The reconciler: a loop whose only listening port serves its metrics (ADR 0013), so its
+# Service is for scraping alone. No probe: a crash ends the process and the kubelet restarts it.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -46,6 +46,9 @@ spec:
         - name: reconciler
           image: golem
           command: ["python", "-m", "golem.orchestrator.reconciler"]
+          ports:
+            - name: metrics
+              containerPort: 9090
           envFrom:
             - configMapRef:
                 name: golem-reconciler-env
@@ -80,3 +83,16 @@ spec:
             items:
               - key: gitlab-projects.yaml
                 path: gitlab-projects.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reconciler
+  namespace: golem-system
+spec:
+  selector:
+    app.kubernetes.io/name: golem-reconciler
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics

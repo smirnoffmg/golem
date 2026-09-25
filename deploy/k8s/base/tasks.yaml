@@ -1,6 +1,7 @@
 # The task service with the orchestrator port: A2A tasks, run admission, Job launch.
 # Three listeners, one per kind of caller (ADR 0009): a2a for the edge, internal-read for the
-# MCP servers (run keys, run status), internal-write for the reconciler (run outcomes).
+# MCP servers (run keys, run status), internal-write for the reconciler (run outcomes); and
+# metrics for the monitoring namespace (ADR 0013).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -68,6 +69,10 @@ spec:
               containerPort: 8001
             - name: internal-write
               containerPort: 8002
+            # A fourth port, not internal-read: the MCP servers are admitted to that one, and
+            # only the monitoring namespace to this one (ADR 0013).
+            - name: metrics
+              containerPort: 9090
           envFrom:
             - configMapRef:
                 name: golem-tasks-env
@@ -144,3 +149,6 @@ spec:
     - name: internal-write
       port: 8002
       targetPort: internal-write
+    - name: metrics
+      port: 9090
+      targetPort: metrics

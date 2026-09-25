@@ -24,6 +24,9 @@ CLIENTS = {
     "netcheck-mcp": (SYSTEM, "mcp"),
     "netcheck-reconciler": (SYSTEM, "reconciler"),
 }
+# Prometheus's stand-in: no process's labels, in a namespace the scrape policy admits.
+SCRAPER = "netcheck-monitoring"
+MONITORING_NAMESPACE = "golem-netcheck-monitoring"
 TASKS = "tasks.golem-system.svc"
 POSTGRES = "$(NETCHECK_POSTGRES)"
 LISTENER_HOST = f"{LISTENER}.{JOBS}.svc.cluster.local"
@@ -67,6 +70,24 @@ MATRIX = {
         f"closed:{TASKS}:8000",
         f"closed:{TASKS}:8001",
     },
+    # ADR 0013: the metrics port of each process, and none of the ports its callers use.
+    SCRAPER: {
+        DNS,
+        "open:edge.golem-system.svc:9090",
+        f"open:{TASKS}:9090",
+        "open:mcp-tracker-read.golem-system.svc:9090",
+        "open:mcp-wiki-read.golem-system.svc:9090",
+        "closed:edge.golem-system.svc:8000",
+        f"closed:{TASKS}:8000",
+        f"closed:{TASKS}:8001",
+        f"closed:{TASKS}:8002",
+        "closed:mcp-tracker-read.golem-system.svc:8000",
+    },
+}
+# Every client Job and its namespace.
+NAMESPACES = {
+    **{name: namespace for name, (namespace, _) in CLIENTS.items()},
+    SCRAPER: MONITORING_NAMESPACE,
 }
 SERVICE_TARGET = re.compile(r"^([a-z0-9-]+)\.([a-z0-9-]+)\.svc(?:\.cluster\.local)?:(\d+)$")
 
@@ -89,12 +110,12 @@ def checks(name: str) -> set[str]:
 
 
 def test_the_network_check_renders_one_job_per_caller_a_listener_and_a_canary() -> None:
-    assert {j["metadata"]["name"] for j in jobs()} == {*CLIENTS, LISTENER, CANARY}
-    for name, (namespace, _) in CLIENTS.items():
+    assert {j["metadata"]["name"] for j in jobs()} == {*NAMESPACES, LISTENER, CANARY}
+    for name, namespace in NAMESPACES.items():
         assert job(name)["metadata"]["namespace"] == namespace
 
 
-@pytest.mark.parametrize("name", sorted(CLIENTS))
+@pytest.mark.parametrize("name", sorted(NAMESPACES))
 def test_each_client_tries_the_matrix_of_its_process(name: str) -> None:
     assert checks(name) == MATRIX[name]
 
@@ -157,8 +178,10 @@ def test_no_client_ever_takes_the_traffic_of_a_real_service(name: str) -> None:
 def test_every_closed_target_is_proven_listening() -> None:
     """A "closed" verdict on a dead target would pass: each one is another check's "open", or
     the listener, whose name resolves only while it is Ready."""
-    opened = {c.removeprefix("open:") for name in CLIENTS for c in checks(name) if "open:" in c}
-    closed = {c.removeprefix("closed:") for name in CLIENTS for c in checks(name) if "closed:" in c}
+    opened = {c.removeprefix("open:") for name in NAMESPACES for c in checks(name) if "open:" in c}
+    closed = {
+        c.removeprefix("closed:") for name in NAMESPACES for c in checks(name) if "closed:" in c
+    }
 
     assert closed - opened == {f"{LISTENER_HOST}:8000"}
     assert f"dns:{LISTENER_HOST}" in checks("netcheck-run")
@@ -168,7 +191,7 @@ def test_every_service_target_is_a_service_port() -> None:
     objects = render(BASE) + render(NETCHECK)
     targets = {
         c.split(":", 1)[1]
-        for name in CLIENTS
+        for name in NAMESPACES
         for c in checks(name)
         if "svc" in c and not c.startswith("dns:")
     }
@@ -179,6 +202,23 @@ def test_every_service_target_is_a_service_port() -> None:
         assert match, target
         service = find(objects, "Service", match[1], match[2])
         assert int(match[3]) in [p["port"] for p in service["spec"]["ports"]], target
+
+
+def test_the_scraper_is_admitted_by_the_scrape_policy_alone() -> None:
+    """Its namespace has the monitoring label and no policies, so the processes' ingress rules
+    alone decide what it reaches; it wears no process's labels, so no process policy governs it."""
+    objects = render(NETCHECK)
+    namespace = find(objects, "Namespace", MONITORING_NAMESPACE)
+    scrape = find(of_kind(render(BASE), "NetworkPolicy"), "NetworkPolicy", "allow-metrics-scrape")
+    [peer] = scrape["spec"]["ingress"][0]["from"]
+    labels = pod_of(job(SCRAPER))["metadata"]["labels"]
+
+    assert (
+        peer["namespaceSelector"]["matchLabels"].items() <= namespace["metadata"]["labels"].items()
+    )
+    assert not [p for p in of_kind(objects, "NetworkPolicy")]
+    assert APP_LABEL not in labels
+    assert MONITORING_NAMESPACE != CANARY_NAMESPACE
 
 
 @pytest.mark.parametrize("namespace", [SYSTEM, JOBS])
@@ -196,7 +236,7 @@ def test_every_job_runs_once_and_fails_on_the_first_failure() -> None:
         assert j["spec"]["template"]["spec"]["restartPolicy"] == "Never"
 
 
-@pytest.mark.parametrize("name", sorted([*CLIENTS, LISTENER, CANARY]))
+@pytest.mark.parametrize("name", sorted([*NAMESPACES, LISTENER, CANARY]))
 def test_every_job_is_hardened_like_the_platform(name: str) -> None:
     pod = pod_of(job(name))["spec"]
     [container] = pod["containers"]

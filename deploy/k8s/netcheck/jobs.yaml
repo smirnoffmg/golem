@@ -460,3 +460,79 @@ spec:
     - name: http
       port: 8000
       targetPort: http
+---
+# Prometheus: the metrics port of every process it checks, never a port callers use (ADR 0013).
+# It lives in a namespace of its own with the monitoring label and no policies, so only the
+# processes' ingress rules decide; nothing to settle. It checks the processes the other
+# clients check, whose public ports are proven listening by their "open" checks.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: golem-netcheck-monitoring
+  labels:
+    golem.dev/monitoring: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: netcheck-monitoring
+  namespace: golem-netcheck-monitoring
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        golem.dev/netcheck: monitoring
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: netcheck
+          image: busybox:1.37
+          command: ["sh", "/etc/netcheck/netcheck.sh"]
+          args:
+            - "dns:kubernetes.default.svc.cluster.local"
+            - "open:edge.golem-system.svc:9090"
+            - "open:tasks.golem-system.svc:9090"
+            - "open:mcp-tracker-read.golem-system.svc:9090"
+            - "open:mcp-wiki-read.golem-system.svc:9090"
+            - "closed:edge.golem-system.svc:8000"
+            - "closed:tasks.golem-system.svc:8000"
+            - "closed:tasks.golem-system.svc:8001"
+            - "closed:tasks.golem-system.svc:8002"
+            - "closed:mcp-tracker-read.golem-system.svc:8000"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: netcheck
+              mountPath: /etc/netcheck
+              readOnly: true
+      volumes:
+        - name: netcheck
+          configMap:
+            name: golem-netcheck
+            items:
+              - key: netcheck.sh
+                path: netcheck.sh

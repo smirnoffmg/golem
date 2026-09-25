@@ -29,6 +29,7 @@ from golem.mcp.auth import RunStatuses, run_token_verifier
 from golem.mcp.gate import Gate
 from golem.mcp.groups import GROUPS
 from golem.mcp.server import create_mcp_app
+from golem.metrics import Metrics
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.runs import RunCreated, StartRequest, cancel_run_of_task, start_run
 from golem.orchestrator.service import PostgresOrchestrator
@@ -208,7 +209,12 @@ def researcher() -> Role:
 
 
 async def tools_of(stack: Stack, token: str) -> dict[str, Any]:
-    toolbox = McpToolbox(registry=registry(stack), run_token=token)
+    return await tools_of_url(stack.mcp_url, token)
+
+
+async def tools_of_url(mcp_url: str, token: str) -> dict[str, Any]:
+    group = ToolGroup(name=TRACKER.name, url=mcp_url, tools=TRACKER.tools)
+    toolbox = McpToolbox(registry=Registry(groups=(group,)), run_token=token)
     return {tool.name: tool for tool in await toolbox.tools_for(researcher())}
 
 
@@ -507,3 +513,75 @@ async def test_failed_authentications_are_limited_per_address_and_audited_once(
     assert flooded[0].json()["error"] == "rate_limited"
     results = [row["result"] for row in await audit_rows(audit_admin_dsn)]
     assert results == ["allow"] * 3 + ["deny: bearer token required"] * 2 + ["deny: rate_limited"]
+
+
+# Metrics (ADR 0013)
+
+
+def tool_calls(metrics: Metrics) -> dict[tuple[str, str, str], float]:
+    return {
+        (s.labels["group"], s.labels["tool"], s.labels["decision"]): s.value
+        for family in metrics.registry.collect()
+        for s in family.samples
+        if s.name == "golem_mcp_tool_calls_total"
+    }
+
+
+def tool_call(name: str) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": {"key": "DISC-1"}},
+    }
+
+
+async def test_tool_calls_are_counted_by_decision_with_unknown_tools_as_other(
+    tasks_url: str, runs_db: str, mcp_audit_dsn: str, audit_admin_dsn: str, jira: Jira
+) -> None:
+    metrics = Metrics("mcp")
+    token = token_for(await started_run(runs_db))
+    app = mcp_app(tasks_url, mcp_audit_dsn, jira, metrics=metrics)
+
+    with serve(app) as url:
+        tools = await tools_of_url(f"{url}/mcp", token)
+        await tools["get_issue"].ainvoke({"key": "DISC-1"})
+        for name in ("delete_issue", "drop_everything", "x" * 200):
+            await mcp_post(f"{url}/mcp", tool_call(name), token=token)
+        await mcp_post(f"{url}/mcp", tool_call("get_issue"), token="forged")
+
+    assert tool_calls(metrics) == {
+        ("tracker.read", "get_issue", "allow"): 1,
+        ("tracker.read", "other", "deny"): 3,
+        ("tracker.read", "get_issue", "deny"): 1,
+    }
+    requests = {
+        s.labels["route"]
+        for family in metrics.registry.collect()
+        for s in family.samples
+        if s.name == "golem_http_requests_total"
+    }
+    assert requests == {"/mcp"}
+    assert (
+        metrics.registry.get_sample_value("golem_authentication_failures_total", {"process": "mcp"})
+        == 1
+    )
+
+
+async def test_refusals_and_audit_failures_are_counted(
+    tasks_url: str, runs_db: str, mcp_audit_dsn: str, audit_admin_dsn: str, jira: Jira
+) -> None:
+    broken_dsn = "host=127.0.0.1 port=1 dbname=golem_audit user=golem_mcp connect_timeout=1"
+    metrics = Metrics("mcp")
+    failures = Limiter(Rate(per_minute=60, burst=1), clock=FrozenClock())
+    app = mcp_app(tasks_url, broken_dsn, jira, auth_failures=failures, metrics=metrics)
+
+    with serve(app) as url:
+        for _ in range(2):
+            await mcp_post(f"{url}/mcp", LIST_TOOLS, token=None)
+
+    value = metrics.registry.get_sample_value
+    assert (
+        value("golem_rate_limit_refusals_total", {"process": "mcp", "limit": "auth_failures"}) == 1
+    )
+    assert value("golem_audit_write_failures_total", {"process": "mcp"}) == 2

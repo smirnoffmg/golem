@@ -418,3 +418,40 @@ def test_every_process_with_a_public_route_reads_its_limits() -> None:
     networks = parse_networks("10.0.0.0/8")
     assert ui.trusted_proxies == jira.trusted_proxies == networks
     assert mattermost.trusted_proxies == mcp.trusted_proxies == networks
+
+
+# --- Metrics port (ADR 0013) ---------------------------------------------------------------------
+
+EVERY_PROCESS = {
+    "edge": (edge_settings, EDGE_ENV),
+    "tasks": (task_service_settings, TASKS_ENV),
+    "reconciler": (reconciler_settings, RECONCILER_ENV),
+    "jira-adapter": (adapter_settings, ADAPTER_ENV),
+    "mattermost-adapter": (mattermost_adapter_settings, MATTERMOST_ENV),
+    "mcp": (mcp_settings, TRACKER_ENV),
+    "ui": (ui_settings, UI_ENV),
+}
+
+
+@pytest.mark.parametrize("process", sorted(EVERY_PROCESS))
+def test_every_process_serves_metrics_on_a_port_of_its_own(process: str) -> None:
+    parse, env = EVERY_PROCESS[process]
+
+    assert parse(env).metrics_port == 9090
+    assert parse(env | {"GOLEM_METRICS_PORT": "9464"}).metrics_port == 9464
+    with pytest.raises(SettingsError, match="GOLEM_METRICS_PORT"):
+        parse(env | {"GOLEM_METRICS_PORT": "metrics"})
+
+
+@pytest.mark.parametrize("process", sorted(set(EVERY_PROCESS) - {"reconciler"}))
+def test_the_metrics_port_is_never_a_port_callers_reach(process: str) -> None:
+    parse, env = EVERY_PROCESS[process]
+
+    with pytest.raises(SettingsError, match="GOLEM_METRICS_PORT"):
+        parse(env | {"GOLEM_METRICS_PORT": "8000"})
+
+
+@pytest.mark.parametrize("port", ["8001", "8002"])
+def test_the_task_services_metrics_port_is_not_an_internal_one(port: str) -> None:
+    with pytest.raises(SettingsError, match="distinct"):
+        task_service_settings(TASKS_ENV | {"GOLEM_METRICS_PORT": port})

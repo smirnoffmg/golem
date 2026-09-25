@@ -36,6 +36,7 @@ from golem.adapters.common import (
     state_word,
     subject_of_push_token,
 )
+from golem.metrics import Instrumented, Metrics
 from golem.ratelimit import Limiter, Network, Rate
 
 COMMAND_PATH = "/mattermost/command"
@@ -201,10 +202,12 @@ def create_mattermost_adapter_app(
     start_timeout_seconds: float = START_TIMEOUT_SECONDS,
     inbound: Limiter | None = None,
     trusted_proxies: tuple[Network, ...] = (),
-) -> Starlette:
+    metrics: Metrics | None = None,
+) -> Instrumented:
     if not command_token:
         raise ValueError("the slash command token must not be empty")
     push_url = f"{public_base_url}{PUSH_PATH}"
+    metrics = Metrics("mattermost-adapter") if metrics is None else metrics
     inbound = Limiter(COMMAND_RATE) if inbound is None else inbound
 
     def allowed(command: SlashCommand) -> bool:
@@ -226,8 +229,10 @@ def create_mattermost_adapter_app(
     async def slash(request: Request) -> Response:
         refused = rate_limited(inbound, request, trusted_proxies)
         if refused is not None:
+            metrics.rate_limit_refused("command")
             return refused
         if not command_token_valid(command_token, request.headers.get("Authorization")):
+            metrics.authentication_failed()
             return Response(status_code=401)
         command = slash_command(await request.body())
         if command is None:
@@ -259,6 +264,7 @@ def create_mattermost_adapter_app(
         )
         target = None if subject is None else target_of_subject(subject)
         if target is None:
+            metrics.authentication_failed()
             return Response(status_code=401)
         try:
             update = push_update(await request.json())
@@ -276,9 +282,10 @@ def create_mattermost_adapter_app(
             return Response(status_code=502)
         return JSONResponse({"channel": target.channel_id, "task": update.task_id})
 
-    return Starlette(
+    app = Starlette(
         routes=[
             Route(COMMAND_PATH, slash, methods=["POST"]),
             Route(PUSH_PATH, pushed, methods=["POST"]),
         ]
     )
+    return Instrumented(app, routes=app.routes, metrics=metrics)

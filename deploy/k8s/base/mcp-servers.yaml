@@ -51,6 +51,9 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+            # Scraped from the monitoring namespace only (ADR 0013).
+            - name: metrics
+              containerPort: 9090
           envFrom:
             - configMapRef:
                 name: golem-mcp-tracker-read-env
@@ -100,6 +103,9 @@ spec:
     - name: http
       port: 8000
       targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -152,6 +158,9 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+            # Scraped from the monitoring namespace only (ADR 0013).
+            - name: metrics
+              containerPort: 9090
           envFrom:
             - configMapRef:
                 name: golem-mcp-wiki-read-env
@@ -201,3 +210,6 @@ spec:
     - name: http
       port: 8000
       targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics

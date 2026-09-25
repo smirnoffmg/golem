@@ -2,7 +2,7 @@
 
 Every interval it reconciles finished Jobs, opens merge requests for succeeded runs and
 delivers task outcomes. A failed pass is logged and the next one runs; SIGTERM stops the loop
-between passes.
+between passes. Its metrics are served on ``GOLEM_METRICS_PORT``, the only port it listens on.
 """
 
 import asyncio
@@ -10,18 +10,21 @@ import logging
 import os
 import signal
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
 import httpx
 from psycopg import AsyncConnection
 
+from golem.metrics import Metrics, ReconcilerMetrics, metrics_app, process_registry
 from golem.orchestrator.jobs import JobLauncher
 from golem.orchestrator.launchers import launcher_for
 from golem.orchestrator.merge_requests import GitLabMergeRequests, propose_merge_request
 from golem.orchestrator.notify import TaskServiceNotifier
 from golem.orchestrator.reconcile import SucceededRun, reconcile_once
 from golem.orchestrator.runs import apply_schema
+from golem.serving import listener
 from golem.settings import (
     ReconcilerSettings,
     SettingsError,
@@ -36,13 +39,22 @@ log = logging.getLogger("golem.reconciler")
 
 
 async def run_forever(
-    reconcile_pass: Callable[[], Awaitable[None]], *, interval_seconds: float, stop: asyncio.Event
+    reconcile_pass: Callable[[], Awaitable[None]],
+    *,
+    interval_seconds: float,
+    stop: asyncio.Event,
+    metrics: ReconcilerMetrics | None = None,
 ) -> None:
+    metrics = ReconcilerMetrics() if metrics is None else metrics
     while not stop.is_set():
+        started = time.perf_counter()
+        failed = False
         try:
             await reconcile_pass()
         except Exception:
+            failed = True
             log.exception("reconcile pass failed")
+        metrics.pass_finished(time.perf_counter() - started, failed=failed)
         with suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), interval_seconds)
 
@@ -60,13 +72,14 @@ def pass_for(
     launcher: JobLauncher,
     notifier: TaskServiceNotifier,
     gitlab: GitLabMergeRequests,
+    metrics: ReconcilerMetrics | None = None,
 ) -> Callable[[], Awaitable[None]]:
     async def propose(run: SucceededRun) -> str:
         return await propose_merge_request(gitlab, run)
 
     async def reconcile_pass() -> None:
         async with await AsyncConnection.connect(settings.runs_dsn, autocommit=True) as conn:
-            await reconcile_once(conn, launcher, notifier.notify, propose)
+            await reconcile_once(conn, launcher, notifier.notify, propose, metrics)
 
     return reconcile_pass
 
@@ -74,11 +87,19 @@ def pass_for(
 async def serve(settings: ReconcilerSettings) -> None:
     projects = parse_gitlab_projects(settings.gitlab_projects_file.read_text())
     launcher = launcher_for(settings.kubernetes, settings.namespace)
+    # The agents with a GitLab project are the ones this process names; others are "other".
+    registry = process_registry()
+    metrics = ReconcilerMetrics(Metrics("reconciler", registry=registry, agents=projects))
     await apply_schema_once(settings.runs_dsn)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, stop.set)
     loop.add_signal_handler(signal.SIGINT, stop.set)
+    # The loop has no HTTP server of its own; a listener serves only its metrics (ADR 0013).
+    exposition = listener(metrics_app(registry), settings.metrics_port)
+    serving = asyncio.create_task(exposition.serve())
+    # A metrics listener that stops (a port already taken) stops the process, as in serve_all.
+    serving.add_done_callback(lambda _: stop.set())
     async with (
         httpx.AsyncClient(
             base_url=settings.task_service_url, timeout=HTTP_TIMEOUT_SECONDS
@@ -94,9 +115,19 @@ async def serve(settings: ReconcilerSettings) -> None:
             launcher,
             TaskServiceNotifier(tasks_client),
             GitLabMergeRequests(gitlab_client, projects),
+            metrics,
         )
         log.info("reconciler started: a pass every %ss", settings.interval_seconds)
-        await run_forever(reconcile_pass, interval_seconds=settings.interval_seconds, stop=stop)
+        try:
+            await run_forever(
+                reconcile_pass,
+                interval_seconds=settings.interval_seconds,
+                stop=stop,
+                metrics=metrics,
+            )
+        finally:
+            exposition.should_exit = True
+            await serving
     log.info("reconciler stopped")
 
 

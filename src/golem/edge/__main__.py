@@ -1,5 +1,6 @@
 """The A2A edge process: ``python -m golem.edge``."""
 
+import asyncio
 import logging
 import os
 import sys
@@ -8,9 +9,8 @@ from functools import partial
 from pathlib import Path
 
 import httpx
-import uvicorn
 from a2a.types.a2a_pb2 import AgentCard
-from starlette.applications import Starlette
+from starlette.types import ASGIApp
 
 from golem.catalog import load_catalog
 from golem.edge.app import create_edge_app
@@ -18,7 +18,9 @@ from golem.edge.auth import AuthFailure, Principal, authenticate
 from golem.edge.cards import build_public_card
 from golem.edge.policy import ChainLimits
 from golem.jwks import SigningKeys, fetch_jwks, key_id_of
+from golem.metrics import Metrics, process_registry
 from golem.ratelimit import Limiter
+from golem.serving import serve_all, with_metrics
 from golem.settings import EdgeSettings, SettingsError, edge_settings, parse_registry
 
 JWKS_TIMEOUT_SECONDS = 2
@@ -50,7 +52,9 @@ def load_public_cards(
     return cards
 
 
-def build_app(settings: EdgeSettings, jwks_client: httpx.Client) -> Starlette:
+def build_app(
+    settings: EdgeSettings, jwks_client: httpx.Client, metrics: Metrics | None = None
+) -> ASGIApp:
     keys = SigningKeys(partial(fetch_jwks, jwks_client, settings.jwks_url))
     keys.refresh()
     return create_edge_app(
@@ -70,6 +74,7 @@ def build_app(settings: EdgeSettings, jwks_client: httpx.Client) -> Starlette:
         callers=Limiter(settings.caller_rate),
         auth_failures=Limiter(settings.auth_failure_rate),
         trusted_proxies=settings.trusted_proxies,
+        metrics=metrics,
     )
 
 
@@ -79,14 +84,18 @@ def main() -> None:
         settings = edge_settings(os.environ)
     except SettingsError as error:
         sys.exit(f"golem edge: {error}")
+    registry = process_registry()
     with httpx.Client(timeout=JWKS_TIMEOUT_SECONDS) as jwks_client:
+        app = build_app(settings, jwks_client, Metrics("edge", registry=registry))
         # The client address comes from golem.ratelimit with GOLEM_TRUSTED_PROXIES, not uvicorn.
-        uvicorn.run(
-            build_app(settings, jwks_client),
-            host="0.0.0.0",
-            port=settings.port,
+        servers = with_metrics(
+            app,
+            settings.port,
+            registry=registry,
+            metrics_port=settings.metrics_port,
             proxy_headers=False,
         )
+        asyncio.run(serve_all(servers))
 
 
 if __name__ == "__main__":

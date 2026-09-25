@@ -29,18 +29,21 @@ run the network check after every deploy that changes a policy or the CNI.
 | `golem-system` (`golem.dev/zone: system`) | `edge` (2 replicas), `tasks`, `reconciler`, `jira-adapter`, `mattermost-adapter`, `mcp-tracker-read`, `mcp-wiki-read`, `ui` (2 replicas) | `restricted` |
 | `golem-jobs` (`golem.dev/zone: jobs`) | runs only: the Jobs the task service launches, their token Secrets, the MCP registry, a `ResourceQuota` | `restricted` |
 
-Every process listens on 8000 and its Service exposes 8000, except the reconciler, which has
-no port and so no Service and no probe, and the task service, which has three listeners, one
-per kind of caller (ADR 0009):
+Every process listens on 8000 and its Service exposes 8000, except the reconciler, which serves
+nothing but its metrics and has no probe, and the task service, which has three listeners, one
+per kind of caller (ADR 0009). Every process also serves `GET /metrics` on a port of its own,
+9090 (`metrics`), which only the monitoring namespace reaches (ADR 0013, below):
 
 | Port | Name | Routes | Admitted |
 | --- | --- | --- | --- |
 | 8000 | `a2a` | the agent card, `/a2a`; every request needs `GOLEM_EDGE_TOKEN` | the edge |
 | 8001 | `internal-read` | `GET /internal/run-keys`, `GET /internal/runs/{run_id}` | the MCP servers |
 | 8002 | `internal-write` | `POST /internal/run-outcome`: a notification naming a task; its outcome is read from `golem_runs` | the reconciler |
+| 9090 | `metrics` | `GET /metrics` | the monitoring namespace |
 
-`GOLEM_PORT`, `GOLEM_INTERNAL_READ_PORT` and `GOLEM_INTERNAL_WRITE_PORT` move them; the
-Deployment's container ports, the Service and the `tasks` policy must move with them. Probes:
+`GOLEM_PORT`, `GOLEM_INTERNAL_READ_PORT`, `GOLEM_INTERNAL_WRITE_PORT` and `GOLEM_METRICS_PORT`
+move them (a process refuses to start with two on one port); the Deployment's container ports,
+the Service and the policies must move with them. Probes:
 `tasks` uses `GET /internal/run-keys` on `internal-read`, since the `a2a` port answers only to
 the edge; the UI's readiness probe gets its stylesheet; the edge, the adapters and the MCP servers
 have no cheap unauthenticated route, so their probes are TCP.
@@ -113,6 +116,7 @@ overlay.
 | `203.0.113.10/32:4000` | `golem-run-egress` | The model gateway. |
 | `203.0.113.20/32:443` | `golem-run-egress` | The trace store's OTLP endpoint. |
 | `203.0.113.30/32`, ingress `:8000`, egress `:443` | policy `mattermost-adapter` | The Mattermost server: it sends slash commands and serves the REST API the adapter posts to. If commands reach the adapter through the ingress controller, admit the controller's namespace instead and restrict the source to Mattermost at the ingress; route `/mattermost/command` to Service `mattermost-adapter`. |
+| `golem.dev/monitoring: "true"` | policy `allow-metrics-scrape` | Label the namespace your Prometheus runs in, or patch the selector. It admits that namespace to port 9090 of every process and to nothing else. |
 | `golem.dev/ingress-controller: "true"` | policies `edge`, `jira-adapter`, `ui` | Label your ingress controller's namespace with it, or patch the selector. The base has no Ingress objects: route the public host to Service `edge`, the Jira webhook path to `jira-adapter`, and the UI's host (TLS terminated at the ingress) to Service `ui`. |
 | `https://idp.example.com/...`, `golem-edge` | `golem-edge-env`, `golem-jira-adapter-env`, `golem-mattermost-adapter-env` | Issuer, JWKS, discovery and token URLs; the edge's audience; the adapters' client ids (also in the call registry as `service:golem-jira-adapter` and `service:golem-mattermost-adapter`). |
 | `https://mattermost.example.com`, `replace-with-team-id`, `discovery` | `golem-mattermost-adapter-env` | The Mattermost URL; the team ids (and optionally channel ids, `GOLEM_MATTERMOST_CHANNELS`) where `/golem` is enabled; the agents it may start. |
@@ -127,6 +131,18 @@ overlay.
 An `ipBlock` cannot name a host, and SaaS endpoints (Atlassian Cloud, a hosted model API)
 change addresses. For those, send the traffic through an egress proxy with a fixed address, or
 use a CNI with DNS-based policies, and put that address in the `ipBlock`.
+
+### Metrics
+
+Every process serves Prometheus metrics at `GET /metrics` on `GOLEM_METRICS_PORT` (9090), a
+listener of its own that serves nothing else, never on a port its callers are admitted to
+(ADR 0013). The `allow-metrics-scrape` policy admits the namespace labelled
+`golem.dev/monitoring: "true"` to that port only; no process's own policy opens it. With the
+Prometheus Operator, `overlays/prometheus-operator` adds a `ServiceMonitor` (API
+`monitoring.coreos.com/v1`) that scrapes the `metrics` port of every Service labelled
+`app.kubernetes.io/part-of: golem`; your `Prometheus` must select it. Without the operator,
+scrape the same Service ports with Kubernetes service discovery. The metrics, their labels and
+alert examples: [docs/operations/alerts.md](../../docs/operations/alerts.md).
 
 ### Rate limits and trusted proxies
 
@@ -204,12 +220,16 @@ kubectl apply -k overlays/prod-netcheck
 kubectl get jobs -A -l app.kubernetes.io/component=netcheck -w  # until each client is Complete or Failed
 kubectl logs -n golem-jobs job/netcheck-run
 kubectl logs -n golem-system job/netcheck-edge                  # and netcheck-mcp, netcheck-reconciler
+kubectl logs -n golem-netcheck-monitoring job/netcheck-monitoring
 kubectl delete -k overlays/prod-netcheck
 ```
 
 Each client Job wears the labels of one process, so that process's policy governs it, and
-prints one `PASS` or `FAIL` line per check; the Job fails if any line is `FAIL`. All four
-Complete means the matrix holds:
+prints one `PASS` or `FAIL` line per check; the Job fails if any line is `FAIL`. A fifth
+client stands in for Prometheus: it wears no process's labels and runs in a namespace of its
+own, `golem-netcheck-monitoring`, labelled `golem.dev/monitoring: "true"` and without policies,
+so only the processes' ingress rules decide what it reaches. All five Complete means the matrix
+holds:
 
 | Client (labels of) | Namespace | Must reach | Must not reach |
 | --- | --- | --- | --- |
@@ -217,6 +237,7 @@ Complete means the matrix holds:
 | the edge | `golem-system` | DNS; `tasks:8000` (`a2a`) | `tasks` on 8001, 8002; `mcp-tracker-read:8000` |
 | an MCP server | `golem-system` | DNS; `tasks:8001` (`internal-read`) | `tasks` on 8000, 8002 |
 | the reconciler | `golem-system` | DNS; `tasks:8002` (`internal-write`); Postgres | `tasks` on 8000, 8001 |
+| Prometheus | `golem-netcheck-monitoring` | DNS; `metrics` (9090) of `edge`, `tasks`, `mcp-tracker-read`, `mcp-wiki-read` | `edge:8000`; `tasks` on 8000, 8001, 8002; `mcp-tracker-read:8000` |
 
 The real Services are the targets. Stand-ins exist only where nothing real is expected: another
 run (`netcheck-run-listener`, a run-labelled listener in `golem-jobs`), and a canary
@@ -230,10 +251,15 @@ accident:
   can refuse (`PASS settled:... (egress unfiltered for Ns)`); only then does it try the matrix.
   On k3s N is about 1 second. Any N above 0 on your cluster means a new pod, a run included, can
   reach anything not guarded by the destination's own ingress rules for that long.
+- The Prometheus client needs no wait: nothing filters its own egress, and a new pod is not yet
+  in the address sets the destinations' ingress rules admit, so early on its "must reach"
+  checks are retried and its "must not reach" checks can only be refused.
 - The client pods are never Ready (their readiness probe outlasts the Job's deadline), so the
   edge's Service never sends real traffic to the edge's stand-in.
 
-Not covered: the ingress controller to the edge, the UI and the Jira adapter (label your
+Not covered: the metrics ports of the reconciler, the adapters and the UI (the same policy
+admits them, and the tests prove it on k3s only for the four processes above), the ingress
+controller to the edge, the UI and the Jira adapter (label your
 controller's namespace and try the public URLs), the Mattermost server's address, the
 destinations outside the cluster other than Postgres (identity provider, Atlassian, GitLab,
 the model gateway, the trace store: their `ipBlock`s need their real endpoints, so a run that

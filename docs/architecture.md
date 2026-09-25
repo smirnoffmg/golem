@@ -83,7 +83,9 @@ A default-deny network policy opens exactly five destinations to a Job: the A2A 
 model gateway, Langfuse, the platform MCP servers, and GitLab. The Job's GitLab token can
 write only its own branch. Platform MCP servers (Jira, Confluence, GitLab) hold their secrets
 themselves and accept calls authorized by the run token; the diagram folds them into one
-container. Metrics in Grafana and Prometheus are omitted.
+container. Metrics in Grafana and Prometheus are omitted from the diagram: every process serves
+them on a metrics port of its own that only the monitoring namespace reaches
+([ADR 0013](adr/0013-metrics.md)).
 
 **Platform MCP servers are resource servers for run tokens**
 ([ADR 0008](adr/0008-platform-mcp-servers.md)). One process serves one tool group over
@@ -359,6 +361,13 @@ the edge, the task service and the adapters. It owns execution: admission, workf
 merge requests, run records, metrics. In the pilot, workflows run as plain code over
 `golem_runs`; in the target they move onto Temporal.
 
+**Metrics** ([ADR 0013](adr/0013-metrics.md)). Admission counts started runs, rejections by
+reason and the cost it reserves; whoever moves a run out of `running` (the reconciler from the
+Job and its report, the task service on a cancel or a failed launch) records its outcome and its
+duration from `runs.created_at`, once, through the guarded `UPDATE`. The reconciler times its
+passes, counts failed ones and merge request failures, and gauges the outbox and the unsettled
+proposals after every pass. Agent labels are bounded by configuration.
+
 **Evaluation workflow.** A merge request to an agent catalog starts a GitLab CI pipeline. Its
 job is an A2A client: it submits "evaluate this catalog version" and waits for the verdict. The
 orchestrator runs the version from the merge request branch over the golden set, runs the judge
@@ -397,6 +406,7 @@ Container_Boundary(orch, "Orchestrator") {
   Component(act_job, "Job activity", "", "create Job with image, catalog ref and hop token; watch; clean up on timeout")
   Component(act_mr, "Merge request activity", "", "open merge request from the agent account with version and trace link")
   Component(runs, "Run records", "", "initiator, chain, team, versions, attempts, cost")
+  Component(metrics, "Metrics", "Prometheus", "runs started, rejected, finished and their duration; reserved cost; reconcile passes, outbox, proposals; own port, monitoring namespace only")
 }
 
 Rel(tasks, admit, "task to run, process or evaluation")
@@ -417,6 +427,8 @@ Rel(act_mr, gitlab, "API")
 Rel(wf_run, runs, "terminal state, cost")
 Rel(wf_run, temporal, "history, timers, signals", $tags="target")
 Rel(runs, db, "persists")
+Rel(admit, metrics, "started, rejected, reserved cost")
+Rel(wf_run, metrics, "outcome, duration, outbox")
 @enduml
 ```
 

@@ -1,5 +1,6 @@
 """A platform MCP server process: ``python -m golem.mcp``, one tool group per process."""
 
+import asyncio
 import logging
 import os
 import sys
@@ -7,7 +8,6 @@ from functools import partial
 from urllib.parse import urlsplit
 
 import httpx
-import uvicorn
 from starlette.types import ASGIApp
 
 from golem.adapters.jira import jira_authorization
@@ -17,7 +17,9 @@ from golem.mcp.gate import Gate
 from golem.mcp.groups import GROUPS
 from golem.mcp.server import create_mcp_app
 from golem.mcp.settings import McpSettings, mcp_settings
+from golem.metrics import Metrics, process_registry
 from golem.ratelimit import Limiter
+from golem.serving import serve_all, with_metrics
 from golem.settings import SettingsError
 from golem.tasks.app import RUN_KEYS_PATH
 
@@ -40,7 +42,9 @@ def target_system(settings: McpSettings) -> str:
     return f"{GROUPS[settings.group].system}:{urlsplit(settings.upstream_url).netloc}"
 
 
-def build_app(settings: McpSettings, jwks_client: httpx.Client) -> ASGIApp:
+def build_app(
+    settings: McpSettings, jwks_client: httpx.Client, metrics: Metrics | None = None
+) -> ASGIApp:
     keys = SigningKeys(
         partial(fetch_jwks, jwks_client, f"{settings.task_service_url}{RUN_KEYS_PATH}"),
         min_refresh_seconds=settings.keys_refresh_seconds,
@@ -59,6 +63,7 @@ def build_app(settings: McpSettings, jwks_client: httpx.Client) -> ASGIApp:
         audit_dsn=settings.audit_dsn,
         auth_failures=Limiter(settings.auth_failure_rate),
         trusted_proxies=settings.trusted_proxies,
+        metrics=Metrics("mcp") if metrics is None else metrics,
     )
     return create_mcp_app(
         gate=gate, upstream=upstream_client(settings), jira_deployment=settings.jira_deployment
@@ -71,14 +76,18 @@ def main() -> None:
         settings = mcp_settings(os.environ)
     except SettingsError as error:
         sys.exit(f"golem mcp: {error}")
+    registry = process_registry()
     with httpx.Client(timeout=JWKS_TIMEOUT_SECONDS) as jwks_client:
+        app = build_app(settings, jwks_client, Metrics("mcp", registry=registry))
         # The client address comes from golem.ratelimit with GOLEM_TRUSTED_PROXIES, not uvicorn.
-        uvicorn.run(
-            build_app(settings, jwks_client),
-            host="0.0.0.0",
-            port=settings.port,
+        servers = with_metrics(
+            app,
+            settings.port,
+            registry=registry,
+            metrics_port=settings.metrics_port,
             proxy_headers=False,
         )
+        asyncio.run(serve_all(servers))
 
 
 if __name__ == "__main__":

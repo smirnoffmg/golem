@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from psycopg import AsyncConnection
 
+from golem.metrics import Metrics
 from golem.orchestrator.admission import Limits, Rejected
 from golem.orchestrator.jobs import CatalogRef, JobLauncher, JobSpec
 from golem.orchestrator.runs import (
@@ -24,6 +25,7 @@ from golem.tasks.ports import Refused, RunOutcome, RunStart, Started, TaskRun
 # The token outlives the Job's deadline by this much, so a call made in the run's last second
 # is not refused on clock skew between the orchestrator and an MCP server.
 TOKEN_GRACE_SECONDS = 60
+UNKNOWN_AGENT = "unknown_agent"
 
 
 @dataclass(frozen=True)
@@ -94,10 +96,12 @@ class PostgresOrchestrator:
     signing_key: SigningKey
     grants: Mapping[str, tuple[str, ...]]
     clock: Callable[[], float] = field(default=time.time)
+    metrics: Metrics = field(default_factory=lambda: Metrics("tasks"))
 
     async def start(self, run: RunStart) -> Started | Refused:
         catalog = self.catalogs.get(run.agent)
         if catalog is None:
+            self.metrics.admission_rejected(UNKNOWN_AGENT)
             return Refused(reason=f"No agent named {run.agent!r} is registered.")
         request = StartRequest(
             caller=run.caller,
@@ -109,7 +113,10 @@ class PostgresOrchestrator:
         async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:
             outcome = await start_run(conn, request, self.limits)
             if isinstance(outcome, Rejected):
+                self.metrics.admission_rejected(outcome.reason.value)
                 return Refused(reason=outcome.detail)
+            if isinstance(outcome, RunCreated):
+                self.metrics.run_started(run.agent, self.estimated_cost)
             if isinstance(outcome, RunReused) and outcome.status != "running":
                 # A retry of a finished run must not leave a task WORKING that nothing will finish.
                 return Refused(
@@ -124,7 +131,9 @@ class PostgresOrchestrator:
             try:
                 await asyncio.to_thread(self.launcher.launch, spec)
             except Exception as error:
-                await fail_run(conn, outcome.run_id)
+                ended = await fail_run(conn, outcome.run_id)
+                if ended is not None:
+                    self.metrics.run_ended(ended.agent, "failed", ended.seconds)
                 return Refused(reason=f"Could not launch run {outcome.run_id}: {error}")
         return Started(run_id=outcome.run_id)
 
@@ -148,6 +157,7 @@ class PostgresOrchestrator:
 
     async def cancel(self, task_id: str) -> None:
         async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:
-            run_id = await cancel_run_of_task(conn, task_id)
-        if run_id is not None:
-            await asyncio.to_thread(self.launcher.delete, run_id)
+            ended = await cancel_run_of_task(conn, task_id)
+        if ended is not None:
+            self.metrics.run_ended(ended.agent, "canceled", ended.seconds)
+            await asyncio.to_thread(self.launcher.delete, ended.run_id)

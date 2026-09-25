@@ -36,6 +36,28 @@ spec:
         - protocol: TCP
           port: 53
 ---
+# Every process serves its metrics on a port of its own (ADR 0013). Only the monitoring
+# namespace reaches it, and nothing else of a process; no process policy opens 9090. Placeholder:
+# the namespace of Prometheus, labelled by the operator.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-scrape
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: golem
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              golem.dev/monitoring: "true"
+      ports:
+        - protocol: TCP
+          port: 9090
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

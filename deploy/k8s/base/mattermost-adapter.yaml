@@ -56,6 +56,9 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+            # Scraped from the monitoring namespace only (ADR 0013).
+            - name: metrics
+              containerPort: 9090
           envFrom:
             - configMapRef:
                 name: golem-mattermost-adapter-env
@@ -104,3 +107,6 @@ spec:
     - name: http
       port: 8000
       targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics

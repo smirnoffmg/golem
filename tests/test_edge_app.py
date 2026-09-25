@@ -18,6 +18,7 @@ from golem.edge.app import (
 )
 from golem.edge.auth import AuthFailure, Principal
 from golem.edge.policy import ChainLimits, Registry
+from golem.metrics import Metrics
 from golem.ratelimit import Limiter, Rate, parse_networks
 from golem.tasks.app import create_listeners
 
@@ -639,3 +640,74 @@ async def test_a_forwarded_for_from_an_untrusted_peer_does_not_escape_the_limit(
 
     assert rate_limited(spoofed)
     assert rate_limited(allowed)
+
+
+# --- Metrics (ADR 0013) --------------------------------------------------------------------------
+
+
+def sample(metrics: Metrics, name: str, **labels: str) -> float:
+    return metrics.registry.get_sample_value(name, labels) or 0.0
+
+
+async def test_every_edge_request_is_counted_under_its_route_template(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    metrics = Metrics("edge")
+
+    async with edge_client(tasks, audit_dsn, metrics=metrics) as client:
+        await call(client, send_message())
+        for name in ("discovery", "no-such-agent", "another-made-up-name"):
+            await client.get(f"/agents/{name}/.well-known/agent-card.json")
+        await client.get("/wp-login.php")
+
+    card = "/agents/{name}/.well-known/agent-card.json"
+    requests = "golem_http_requests_total"
+    assert (
+        sample(metrics, requests, process="edge", route="/a2a", method="POST", status_class="2xx")
+        == 1
+    )
+    assert (
+        sample(metrics, requests, process="edge", route=card, method="GET", status_class="2xx") == 1
+    )
+    assert (
+        sample(metrics, requests, process="edge", route=card, method="GET", status_class="4xx") == 2
+    )
+    assert (
+        sample(
+            metrics, requests, process="edge", route="unmatched", method="GET", status_class="4xx"
+        )
+        == 1
+    )
+
+
+async def test_edge_refusals_are_counted_by_kind(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    metrics = Metrics("edge")
+    callers = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
+    failures = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
+
+    async with edge_client(
+        tasks, audit_dsn, metrics=metrics, callers=callers, auth_failures=failures
+    ) as client:
+        await call(client, send_message("evaluator"))
+        await call(client, send_message())
+        await call(client, send_message(), token="forged")
+        await call(client, send_message(), token="forged")
+
+    assert sample(metrics, "golem_policy_denials_total", reason="not_allowed") == 1
+    assert sample(metrics, "golem_rate_limit_refusals_total", process="edge", limit="caller") == 1
+    assert sample(metrics, "golem_authentication_failures_total", process="edge") == 1
+    assert (
+        sample(metrics, "golem_rate_limit_refusals_total", process="edge", limit="auth_failures")
+        == 1
+    )
+
+
+async def test_an_audit_write_failure_is_counted(tasks: TaskService) -> None:
+    metrics = Metrics("edge")
+
+    async with edge_client(tasks, UNREACHABLE_DSN, metrics=metrics) as client:
+        await call(client, send_message())
+
+    assert sample(metrics, "golem_audit_write_failures_total", process="edge") == 1
