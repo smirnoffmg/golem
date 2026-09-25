@@ -109,8 +109,8 @@ URL the task's message carries, and the task id; `props` carries `golem_task_id`
 thread under the reply to the command: an ephemeral post is not a post others can see or answer.
 Non-terminal pushes are acknowledged with 204. The push token names the channel, the user and
 the run (`<message id>:<channel>:<user id>:<user name>`, HMAC-signed with
-`GOLEM_PUSH_TOKEN_SECRET`), so a push is posted only where a command of this adapter started it;
-anything else is a 401.
+`GOLEM_PUSH_TOKEN_SECRET` together with its issue time), so a push is posted only where a command
+of this adapter started it, and only for 24 hours; anything else is a 401.
 
 **Duplicates: no lookup, no state.** The Jira adapter searches the issue's comments for the
 task id before commenting. Here a lookup would page through a channel's history, and it is not

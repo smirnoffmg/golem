@@ -3,10 +3,12 @@ from decimal import Decimal
 
 import psycopg
 import pytest
+from kubernetes.client.exceptions import ApiException
 
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import JobSpec, JobStatus
 from golem.orchestrator.reconcile import (
+    LAUNCH_GRACE_SECONDS,
     SucceededRun,
     TaskOutcome,
     outcome_detail,
@@ -30,10 +32,14 @@ class StatusBoard:
 
     statuses: dict[str, JobStatus] = field(default_factory=dict)
     messages: dict[str, str] = field(default_factory=dict)
+    # Runs whose Job the API server fails to read (a 403, a 500, a timeout).
+    broken: set[str] = field(default_factory=set)
 
     def launch(self, spec: JobSpec) -> None: ...
 
     def status(self, run_id: str) -> JobStatus:
+        if run_id in self.broken:
+            raise ApiException(status=500, reason="Internal Server Error")
         return self.statuses.get(run_id, JobStatus.RUNNING)
 
     def delete(self, run_id: str) -> None: ...
@@ -174,10 +180,19 @@ async def test_a_failed_job_fails_the_run(runs_db: str, board: StatusBoard, inbo
     assert (await recorded(runs_db, "task-m-1")).status == "failed"
 
 
+async def age(dsn: str, run_id: str, seconds: int) -> None:
+    async with await connect(dsn) as conn:
+        await conn.execute(
+            "UPDATE runs SET created_at = now() - make_interval(secs => %s) WHERE id = %s",
+            (seconds, run_id),
+        )
+
+
 async def test_a_vanished_job_fails_the_run_with_a_reason(
     runs_db: str, board: StatusBoard, inbox: Inbox
 ):
     run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
     board.statuses[run_id] = JobStatus.MISSING
 
     await reconcile(runs_db, board, inbox)
@@ -185,6 +200,34 @@ async def test_a_vanished_job_fails_the_run_with_a_reason(
     assert await run_status(runs_db, run_id) == "failed"
     [outcome] = inbox.received
     assert "disappeared" in (await recorded(runs_db, outcome.task_id)).detail
+
+
+async def test_an_api_error_on_one_run_does_not_hold_back_the_others(
+    runs_db: str, board: StatusBoard, inbox: Inbox
+):
+    broken = await new_run(runs_db, "m-1")
+    finished = await new_run(runs_db, "m-2")
+    board.statuses[finished] = JobStatus.FAILED
+    board.broken.add(broken)
+
+    await reconcile(runs_db, board, inbox)
+
+    assert await run_status(runs_db, broken) == "running"
+    assert await run_status(runs_db, finished) == "failed"
+    [outcome] = inbox.received
+    assert outcome.run_id == finished
+
+
+async def test_a_run_whose_job_is_still_being_created_is_not_missing(
+    runs_db: str, board: StatusBoard, inbox: Inbox
+):
+    # The run is committed before its Job is created; a pass in between sees no Job.
+    run_id = await new_run(runs_db, "m-1")
+    board.statuses[run_id] = JobStatus.MISSING
+
+    await reconcile(runs_db, board, inbox)
+
+    assert await run_status(runs_db, run_id) == "running"
 
 
 async def test_an_undelivered_notification_is_retried_until_delivered(

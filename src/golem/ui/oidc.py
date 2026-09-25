@@ -168,6 +168,8 @@ def verify_id_token(
     """Core 3.1.3.7: issuer, audience, azp, signature and algorithm, expiry, nonce."""
     try:
         kid = jwt.get_unverified_header(token).get("kid")
+        if not isinstance(kid, str):
+            raise KeyError(kid)
         key = keys[kid]
     except (jwt.DecodeError, KeyError) as error:
         raise OidcError("ID token is malformed or names an unknown key") from error

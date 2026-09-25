@@ -1,8 +1,9 @@
 """The reconciler process: ``python -m golem.orchestrator.reconciler``.
 
 Every interval it reconciles finished Jobs, opens merge requests for succeeded runs and
-delivers task outcomes. A failed pass is logged and the next one runs; SIGTERM stops the loop
-between passes. Its metrics are served on ``GOLEM_METRICS_PORT``, the only port it listens on.
+delivers task outcomes. A failed pass, or one that runs past its timeout, is logged and the
+next one runs; SIGTERM stops the loop between passes. Its metrics are served on
+``GOLEM_METRICS_PORT``, the only port it listens on.
 """
 
 import asyncio
@@ -20,10 +21,15 @@ from psycopg import AsyncConnection
 from golem.metrics import Metrics, ReconcilerMetrics, metrics_app, process_registry
 from golem.orchestrator.jobs import JobLauncher
 from golem.orchestrator.launchers import launcher_for
-from golem.orchestrator.merge_requests import GitLabMergeRequests, propose_merge_request
+from golem.orchestrator.merge_requests import (
+    GitLabMergeRequests,
+    has_proposal,
+    propose_merge_request,
+)
 from golem.orchestrator.notify import TaskServiceNotifier
 from golem.orchestrator.reconcile import SucceededRun, reconcile_once
 from golem.orchestrator.runs import apply_schema
+from golem.orchestrator.service import CONNECT_TIMEOUT_SECONDS
 from golem.serving import listener
 from golem.settings import (
     ReconcilerSettings,
@@ -33,6 +39,9 @@ from golem.settings import (
 )
 
 HTTP_TIMEOUT_SECONDS = 10
+# A pass that outlives this is abandoned and the next one starts; every call inside a pass has
+# its own timeout, so this only catches what those miss.
+PASS_TIMEOUT_SECONDS = 300.0
 SCHEMA_LOCK = "golem_runs:schema"
 
 log = logging.getLogger("golem.reconciler")
@@ -44,13 +53,14 @@ async def run_forever(
     interval_seconds: float,
     stop: asyncio.Event,
     metrics: ReconcilerMetrics | None = None,
+    pass_timeout_seconds: float = PASS_TIMEOUT_SECONDS,
 ) -> None:
     metrics = ReconcilerMetrics() if metrics is None else metrics
     while not stop.is_set():
         started = time.perf_counter()
         failed = False
         try:
-            await reconcile_pass()
+            await asyncio.wait_for(reconcile_pass(), pass_timeout_seconds)
         except Exception:
             failed = True
             log.exception("reconcile pass failed")
@@ -62,7 +72,10 @@ async def run_forever(
 async def apply_schema_once(dsn: str) -> None:
     # The task service applies the same schema at startup; concurrent CREATE TABLE IF NOT
     # EXISTS can still collide in the catalog, so both take the same lock.
-    async with await AsyncConnection.connect(dsn) as conn, conn.transaction():
+    async with (
+        await AsyncConnection.connect(dsn, connect_timeout=CONNECT_TIMEOUT_SECONDS) as conn,
+        conn.transaction(),
+    ):
         await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (SCHEMA_LOCK,))
         await apply_schema(conn)
 
@@ -77,9 +90,14 @@ def pass_for(
     async def propose(run: SucceededRun) -> str:
         return await propose_merge_request(gitlab, run)
 
+    async def proposed(run: SucceededRun) -> bool:
+        return await has_proposal(gitlab, run)
+
     async def reconcile_pass() -> None:
-        async with await AsyncConnection.connect(settings.runs_dsn, autocommit=True) as conn:
-            await reconcile_once(conn, launcher, notifier.notify, propose, metrics)
+        async with await AsyncConnection.connect(
+            settings.runs_dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        ) as conn:
+            await reconcile_once(conn, launcher, notifier.notify, propose, metrics, proposed)
 
     return reconcile_pass
 

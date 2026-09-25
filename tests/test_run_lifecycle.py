@@ -8,14 +8,20 @@ from typing import Any
 import httpx
 import psycopg
 import pytest
-from test_reconcile import StatusBoard
+from test_reconcile import StatusBoard, age
 from test_tasks_service import create_app, make_card
 from test_tasks_to_runs import CATALOG, GRANTS, SIGNING_KEY, TEMPLATE
 
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import JobStatus
 from golem.orchestrator.notify import TaskServiceNotifier
-from golem.orchestrator.reconcile import Propose, SucceededRun, TaskOutcome, reconcile_once
+from golem.orchestrator.reconcile import (
+    LAUNCH_GRACE_SECONDS,
+    Propose,
+    SucceededRun,
+    TaskOutcome,
+    reconcile_once,
+)
 from golem.orchestrator.service import PostgresOrchestrator
 
 
@@ -124,6 +130,7 @@ async def test_a_vanished_job_fails_the_a2a_task_with_the_reason(
 ) -> None:
     task = await start_task(task_service)
 
+    await age(runs_db, task["metadata"]["runId"], LAUNCH_GRACE_SECONDS + 1)
     board.statuses[task["metadata"]["runId"]] = JobStatus.MISSING
     await reconcile(runs_db, board, task_service)
 
@@ -225,6 +232,7 @@ async def test_a_notification_naming_another_callers_run_delivers_the_tasks_own_
     alices = await start_task(task_service, "user:alice", "m-alice")
     bobs = await start_task(task_service, "user:bob", "m-bob")
     board.statuses[alices["metadata"]["runId"]] = JobStatus.SUCCEEDED
+    await age(runs_db, bobs["metadata"]["runId"], LAUNCH_GRACE_SECONDS + 1)
     board.statuses[bobs["metadata"]["runId"]] = JobStatus.MISSING
     await reconcile_undelivered(runs_db, board, open_merge_request)
 

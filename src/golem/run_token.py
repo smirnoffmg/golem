@@ -78,8 +78,10 @@ def issue(claims: RunClaims, key: SigningKey, now: int) -> str:
 def public_jwks(keys: Iterable[SigningKey]) -> dict[str, Any]:
     entries = []
     for key in keys:
-        public = serialization.load_pem_private_key(key.private_pem.encode(), None).public_key()
-        jwk = jwt.algorithms.ECAlgorithm.to_jwk(public, as_dict=True)
+        private = serialization.load_pem_private_key(key.private_pem.encode(), None)
+        if not isinstance(private, ec.EllipticCurvePrivateKey):
+            raise ValueError(f"signing key {key.kid!r} is not an EC key")
+        jwk = jwt.algorithms.ECAlgorithm.to_jwk(private.public_key(), as_dict=True)
         entries.append({**jwk, "kid": key.kid, "alg": ALGORITHM, "use": "sig"})
     return {"keys": entries}
 

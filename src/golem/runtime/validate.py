@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from golem.catalog import Role
+from golem.catalog import Kind, Role
 from golem.runtime.snapshot import (
     Located,
     RecordError,
@@ -59,11 +59,13 @@ def validate(
     changed: Sequence[str],
     before: ContextState,
     after: ContextState,
+    kinds: Sequence[Kind],
 ) -> Violations:
     return (
         *outside_writes(changed, role.writes),
         *broken_context(after),
         *changed_statuses(before, after),
+        *new_records_start_initial(before, after, kinds),
         *no_changes(changed),
         *target_untouched(changed, target_id, target_source, after),
     )
@@ -89,6 +91,28 @@ def changed_statuses(before: ContextState, after: ContextState) -> Violations:
         for rid, status in sorted((item.record.id, item.record.status) for item in after.records)
         if rid in was and was[rid] != status
     )
+
+
+def new_records_start_initial(
+    before: ContextState, after: ContextState, kinds: Sequence[Kind]
+) -> Violations:
+    existed = {item.record.id for item in before.records}
+    initial = {kind.name: kind.initial for kind in kinds}
+    violations: list[str] = []
+    for record in sorted((item.record for item in after.records), key=lambda r: r.id):
+        if record.id in existed:
+            continue
+        if record.kind not in initial:
+            violations.append(
+                f"new record {record.id} is of kind {record.kind!r},"
+                " which the catalog does not declare"
+            )
+        elif record.status != initial[record.kind]:
+            violations.append(
+                f"new record {record.id} has status {record.status!r};"
+                f" a new {record.kind} starts as {initial[record.kind]!r}"
+            )
+    return tuple(violations)
 
 
 def no_changes(changed: Sequence[str]) -> Violations:

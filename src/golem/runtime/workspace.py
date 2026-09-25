@@ -7,6 +7,11 @@ ids never contain a slash, so the id is the second path segment.
 
 The token is handed to git through ``GIT_CONFIG_*`` environment variables as an HTTP header, so
 it never appears in a URL, a command line or git's error output.
+
+Clones check symbolic links out as plain files holding the link text. A role's file tools check
+permissions on the path they are given and then follow links, so a committed link such as
+``records/x -> ../.git`` would let a role rewrite git's own config, and git runs commands named
+there (``core.fsmonitor``) on the next ``git add``, before any validator sees the change.
 """
 
 import base64
@@ -16,7 +21,14 @@ from pathlib import Path
 
 PROPOSAL_PREFIX = "golem/"
 AUTHOR = ("-c", "user.name=Golem", "-c", "user.email=golem@localhost")
+NO_SYMLINKS = ("--config", "core.symlinks=false")
 Env = Mapping[str, str] | None
+# A whole git command, a clone of the context repository included; far below a Job's deadline,
+# so a stalled Git host fails the run with a report instead of silently using up the deadline.
+GIT_TIMEOUT_SECONDS = 300
+# An HTTP transfer slower than this many bytes a second for this many seconds is abandoned.
+LOW_SPEED_LIMIT = "1000"
+LOW_SPEED_TIME = "60"
 
 
 class GitError(RuntimeError):
@@ -26,7 +38,12 @@ class GitError(RuntimeError):
 
 
 def git_env(token: str | None, base: Mapping[str, str]) -> dict[str, str]:
-    env = {**base, "GIT_TERMINAL_PROMPT": "0"}
+    env = {
+        **base,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_HTTP_LOW_SPEED_LIMIT": LOW_SPEED_LIMIT,
+        "GIT_HTTP_LOW_SPEED_TIME": LOW_SPEED_TIME,
+    }
     if token:
         # GitLab takes any non-empty user name with an access token as the password.
         credentials = base64.b64encode(f"oauth2:{token}".encode()).decode()
@@ -38,22 +55,31 @@ def git_env(token: str | None, base: Mapping[str, str]) -> dict[str, str]:
     return env
 
 
-def git(args: Sequence[str], cwd: Path | None = None, env: Env = None) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        env=dict(env) if env is not None else None,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def git(
+    args: Sequence[str],
+    cwd: Path | None = None,
+    env: Env = None,
+    timeout: float = GIT_TIMEOUT_SECONDS,
+) -> str:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            env=dict(env) if env is not None else None,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise GitError(f"git {' '.join(args)} timed out after {timeout:g} s") from error
     if result.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed with exit {result.returncode}", result.stderr)
     return result.stdout
 
 
 def clone_at_revision(url: str, revision: str, dest: Path, env: Env = None) -> None:
-    git(["clone", "--quiet", "--no-checkout", "--", url, str(dest)], env=env)
+    git(["clone", "--quiet", "--no-checkout", *NO_SYMLINKS, "--", url, str(dest)], env=env)
     commit = resolve_commit(dest, revision, env)
     if commit is None:
         raise GitError(f"revision {revision!r} not found in {url}")
@@ -71,7 +97,7 @@ def resolve_commit(repo: Path, revision: str, env: Env = None) -> str | None:
 
 
 def clone_branch(url: str, branch: str, dest: Path, env: Env = None) -> None:
-    git(["clone", "--quiet", "--branch", branch, "--", url, str(dest)], env=env)
+    git(["clone", "--quiet", *NO_SYMLINKS, "--branch", branch, "--", url, str(dest)], env=env)
 
 
 def head_commit(repo: Path, env: Env = None) -> str:

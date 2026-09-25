@@ -1,7 +1,15 @@
 import pytest
 from pydantic import ValidationError
 
-from golem.catalog import DELEGATE_GROUP, AgentCatalog, EmptySection, NoLinked, Role, load_catalog
+from golem.catalog import (
+    DELEGATE_GROUP,
+    AgentCatalog,
+    EmptySection,
+    Kind,
+    NoLinked,
+    Role,
+    load_catalog,
+)
 
 CATALOG_YAML = """
 name: discovery
@@ -14,9 +22,11 @@ skills:
     tags: [discovery]
 kinds:
   - name: hypothesis
+    initial: proposed
     statuses: [proposed, validated, rejected]
     sections: [Problem, Evidence]
   - name: solution
+    initial: proposed
     statuses: [proposed, accepted, rejected]
     sections: [Proposal, Review]
 roles:
@@ -52,8 +62,18 @@ def test_load_catalog_parses_rules_and_conditions(tmp_path):
 
 
 KINDS = [
-    {"name": "hypothesis", "statuses": ["proposed", "validated"], "sections": ["Evidence"]},
-    {"name": "solution", "statuses": ["proposed", "accepted"], "sections": ["Review"]},
+    {
+        "name": "hypothesis",
+        "initial": "proposed",
+        "statuses": ["proposed", "validated"],
+        "sections": ["Evidence"],
+    },
+    {
+        "name": "solution",
+        "initial": "proposed",
+        "statuses": ["proposed", "accepted"],
+        "sections": ["Review"],
+    },
 ]
 ROLES = [{"name": "researcher", "writes": "hypotheses/"}]
 
@@ -149,3 +169,25 @@ def test_a_role_may_name_the_delegation_group_like_any_tool_group():
 def test_a_role_names_each_tool_group_once_and_by_its_dotted_name(tools):
     with pytest.raises(ValidationError):
         Role(name="planner", writes="hypotheses/", tools=tools)
+
+
+@pytest.mark.parametrize("writes", ["hypotheses/", "hypotheses", "docs/plans/", "v1.2_notes"])
+def test_a_role_writes_under_a_relative_directory(writes):
+    assert Role(name="planner", writes=writes).writes == writes
+
+
+@pytest.mark.parametrize(
+    "writes",
+    # `.git` would let the role rewrite git's config; `.` and `` pass every path through the
+    # outside-writes check; glob characters widen the file tools' allow rule.
+    ["", ".", "./", ".git", ".git/", "..", "a/../b", "/abs", "a//b", "a/.hidden", "a/*", "[ab]"],
+    ids=repr,
+)
+def test_a_role_writes_directory_is_no_dot_segment_glob_or_absolute_path(writes):
+    with pytest.raises(ValidationError):
+        Role(name="planner", writes=writes)
+
+
+def test_a_kinds_initial_status_is_one_of_its_statuses():
+    with pytest.raises(ValidationError, match="initial"):
+        Kind(name="hypothesis", initial="done", statuses=frozenset({"proposed", "validated"}))

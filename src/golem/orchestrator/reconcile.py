@@ -30,6 +30,8 @@ class SucceededRun:
 Notify = Callable[[TaskOutcome], Awaitable[bool]]
 # Returns the outcome detail for the run's tasks; raises when the proposal could not be made.
 Propose = Callable[[SucceededRun], Awaitable[str]]
+# Whether the run pushed its proposal branch; raises when that cannot be known now.
+Proposed = Callable[[SucceededRun], Awaitable[bool]]
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +41,10 @@ FINAL_STATUS = {
     JobStatus.MISSING: "failed",
 }
 
+
+# A run is committed before its Job is created, and creating it may take two API calls of up
+# to 35 s each; a Job missing that soon is one still being made, not one that disappeared.
+LAUNCH_GRACE_SECONDS = 120
 
 # What a run's own report may say about its outcome, beyond the Job's status. The report comes
 # from an untrusted Job, so only these words become label values.
@@ -86,27 +92,65 @@ async def reconcile_once(
     notify: Notify,
     propose: Propose | None = None,
     metrics: ReconcilerMetrics | None = None,
+    proposed: Proposed | None = None,
 ) -> None:
     """Move finished Jobs' runs to their final status, settle what succeeded runs propose,
     then deliver pending task outcomes."""
     metrics = ReconcilerMetrics() if metrics is None else metrics
-    cursor = await conn.execute("SELECT id FROM runs WHERE status = 'running'")
-    for (run_id,) in await cursor.fetchall():
-        job = await asyncio.to_thread(launcher.status, str(run_id))
-        if job in FINAL_STATUS:
-            report = (
-                None
-                if job is JobStatus.MISSING
-                else await asyncio.to_thread(launcher.termination_message, str(run_id))
-            )
-            ended = await _finish(
-                conn, str(run_id), FINAL_STATUS[job], outcome_detail(str(run_id), job, report)
-            )
-            if ended is not None:
-                metrics.runs.run_ended(ended.agent, run_outcome(job, report), ended.seconds)
+    cursor = await conn.execute(
+        "SELECT id, agent, created_at < now() - make_interval(secs => %s) FROM runs"
+        " WHERE status = 'running'",
+        (LAUNCH_GRACE_SECONDS,),
+    )
+    for run_id, agent, launched in await cursor.fetchall():
+        run = SucceededRun(run_id=str(run_id), agent=agent)
+        try:
+            await _reconcile_run(conn, launcher, run, proposed, metrics, launched=launched)
+        except Exception:
+            # One Job the API cannot read now must not hold back the others, nor the delivery
+            # of outcomes that are already final.
+            log.exception("could not reconcile run %s", run_id)
     await _settle_proposals(conn, propose, metrics)
     await _deliver(conn, notify)
     await _count_pending(conn, metrics)
+
+
+async def _reconcile_run(
+    conn: AsyncConnection,
+    launcher: JobLauncher,
+    run: SucceededRun,
+    proposed: Proposed | None,
+    metrics: ReconcilerMetrics,
+    *,
+    launched: bool,
+) -> None:
+    job: JobStatus | None = await asyncio.to_thread(launcher.status, run.run_id)
+    if job is JobStatus.MISSING and not launched:
+        return
+    if job is JobStatus.MISSING and proposed is not None:
+        job = await _vanished(run, proposed)
+    if job is None or job not in FINAL_STATUS:
+        return
+    report = (
+        None
+        if job is JobStatus.MISSING
+        else await asyncio.to_thread(launcher.termination_message, run.run_id)
+    )
+    ended = await _finish(
+        conn, run.run_id, FINAL_STATUS[job], outcome_detail(run.run_id, job, report)
+    )
+    if ended is not None:
+        metrics.runs.run_ended(ended.agent, run_outcome(job, report), ended.seconds)
+
+
+async def _vanished(run: SucceededRun, proposed: Proposed) -> JobStatus | None:
+    # A finished Job is deleted by its TTL; a reconciler that was down longer finds it gone.
+    # The runtime pushes a branch only when it succeeded, so the branch is what survives.
+    try:
+        return JobStatus.SUCCEEDED if await proposed(run) else JobStatus.MISSING
+    except Exception:
+        log.exception("could not tell whether vanished run %s pushed a branch", run.run_id)
+        return None
 
 
 async def _finish(conn: AsyncConnection, run_id: str, status: str, detail: str) -> EndedRun | None:

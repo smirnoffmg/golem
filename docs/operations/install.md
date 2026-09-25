@@ -120,6 +120,11 @@ Create, in one realm:
    (`client_secret_post`).
 4. **Users.** Anyone who can sign in to `golem-ui` can start the agents whose call registry
    entry allows `user:*` (step 7). Narrow it to named users (`user:alice`) where needed.
+   The username is the identity: tasks, the call registry and the audit log all key on
+   `user:<name>`. Keep the realm's *Edit username* off (`editUsernameAllowed`, off by
+   default), never give a new user a deleted user's name (the new one would see the old
+   one's tasks), and never a name starting with `service-account-` (it would be read as that
+   client's service).
 
 Keep the three client secrets for step 6. Check a service token (the adapter's secret in
 `JIRA_ADAPTER_CLIENT_SECRET`):

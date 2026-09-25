@@ -189,6 +189,7 @@ async def propose(
         changed=changed_paths(repo, base, env),
         before=before,
         after=read_state(repo),
+        kinds=checkout.catalog.kinds,
     )
     if violations:
         return replace(report, outcome=Outcome.INVALID, reasons=violations, summary=result.summary)

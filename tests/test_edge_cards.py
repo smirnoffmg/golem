@@ -20,7 +20,14 @@ CATALOG = AgentCatalog.model_validate(
                 "tags": ["discovery"],
             }
         ],
-        "kinds": [{"name": "hypothesis", "statuses": ["proposed"], "sections": ["Evidence"]}],
+        "kinds": [
+            {
+                "name": "hypothesis",
+                "initial": "proposed",
+                "statuses": ["proposed"],
+                "sections": ["Evidence"],
+            }
+        ],
         "roles": [
             {
                 "name": "researcher",
@@ -61,7 +68,9 @@ def test_card_capabilities():
 
     assert capabilities.streaming is False
     assert capabilities.push_notifications is True
-    assert capabilities.extended_agent_card is True
+    # The edge does not forward GetExtendedAgentCard: a client that trusted this flag would
+    # get METHOD_NOT_FOUND.
+    assert capabilities.extended_agent_card is False
 
 
 def test_card_requires_oidc():

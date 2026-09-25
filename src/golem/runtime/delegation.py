@@ -98,7 +98,8 @@ def describe(agent: str, response: httpx.Response) -> str:
     task = result.get("task") if isinstance(result, dict) else None
     if not isinstance(task, dict):
         return f"{DELEGATE_TOOL}: the edge answered {response.status_code} without a task"
-    status = task.get("status") if isinstance(task.get("status"), dict) else {}
+    status = task.get("status")
+    status = status if isinstance(status, dict) else {}
     reply = f"Delegated to {agent}: task {task.get('id')}, state {status.get('state')}."
     reason = status_text(status)
     return f"{reply} {reason}" if reason else reply

@@ -1,6 +1,7 @@
 """The task service wired to the Postgres-backed orchestrator, end to end over JSON-RPC."""
 
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -15,7 +16,7 @@ from golem import call_token
 from golem.call_token import CallClaims
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef, JobSpec, JobStatus
-from golem.orchestrator.service import JobTemplate, PostgresOrchestrator
+from golem.orchestrator.service import CONNECT_TIMEOUT_SECONDS, JobTemplate, PostgresOrchestrator
 from golem.run_token import RunClaims, SigningKey, public_jwks, verify
 
 CATALOG = CatalogRef(url="https://git.example.com/agents/discovery.git", revision="v1")
@@ -44,8 +45,12 @@ class FakeLauncher:
     launched: list[JobSpec] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     failure: Exception | None = None
+    # Runs while the Job is being created: what another process does in that window.
+    meanwhile: Callable[[JobSpec], None] | None = None
 
     def launch(self, spec: JobSpec) -> None:
+        if self.meanwhile is not None:
+            self.meanwhile(spec)
         if self.failure is not None:
             raise self.failure
         self.launched.append(spec)
@@ -208,6 +213,35 @@ def test_a_failed_launch_rejects_the_task_and_fails_the_run(
     assert task["status"]["state"] == "TASK_STATE_REJECTED"
     assert "quota exceeded" in " ".join(p["text"] for p in task["status"]["message"]["parts"])
     assert [status for _, status in run_rows(runs_db)] == ["failed"]
+
+
+def test_a_launch_that_fails_halfway_deletes_what_it_created(
+    client: TestClient, launcher: FakeLauncher, runs_db: str
+) -> None:
+    # The Job is created before its token Secret; a failed Secret leaves a Job that would wait
+    # for its token until the deadline, holding its share of the namespace quota.
+    launcher.failure = RuntimeError("secrets is forbidden")
+
+    send(client, "m-1")
+
+    [(run_id, _)] = run_rows(runs_db)
+    assert launcher.deleted == [run_id]
+
+
+def test_a_run_canceled_while_its_job_was_created_has_the_job_deleted(
+    client: TestClient, launcher: FakeLauncher, runs_db: str
+) -> None:
+    def cancel(spec: JobSpec) -> None:
+        with psycopg.connect(runs_db, autocommit=True) as conn:
+            conn.execute("UPDATE runs SET status = 'canceled' WHERE id = %s", (spec.run_id,))
+
+    launcher.meanwhile = cancel
+
+    send(client, "m-1")
+
+    [(run_id, status)] = run_rows(runs_db)
+    assert status == "canceled"
+    assert launcher.deleted == [run_id]
 
 
 def test_canceling_the_task_deletes_the_job(client: TestClient, launcher: FakeLauncher) -> None:
@@ -399,3 +433,26 @@ def test_a_root_that_is_not_a_run_id_is_refused_before_any_run(
     assert task["status"]["state"] == "TASK_STATE_REJECTED"
     assert root_rows(runs_db) == {}
     assert launcher.launched == []
+
+
+async def test_a_database_that_never_answers_fails_a_start_within_seconds(
+    silent_server: str, launcher: FakeLauncher
+) -> None:
+    # Without a connect timeout psycopg waits 130 s, and the A2A call with it.
+    host, port = silent_server.split(":")
+    orchestrator = PostgresOrchestrator(
+        dsn=f"host={host} port={port} dbname=golem_runs user=golem_runs",
+        limits=Limits(max_runs_per_caller=1, max_runs_per_root=3, budget_per_root=Decimal("10")),
+        estimated_cost=Decimal("1"),
+        launcher=launcher,
+        template=TEMPLATE,
+        catalogs={"discovery": CATALOG},
+        signing_key=SIGNING_KEY,
+        grants=GRANTS,
+        clock=fixed_clock,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(psycopg.OperationalError):
+        await orchestrator.status("3f2b8c1e-8d4a-4c3e-9a57-0b7f2d6e1a90")
+    assert time.monotonic() - started < CONNECT_TIMEOUT_SECONDS + 5

@@ -37,7 +37,7 @@ from golem.adapters.common import (
     subject_of_push_token,
 )
 from golem.metrics import Instrumented, Metrics
-from golem.ratelimit import Limiter, Network, Rate
+from golem.ratelimit import COMMAND_RATE, Limiter, Network
 
 COMMAND_PATH = "/mattermost/command"
 POSTS_PATH = "/api/v4/posts"
@@ -52,8 +52,7 @@ REQUIRED_FIELDS = ("team_id", "channel_id", "user_id", "user_name", "trigger_id"
 # the token vouches for them, so anything outside the alphabet Mattermost uses is refused.
 ID = re.compile(r"[A-Za-z0-9]{1,64}")
 USER_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
-# Every user's command comes from the Mattermost server's address: the limit is the server's.
-COMMAND_RATE = Rate(per_minute=120, burst=60)
+MENTION = re.compile(r"@(?=[A-Za-z0-9._-])")
 
 log = logging.getLogger("golem.adapters.mattermost")
 
@@ -159,10 +158,16 @@ def target_of_subject(subject: str) -> PushTarget | None:
     return PushTarget(channel_id=channel_id, user_id=user_id, user_name=user_name, run=run)
 
 
+def unmentioned(text: str) -> str:
+    """The text with every @-mention broken by a zero-width space: it carries the run's report,
+    which an untrusted Job wrote, and must not notify @all, @channel, @here or anyone else."""
+    return MENTION.sub("@\u200b", text)
+
+
 def post_body(target: PushTarget, update: PushUpdate) -> dict[str, Any]:
     lines = [
         f"@{target.user_name} Golem run {state_word(update.state)}.",
-        update.text,
+        unmentioned(update.text),
         f"Task `{update.task_id}`",
     ]
     return {

@@ -5,10 +5,12 @@ gives no cookie that works. Tokens and PKCE verifiers are encrypted with a Ferne
 database never sees.
 """
 
+import asyncio
 import hashlib
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -23,6 +25,11 @@ LOGIN_LIFETIME_SECONDS = 600
 # (ASVS 5.0, 7.3.2).
 SESSION_LIFETIME_SECONDS = 12 * 3600
 CONNECT_TIMEOUT_SECONDS = 2
+# golem_ui's CONNECTION LIMIT (10) is shared by both replicas and a surge pod during a rollout.
+CONNECTIONS = 3
+# A renewal holds its connection across an identity provider call (up to 4 s), so a request
+# waits longer than that for a free one before it fails.
+CONNECTION_WAIT_SECONDS = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS logins (
@@ -82,13 +89,21 @@ def digest(value: str) -> str:
 
 
 class SessionStore:
-    def __init__(self, dsn: str, key: str, *, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        key: str,
+        *,
+        clock: Callable[[], float] = time.time,
+        connections: int = CONNECTIONS,
+    ) -> None:
         self._dsn = dsn
         self._fernet = Fernet(key)
         self._clock = clock
+        self._slots = asyncio.Semaphore(connections)
 
     async def begin_login(self, *, state: str, binding: str, nonce: str, verifier: str) -> None:
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             await conn.execute("DELETE FROM logins WHERE expires_at < %s", (self._at(0),))
             await conn.execute(
                 "INSERT INTO logins (state, binding, nonce, code_verifier, expires_at)"
@@ -104,7 +119,7 @@ class SessionStore:
 
     async def take_login(self, state: str) -> Login | None:
         """The login transaction for ``state``, removed: a state is used once, then gone."""
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             cursor = await conn.execute(
                 "DELETE FROM logins WHERE state = %s RETURNING binding, nonce, code_verifier,"
                 " expires_at",
@@ -134,7 +149,7 @@ class SessionStore:
             csrf=secrets.token_urlsafe(32),
             created_at=now,
         )
-        async with await self._connect() as conn, conn.transaction():
+        async with self._connection() as conn, conn.transaction():
             if replacing:
                 await conn.execute("DELETE FROM sessions WHERE id = %s", (digest(replacing),))
             await conn.execute(
@@ -159,7 +174,7 @@ class SessionStore:
         return cookie, session
 
     async def get(self, cookie: str) -> Session | None:
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             cursor = await conn.execute(
                 f"SELECT {SESSION_COLUMNS} FROM sessions WHERE id = %s", (digest(cookie),)
             )
@@ -170,7 +185,7 @@ class SessionStore:
         """The session with its tokens renewed by ``renew``, or None, and the session ended, if
         renewing fails. The row is locked meanwhile, so concurrent requests refresh once: a
         rotated refresh token works only once."""
-        async with await self._connect() as conn, conn.transaction():
+        async with self._connection() as conn, conn.transaction():
             cursor = await conn.execute(
                 f"SELECT {SESSION_COLUMNS} FROM sessions WHERE id = %s FOR UPDATE",
                 (digest(cookie),),
@@ -210,7 +225,7 @@ class SessionStore:
             return renewed
 
     async def delete(self, cookie: str) -> Session | None:
-        async with await self._connect() as conn:
+        async with self._connection() as conn:
             cursor = await conn.execute(
                 f"DELETE FROM sessions WHERE id = %s RETURNING {SESSION_COLUMNS}",
                 (digest(cookie),),
@@ -244,10 +259,19 @@ class SessionStore:
             created_at=row[8].timestamp(),
         )
 
-    async def _connect(self) -> psycopg.AsyncConnection:
-        return await psycopg.AsyncConnection.connect(
-            self._dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
-        )
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[psycopg.AsyncConnection]:
+        try:
+            await asyncio.wait_for(self._slots.acquire(), CONNECTION_WAIT_SECONDS)
+        except TimeoutError as error:
+            raise psycopg.OperationalError("no database connection became free") from error
+        try:
+            async with await psycopg.AsyncConnection.connect(
+                self._dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+            ) as conn:
+                yield conn
+        finally:
+            self._slots.release()
 
     def _at(self, offset_seconds: float) -> datetime:
         return _timestamp(self._clock() + offset_seconds)

@@ -34,7 +34,7 @@ def build_public_card(
             )
         ],
         capabilities=AgentCapabilities(
-            streaming=False, push_notifications=True, extended_agent_card=True
+            streaming=False, push_notifications=True, extended_agent_card=False
         ),
         security_schemes={
             OIDC_SCHEME: SecurityScheme(

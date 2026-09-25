@@ -10,7 +10,7 @@ from deepagents import FilesystemPermission, SubAgent, create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
 from deepagents.backends.protocol import BackendProtocol
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
-from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     ExtendedModelResponse,
@@ -25,6 +25,7 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph.state import CompiledStateGraph
+from pydantic import SecretStr
 
 from golem.runtime.ports import Brief, RoleResult
 from golem.runtime.tools import McpToolbox, ToolAccessError
@@ -73,7 +74,7 @@ class DeepAgentsRunner:
 def gateway_model(settings: Mapping[str, str]) -> ChatOpenAI:
     return ChatOpenAI(
         base_url=settings["GOLEM_MODEL_GATEWAY_URL"],
-        api_key=settings["GOLEM_MODEL_KEY"],
+        api_key=SecretStr(settings["GOLEM_MODEL_KEY"]),
         model=settings["GOLEM_MODEL"],
         # Gateway aliases can look like Responses-only model names; the gateway speaks Chat.
         use_responses_api=False,
@@ -100,6 +101,7 @@ def build_agent(
     model: BaseChatModel, brief: Brief, limits: Limits, tools: Sequence[BaseTool] = ()
 ) -> CompiledStateGraph:
     skills = [SKILLS_ROUTE] if has_skills(brief) else None
+    budget = CallBudget(limits.max_model_calls)
     return create_deep_agent(
         model=model,
         tools=unshadowed(tools),
@@ -107,8 +109,8 @@ def build_agent(
         backend=workspace_backend(brief.workspace, brief.skills_dir if skills else None),
         permissions=role_permissions(brief.role.writes),
         skills=skills,
-        middleware=[call_limit(limits), ModelResponseGuard(limits.max_response_bytes)],
-        subagents=[general_purpose(limits, skills)],
+        middleware=[budget, ModelResponseGuard(limits.max_response_bytes)],
+        subagents=[general_purpose(limits, skills, budget)],
         name=brief.role.name,
     )
 
@@ -120,8 +122,36 @@ def unshadowed(tools: Sequence[BaseTool]) -> list[BaseTool]:
     return list(tools)
 
 
-def call_limit(limits: Limits) -> ModelCallLimitMiddleware:
-    return ModelCallLimitMiddleware(run_limit=limits.max_model_calls, exit_behavior="error")
+class CallBudget(AgentMiddleware):
+    """One count of model calls for a run: the lead's agent and every subagent it starts share
+    it. A limit per agent would give each subagent a fresh allowance, so a lead could multiply
+    its calls by delegating."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self.limit = limit
+        self.used = 0
+
+    def _spend(self) -> None:
+        if self.used >= self.limit:
+            raise ModelCallLimitExceededError(
+                thread_count=self.used, run_count=self.used, thread_limit=None, run_limit=self.limit
+            )
+        self.used += 1
+
+    def wrap_model_call(
+        self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]
+    ) -> ModelCallResult:
+        self._spend()
+        return handler(request)
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        self._spend()
+        return await handler(request)
 
 
 class ModelResponseGuard(AgentMiddleware):
@@ -171,12 +201,12 @@ def message_bytes(message: BaseMessage) -> int:
     return len(json.dumps([message.content, *calls], default=str).encode())
 
 
-def general_purpose(limits: Limits, skills: list[str] | None) -> SubAgent:
+def general_purpose(limits: Limits, skills: list[str] | None, budget: CallBudget) -> SubAgent:
     # The auto-added subagent takes neither the caller's middleware nor the invoke-time
-    # recursion_limit, so without its own call limit it could loop unbounded.
+    # recursion_limit, so without the run's budget it could loop unbounded.
     spec: SubAgent = {
         **GENERAL_PURPOSE_SUBAGENT,
-        "middleware": [call_limit(limits), ModelResponseGuard(limits.max_response_bytes)],
+        "middleware": [budget, ModelResponseGuard(limits.max_response_bytes)],
     }
     if skills:
         spec["skills"] = skills

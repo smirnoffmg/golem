@@ -22,7 +22,7 @@ between parties that do not trust each other's claims.
 | Run → Git | protected default branch; the run only pushes `golem/<target>/<run>`; the merge request is opened by the reconciler; a human merges | a run changing the record of truth by itself | [0004](../adr/0004-security-boundary-outside-the-job.md) |
 | Jira → adapter | HMAC-SHA256 of the body with a shared secret; the message id from the signed body | forged or replayed webhooks | README, "Jira adapter" |
 | Mattermost → adapter | the command token, NetworkPolicy admitting only the Mattermost server, team, channel and agent allowlists | forged commands from elsewhere | [0010](../adr/0010-mattermost-adapter.md) |
-| Task service → adapters | push URLs only under `GOLEM_PUSH_ALLOWED_PREFIXES`; a per-run HMAC push token | pushes to arbitrary cluster addresses; forged outcomes posted to Jira or chat | README, [0010](../adr/0010-mattermost-adapter.md) |
+| Task service → adapters | push URLs only under `GOLEM_PUSH_ALLOWED_PREFIXES`; a per-run HMAC push token that expires after 24 hours | pushes to arbitrary cluster addresses; forged outcomes posted to Jira or chat; a leaked token used past its run | README, [0010](../adr/0010-mattermost-adapter.md) |
 | Services → databases | one owner role per database, `CONNECT` revoked from `PUBLIC`, the audit log `INSERT` only, per-role connection limits and statement timeouts | one service reading or changing another's data; audit rows being edited | [0003](../adr/0003-one-postgres-cluster-per-owner-databases.md) |
 | Processes → Kubernetes API | only the task service (create Jobs and token Secrets) and the reconciler (read Jobs and pods) have tokens; nobody can read a Secret | a process reading run tokens back or escaping its role | [0009](../adr/0009-deployment-on-kubernetes.md) |
 | Metrics | a port of their own, reachable only from the namespace labelled `golem.dev/monitoring` | traffic, refusals and agent names leaking to callers | [0013](../adr/0013-metrics.md) |
@@ -262,8 +262,9 @@ Known gaps, each recorded where it was decided:
 - **Sessions** ([ADR 0011](../adr/0011-web-ui.md)): no listing of one's own sessions and no
   administrative termination (ASVS 7.4.5, 7.5.2); signing a user out everywhere means rotating
   `GOLEM_UI_SESSION_KEY`, which signs everyone out.
-- **Rate limits are per replica** ([ADR 0012](../adr/0012-rate-limits.md)); IPv6 clients are
-  keyed by whole address, not prefix; clients behind one address share a bucket.
+- **Rate limits are per replica** ([ADR 0012](../adr/0012-rate-limits.md)); an IPv6 client
+  is keyed by its /64; clients behind one address share a bucket, the web UI's users included
+  for the edge's limit on failed authentications.
 - **Network** ([ADR 0009](../adr/0009-deployment-on-kubernetes.md)): on kube-router, a pod's
   own node passes every ingress policy and a new pod's egress is unfiltered for about a second;
   `ipBlock`s cannot name hosts; the External Secrets Operator can write Secrets in both
@@ -288,6 +289,17 @@ Known gaps, each recorded where it was decided:
   the bot's Developer role and protected default branches: the token can push or delete any
   unprotected branch of every context repository, other runs' proposals included. A key per
   agent, as the architecture draws it, is not built.
+- **Per-role tool grants are enforced inside the Job.** The lead picks the role inside the Job,
+  so the run token the orchestrator issues beforehand carries the agent's tool groups, the
+  union of its roles'; the MCP servers check those. A run that escaped the runtime could use
+  any tool group of its agent, and a read grant reaches whatever the upstream account sees.
+- **The trace store's key is in the Job.** Langfuse takes OTLP with Basic auth of its public
+  and secret key, and that pair can also read the project's traces, so a run that escaped the
+  runtime could read other runs' traces (with prompts, when content capture is on). An
+  OpenTelemetry Collector in `golem-system` holding the key, with the Jobs exporting to it
+  instead, would keep the key out of the Job; it is not built.
+- **A Job a cancel failed to delete keeps running** to its deadline: the delete is logged and
+  not retried. Its run token and call token are refused from the cancel on.
 - **No TLS between processes.** In-cluster calls are plain HTTP; the UI sends users' access
   tokens to the edge and runs send run tokens to the MCP servers over it. Encrypt pod traffic
   with your CNI or a mesh if your policy requires it.

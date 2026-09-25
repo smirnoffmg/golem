@@ -61,6 +61,10 @@ Rules for applying standards:
 
 - Standards apply at boundaries between systems, not inside a Job.
 - Versions are pinned: A2A 1.0, not 0.3 (state and method names differ); MCP 2026-07-28.
+  Where a library lags a pinned version, the gap is written down, not hidden: the MCP Python
+  SDK that `langchain-mcp-adapters` allows (`mcp<2`, 1.30 in `uv.lock`) negotiates at most
+  protocol 2025-11-25, so clients and servers speak that until the adapters accept `mcp` 2.x
+  (note of 2026-09-25).
 - For a standard in Development status (OpenTelemetry GenAI), take the shape but do not treat
   attribute names as a frozen contract.
 - Where the organization requires more than a standard, the requirement sits on top of the

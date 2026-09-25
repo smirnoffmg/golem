@@ -9,9 +9,11 @@ is the catalog, and the figure is stopped by the platform, not by the model.
 ## Principles
 
 - **A standard at every boundary.** A2A 1.0 is the only entry and the way agents call each other;
-  MCP (2026-07-28) for tools; Agent Skills for agent descriptions; OIDC/OAuth 2.0 with RFC 8693
-  token exchange for identity; OpenTelemetry GenAI conventions and W3C Trace Context for traces;
-  an OpenAI-compatible model API through a LiteLLM gateway.
+  MCP for tools (2026-07-28 is the target; the Python SDK in use speaks up to 2025-11-25,
+  [ADR 0001](docs/adr/0001-industry-standards-and-a2a.md)); Agent Skills for agent
+  descriptions; OIDC/OAuth 2.0 with RFC 8693 token exchange for identity; OpenTelemetry GenAI
+  conventions and W3C Trace Context for traces; an OpenAI-compatible model API through a
+  LiteLLM gateway.
 - **Everything inside a Job is untrusted.** The security boundary is outside it: default-deny
   egress, a branch-only Git token, platform MCP servers that hold the secrets.
 - **The edge fails closed.** What it could not verify, it does not pass.
@@ -375,6 +377,6 @@ real task service and audit log, with Jira and Confluence faked at their HTTP bo
 The evaluation of catalog merge requests runs in the catalog's CI job, tested with fake roles
 over the example golden set. Every process exports metrics, tested through its own app (and
 the reconciler as a process); the network check proves on k3s that only the monitoring
-namespace reaches the metrics ports. Not built yet: the GitLab adapter, the GitLab MCP
+namespace reaches the metrics ports. Not built yet: the extended Agent Card, the GitLab adapter, the GitLab MCP
 server, the UI's decision queue, the orchestrator's evaluation workflow with a model judge and trace store, and
 Temporal (target).

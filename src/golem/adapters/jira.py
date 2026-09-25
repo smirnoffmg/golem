@@ -36,7 +36,7 @@ from golem.adapters.common import (
     subject_of_push_token,
 )
 from golem.metrics import Instrumented, Metrics
-from golem.ratelimit import Limiter, Network, Rate
+from golem.ratelimit import WEBHOOK_RATE, Limiter, Network
 
 WEBHOOK_PATH = "/jira/webhook"
 SIGNATURE_HEADER = "X-Hub-Signature"
@@ -44,8 +44,6 @@ SIGNATURE_METHOD = "sha256"
 ISSUE_UPDATED = "jira:issue_updated"
 LABELS_FIELD = "labels"
 COMMENTS_PAGE_SIZE = 100
-# Jira sends every update of every issue the webhook covers, from a few addresses (ADR 0012).
-WEBHOOK_RATE = Rate(per_minute=300, burst=100)
 
 log = logging.getLogger("golem.adapters.jira")
 
@@ -74,8 +72,10 @@ def labels_added(payload: Any) -> list[LabelAdded]:
     if not isinstance(issue, dict) or not isinstance(changelog, dict):
         return []
     key = issue.get("key")
-    fields = issue.get("fields") if isinstance(issue.get("fields"), dict) else {}
-    summary = fields.get("summary") if isinstance(fields.get("summary"), str) else ""
+    fields = issue.get("fields")
+    fields = fields if isinstance(fields, dict) else {}
+    summary = fields.get("summary")
+    summary = summary if isinstance(summary, str) else ""
     if not isinstance(key, str) or not key:
         return []
     event = str(payload.get("timestamp", ""))
@@ -103,8 +103,24 @@ def comment_marker(task_id: str) -> str:
 
 
 def comment_body(update: PushUpdate) -> str:
-    lines = [f"Golem run {state_word(update.state)}.", update.text, comment_marker(update.task_id)]
+    lines = [
+        f"Golem run {state_word(update.state)}.",
+        unmentioned(update.text),
+        comment_marker(update.task_id),
+    ]
     return "\n\n".join(line for line in lines if line)
+
+
+def unmentioned(text: str) -> str:
+    """The text with wiki markup mentions (``[~name]``, ``[~accountid:...]``) escaped: it
+    carries the run's report, which an untrusted Job wrote, and must not notify anyone."""
+    return text.replace("[~", "\\[~")
+
+
+def is_comment_for(body: str, marker: str) -> bool:
+    # The marker ends the comment; anywhere else it is the run's own text, which could name
+    # another task's marker, and a prefix of a longer task id is another task.
+    return body.rstrip().endswith(f"\n{marker}")
 
 
 def jira_authorization(*, user: str | None, token: str) -> str:
@@ -123,7 +139,7 @@ async def comment_exists(jira: httpx.AsyncClient, issue_key: str, marker: str) -
         response.raise_for_status()
         page = response.json()
         comments = page.get("comments") or []
-        if any(marker in str(c.get("body", "")) for c in comments):
+        if any(is_comment_for(str(c.get("body", "")), marker) for c in comments):
             return True
         start += len(comments)
         if not comments or start >= int(page.get("total", 0)):

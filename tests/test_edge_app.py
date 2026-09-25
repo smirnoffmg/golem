@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -12,6 +13,7 @@ from test_tasks_service import FakeOrchestrator, make_card
 from golem.edge.app import (
     AUDIT_UNAVAILABLE,
     CALL_DENIED,
+    MAX_BODY_BYTES,
     RATE_LIMITED,
     UNAUTHENTICATED,
     create_edge_app,
@@ -283,7 +285,10 @@ async def test_an_edge_with_the_wrong_token_starts_no_run(
     ) as client:
         response = await call(client, send_message())
 
-    assert response.status_code == 401
+    # The caller's token was fine: a 401 would tell the web UI to sign its user out.
+    assert response.status_code == 502
+    assert error_of(response)["code"] == -32603
+    assert "WWW-Authenticate" not in response.headers
     assert tasks.orchestrator.started == []
 
 
@@ -467,6 +472,54 @@ async def test_body_that_is_not_json_is_a_parse_error(
     assert len(await audit_rows(audit_admin_dsn)) == 1
 
 
+async def test_deeply_nested_json_is_a_parse_error_that_is_audited(
+    edge: httpx.AsyncClient, tasks: TaskService, audit_admin_dsn: str
+) -> None:
+    # json.loads raises RecursionError here, not ValueError.
+    response = await edge.post(
+        "/a2a", content=b"[" * 200_000, headers={"Authorization": "Bearer alice-token"}
+    )
+
+    assert error_of(response)["code"] == -32700
+    assert tasks.received == []
+    assert len(await audit_rows(audit_admin_dsn)) == 1
+
+
+async def test_a_body_over_the_limit_is_refused_audited_and_not_forwarded(
+    edge: httpx.AsyncClient, tasks: TaskService, audit_admin_dsn: str
+) -> None:
+    body = send_message()
+    body["params"]["message"]["parts"] = [{"text": "x" * MAX_BODY_BYTES}]
+
+    response = await call(edge, body)
+
+    assert response.status_code == 413
+    assert error_of(response)["code"] == -32600
+    assert tasks.received == []
+    [row] = await audit_rows(audit_admin_dsn)
+    assert row[3].startswith("deny: ")
+
+
+async def test_a_streamed_body_over_the_limit_is_refused_without_reading_it_all(
+    edge: httpx.AsyncClient, tasks: TaskService
+) -> None:
+    sent = 0
+
+    async def chunks() -> AsyncIterator[bytes]:
+        nonlocal sent
+        for _ in range(64):
+            sent += 1
+            yield b"x" * (MAX_BODY_BYTES // 8)
+
+    response = await edge.post(
+        "/a2a", content=chunks(), headers={"Authorization": "Bearer alice-token"}
+    )
+
+    assert response.status_code == 413
+    assert tasks.received == []
+    assert sent < 64
+
+
 @pytest.mark.parametrize(
     "authorization",
     [None, "Bearer", "Bearer ", "Basic YWxpY2U6c2VjcmV0", "bearer-ish alice-token", "Bearer bad"],
@@ -515,6 +568,23 @@ async def test_unreachable_audit_log_still_refuses_a_denied_call(tasks: TaskServ
 
     assert error_of(response)["code"] == AUDIT_UNAVAILABLE
     assert tasks.received == []
+
+
+async def test_concurrent_calls_share_the_roles_few_connections_instead_of_failing(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    # golem_edge has CONNECTION LIMIT 10 (deploy/postgres/init.sql) across every replica, so a
+    # replica may hold only its share; here the other replicas hold all but one.
+    others = [await psycopg.AsyncConnection.connect(audit_dsn) for _ in range(9)]
+    try:
+        async with edge_client(tasks, audit_dsn, audit_connections=1) as client:
+            responses = await asyncio.gather(*(call(client, send_message()) for _ in range(20)))
+    finally:
+        for conn in others:
+            await conn.close()
+
+    assert [error_of(r) for r in responses if "error" in r.json()] == []
+    assert len(await audit_rows(audit_admin_dsn)) == 20
 
 
 async def test_unreachable_task_service_is_an_internal_error(

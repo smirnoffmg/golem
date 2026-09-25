@@ -20,6 +20,7 @@ from golem.ui.store import SessionStore, apply_schema
 OUTBOUND_TIMEOUT_SECONDS = 10
 # Below the golem_ui role's statement_timeout: a refresh holds its session row meanwhile.
 IDP_TIMEOUT_SECONDS = 4
+SCHEMA_LOCK = "golem_ui:schema"
 
 
 def build_app(settings: UiSettings, metrics: Metrics | None = None) -> ASGIApp:
@@ -45,7 +46,10 @@ def build_app(settings: UiSettings, metrics: Metrics | None = None) -> ASGIApp:
 
 
 async def prepare(dsn: str) -> None:
-    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+    # Both replicas start together; concurrent CREATE TABLE IF NOT EXISTS can still collide in
+    # the catalog, so they take turns.
+    async with await psycopg.AsyncConnection.connect(dsn) as conn, conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (SCHEMA_LOCK,))
         await apply_schema(conn)
 
 

@@ -28,7 +28,14 @@ from golem.mcp.audit import Operation, audit_entry, written
 from golem.mcp.auth import Refusal, grant_refusal, status_refusal
 from golem.mcp.groups import Group
 from golem.metrics import Metrics
-from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
+from golem.ratelimit import (
+    AUTH_FAILURE_RATE,
+    Decision,
+    Limiter,
+    Network,
+    address_key,
+    client_address,
+)
 from golem.run_status import RunStatuses
 from golem.run_token import RunClaims, RunTokenError
 
@@ -38,8 +45,6 @@ AUDIT_UNAVAILABLE = Refusal(503, "temporarily_unavailable", "audit log unavailab
 TOO_LARGE = Refusal(413, "invalid_request", "request body too large")
 NOT_JSON_RPC = Refusal(400, "invalid_request", "the body is not one JSON-RPC message")
 RATE_LIMITED = Refusal(429, "rate_limited", "rate_limited")
-AUTH_FAILURE_RATE = Rate(per_minute=30, burst=10)
-UNKNOWN_ADDRESS = "unknown"
 
 
 def _auth_failure_limiter() -> Limiter:
@@ -78,7 +83,8 @@ def operation_of(http_method: str, body: bytes | _TooLarge) -> Operation:
     if not isinstance(message, dict) or not isinstance(message.get("method"), str):
         return Operation(method=http_method, problem=NOT_JSON_RPC)
     method = message["method"]
-    params = message.get("params") if isinstance(message.get("params"), dict) else {}
+    params = message.get("params")
+    params = params if isinstance(params, dict) else {}
     if method != TOOLS_CALL:
         return Operation(method=method)
     tool = params.get("name")
@@ -204,8 +210,8 @@ def gated(app: ASGIApp, gate: Gate) -> ASGIApp:
         address = client_address(
             client_host(scope), headers.getlist("x-forwarded-for"), gate.trusted_proxies
         )
-        address_key = address or UNKNOWN_ADDRESS
-        admitted = gate.auth_failures.admits(address_key)
+        key = address_key(address)
+        admitted = gate.auth_failures.admits(key)
         if not admitted.allowed:
             gate.metrics.rate_limit_refused("auth_failures")
             audited = True
@@ -225,7 +231,7 @@ def gated(app: ASGIApp, gate: Gate) -> ASGIApp:
             return
         claims, refusal = await decide(gate, token, operation)
         if refusal is not None and refusal.status_code == 401:
-            gate.auth_failures.take(address_key)
+            gate.auth_failures.take(key)
             gate.metrics.authentication_failed()
         entry = audit_entry(
             group=gate.group,

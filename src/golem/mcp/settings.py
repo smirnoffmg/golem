@@ -7,10 +7,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from golem.mcp.atlassian import JiraDeployment
-from golem.mcp.gate import AUTH_FAILURE_RATE
 from golem.mcp.groups import GROUPS
 from golem.metrics import DEFAULT_METRICS_PORT
-from golem.ratelimit import Network, Rate
+from golem.ratelimit import AUTH_FAILURE_RATE, Network, Rate
 from golem.settings import (
     SettingsError,
     metrics_port_setting,

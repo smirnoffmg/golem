@@ -2,6 +2,7 @@ import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from a2a.auth.user import UnauthenticatedUser, User
@@ -137,7 +138,7 @@ def request_handler(
     task_store: TaskStore | None = None,
     push: PushDelivery | None = None,
 ) -> DefaultRequestHandler:
-    push_options = {}
+    push_options: dict[str, Any] = {}
     if push is not None:
 
         async def validate(url: str) -> bool:

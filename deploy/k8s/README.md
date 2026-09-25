@@ -120,7 +120,7 @@ overlay.
 | `192.0.2.1/32:443,6443` | policies `tasks`, `reconciler` | The Kubernetes API server (see below). |
 | `198.51.100.10/32:443` | policies `edge`, `jira-adapter`, `mattermost-adapter`, `ui` | The identity provider: JWKS for the edge, client credentials for the adapters, sign-in and refresh for the UI. |
 | `198.51.100.20/32:443` | policies `jira-adapter`, `mcp` | Jira and Confluence. |
-| `198.51.100.30/32:443` | policy `reconciler`; `:443,22` in `golem-run-egress` | GitLab: merge requests, and the runs' clone and push. |
+| `198.51.100.30/32:443` | policy `reconciler`; `golem-run-egress` | GitLab: merge requests, and the runs' clone and push (HTTPS only). |
 | `203.0.113.10/32:4000` | `golem-run-egress` | The model gateway. |
 | `203.0.113.20/32:443` | `golem-run-egress` | The trace store's OTLP endpoint. |
 | `203.0.113.30/32`, ingress `:8000`, egress `:443` | policy `mattermost-adapter` | The Mattermost server: it sends slash commands and serves the REST API the adapter posts to. If commands reach the adapter through the ingress controller, admit the controller's namespace instead and restrict the source to Mattermost at the ingress; route `/mattermost/command` to Service `mattermost-adapter`. |

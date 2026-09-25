@@ -33,3 +33,6 @@ spec:
     requests.memory: 20Gi
     limits.cpu: "20"
     limits.memory: 20Gi
+    # 20 runs of 2Gi each (orchestrator/jobs.py EPHEMERAL_STORAGE).
+    requests.ephemeral-storage: 40Gi
+    limits.ephemeral-storage: 40Gi

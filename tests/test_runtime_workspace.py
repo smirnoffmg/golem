@@ -1,5 +1,6 @@
 import base64
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from golem.runtime.workspace import (
     clone_branch,
     commit_all,
     create_branch,
+    git,
     git_env,
     head_commit,
     pending_ids,
@@ -104,6 +106,46 @@ def test_clone_branch_checks_out_the_branch(tmp_path):
     clone_branch(str(bare), "main", dest)
 
     assert sh("rev-parse", "--abbrev-ref", "HEAD", cwd=dest) == "main"
+
+
+def seed_repo_with_link(tmp_path: Path, target: str) -> Path:
+    bare = seed_repo(tmp_path, {"records/a.md": "a\n"})
+    work = tmp_path / "with-link"
+    sh("clone", "--quiet", str(bare), str(work), cwd=tmp_path)
+    (work / "records" / "link").symlink_to(target)
+    sh("add", "-A", cwd=work)
+    sh(*AUTHOR, "commit", "--quiet", "-m", "link", cwd=work)
+    sh("push", "--quiet", "origin", "main", cwd=work)
+    return bare
+
+
+@pytest.mark.parametrize(
+    "clone",
+    [
+        lambda url, dest: clone_branch(url, "main", dest),
+        lambda url, dest: clone_at_revision(url, "main", dest),
+    ],
+    ids=["clone_branch", "clone_at_revision"],
+)
+def test_a_symlink_in_the_repository_is_checked_out_as_a_plain_file(tmp_path, clone):
+    # A link into .git would let a role's file tools rewrite git's config (core.fsmonitor
+    # runs a command on the next `git add`) through a path its permissions allow.
+    bare = seed_repo_with_link(tmp_path, "../.git")
+
+    dest = tmp_path / "clone"
+    clone(str(bare), dest)
+
+    link = dest / "records" / "link"
+    assert not link.is_symlink()
+    assert link.read_text() == "../.git"
+
+
+def test_a_link_checked_out_as_a_plain_file_is_not_a_change(tmp_path):
+    bare = seed_repo_with_link(tmp_path, "../.git")
+    dest = tmp_path / "clone"
+    clone_branch(str(bare), "main", dest)
+
+    assert changed_paths(dest, head_commit(dest)) == ()
 
 
 def test_changed_paths_lists_modified_added_and_deleted_files(tmp_path):
@@ -222,3 +264,23 @@ def test_git_error_does_not_leak_the_token(tmp_path):
         clone_branch(str(tmp_path / "missing.git"), "main", tmp_path / "clone", env=env)
 
     assert "s3cret" not in str(error.value)
+
+
+def test_a_git_host_that_never_answers_fails_the_clone_instead_of_hanging(tmp_path, silent_server):
+    # A stalled Git host would otherwise hold the Job until its deadline, and the run's own
+    # report would never be written.
+    started = time.monotonic()
+    with pytest.raises(GitError, match="timed out"):
+        git(
+            ["ls-remote", "--", f"http://{silent_server}/repo.git"],
+            env=git_env(None, {}),
+            timeout=1,
+        )
+    assert time.monotonic() - started < 5
+
+
+def test_git_env_gives_up_on_a_transfer_that_stalls():
+    env = git_env(None, {})
+
+    assert int(env["GIT_HTTP_LOW_SPEED_LIMIT"]) > 0
+    assert int(env["GIT_HTTP_LOW_SPEED_TIME"]) > 0

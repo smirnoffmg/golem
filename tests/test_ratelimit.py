@@ -7,6 +7,7 @@ from golem.ratelimit import (
     Bucket,
     Limiter,
     Rate,
+    address_key,
     client_address,
     parse_networks,
     refilled,
@@ -209,3 +210,18 @@ def test_trusted_proxies_are_parsed_as_networks() -> None:
         parse_networks("10.0.0.1/8")
     with pytest.raises(ValueError):
         parse_networks("proxy.example.test")
+
+
+def test_an_ipv4_client_is_limited_by_its_address() -> None:
+    assert address_key("203.0.113.7") == "203.0.113.7"
+
+
+def test_an_ipv6_client_is_limited_by_its_slash_64() -> None:
+    # One host commonly holds a whole /64 and can rotate through it; a /128 key would give
+    # it a fresh bucket per request.
+    assert address_key("2001:db8:1:2:aaaa::1") == address_key("2001:db8:1:2:ffff::9")
+    assert address_key("2001:db8:1:2::1") != address_key("2001:db8:1:3::1")
+
+
+def test_no_address_shares_one_key() -> None:
+    assert address_key(None) == address_key(None) == "unknown"

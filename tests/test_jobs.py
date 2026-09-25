@@ -1,13 +1,22 @@
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
-from kubernetes.client import V1Job, V1JobCondition, V1JobStatus, V1ObjectMeta
+from kubernetes.client import (
+    ApiClient,
+    Configuration,
+    V1Job,
+    V1JobCondition,
+    V1JobStatus,
+    V1ObjectMeta,
+)
 
 from golem.orchestrator.jobs import (
     CatalogRef,
     JobSpec,
     JobStatus,
+    KubernetesJobLauncher,
     build_job_manifest,
     build_token_secret,
     job_name,
@@ -119,14 +128,31 @@ def test_only_the_workspace_and_tmp_are_writable_and_both_are_empty_dirs() -> No
     mounts = {m["mountPath"]: m["name"] for m in container(manifest)["volumeMounts"]}
 
     assert set(mounts) == {"/workspace", "/tmp"}
-    assert all(volumes[name] == {"name": name, "emptyDir": {}} for name in mounts.values())
+    assert all(set(volumes[name]) == {"name", "emptyDir"} for name in mounts.values())
     assert container(manifest)["workingDir"] == "/workspace"
+
+
+def test_the_run_cannot_fill_the_nodes_disk() -> None:
+    # An untrusted run writing without bound would push the node into DiskPressure and get
+    # other pods evicted; with a limit, the kubelet evicts only this one.
+    manifest = build_job_manifest(spec(ephemeral_storage="3Gi"))
+    resources = container(manifest)["resources"]
+    volumes = {v["name"]: v for v in pod_spec(manifest)["volumes"]}
+
+    assert resources["requests"]["ephemeral-storage"] == "3Gi"
+    assert resources["limits"]["ephemeral-storage"] == "3Gi"
+    assert volumes["workspace"]["emptyDir"] == {"sizeLimit": "3Gi"}
+    assert volumes["tmp"]["emptyDir"] == {"sizeLimit": "3Gi"}
+
+
+def test_the_pod_gets_no_environment_about_the_services_in_its_namespace() -> None:
+    assert pod_spec(build_job_manifest(spec()))["enableServiceLinks"] is False
 
 
 def test_requests_equal_limits() -> None:
     resources = container(build_job_manifest(spec()))["resources"]
 
-    assert resources["requests"] == {"cpu": "500m", "memory": "1Gi"}
+    assert resources["requests"] == {"cpu": "500m", "memory": "1Gi", "ephemeral-storage": "2Gi"}
     assert resources["limits"] == resources["requests"]
 
 
@@ -295,3 +321,30 @@ def test_job_status_is_read_from_conditions_and_active_pods(
     status: V1JobStatus | None, expected: JobStatus
 ) -> None:
     assert job_status_of(job_with(status)) is expected
+
+
+# --- Launcher against an API server that stops answering ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda launcher: launcher.status(RUN_ID),
+        lambda launcher: launcher.termination_message(RUN_ID),
+        lambda launcher: launcher.delete(RUN_ID),
+        lambda launcher: launcher.launch(spec(namespace="team-a-jobs")),
+    ],
+    ids=["status", "termination_message", "delete", "launch"],
+)
+def test_every_api_call_gives_up_on_a_silent_api_server(silent_server, call) -> None:
+    # Without a timeout the client waits forever, and so does the reconciler's pass.
+    configuration = Configuration(host=f"http://{silent_server}")
+    configuration.retries = 0
+    launcher = KubernetesJobLauncher(
+        ApiClient(configuration), "team-a-jobs", request_timeout=(0.5, 0.5)
+    )
+
+    started = time.monotonic()
+    with pytest.raises(Exception, match=r"(?i)timed? ?out"):
+        call(launcher)
+    assert time.monotonic() - started < 5

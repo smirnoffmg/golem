@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from functools import partial
@@ -563,6 +564,16 @@ async def test_a_failed_run_posts_the_reason(adapter: Adapter) -> None:
 
     [post] = adapter.mattermost.posts
     assert "failed" in post["message"] and "lead found no target" in post["message"]
+
+
+async def test_the_runs_text_mentions_nobody_only_the_user_who_asked(adapter: Adapter) -> None:
+    # The text carries the run's report, which an untrusted Job wrote.
+    text = "@all urgent, @channel and @here: ask @mallory.b"
+    await push(adapter.client, status_update("TASK_STATE_FAILED", text), token_for())
+
+    [post] = adapter.mattermost.posts
+    assert re.findall(r"@[A-Za-z0-9._-]+", post["message"]) == ["@alan"]
+    assert "urgent" in post["message"]
 
 
 @pytest.mark.parametrize(

@@ -22,6 +22,7 @@ from test_edge_jwks import jwk
 from golem.adapters.__main__ import build_app
 from golem.adapters.common import (
     NOTIFICATION_TOKEN_HEADER,
+    PUSH_TOKEN_LIFETIME_SECONDS,
     ClientCredentials,
     push_token,
 )
@@ -574,6 +575,28 @@ def test_forged_push_tokens_name_no_issue(token: str) -> None:
     assert issue_of_push_token(PUSH_SECRET, token) is None
 
 
+def test_a_push_token_names_its_issue_until_it_expires() -> None:
+    # A leaked token would otherwise comment on its issue forever.
+    issued = 1_000_000.0
+    token = push_token(PUSH_SECRET, "SHOP-7", "m1", now=issued)
+
+    assert issue_of_push_token(PUSH_SECRET, token, now=issued + PUSH_TOKEN_LIFETIME_SECONDS) == (
+        "SHOP-7"
+    )
+    assert (
+        issue_of_push_token(PUSH_SECRET, token, now=issued + PUSH_TOKEN_LIFETIME_SECONDS + 1)
+        is None
+    )
+
+
+def test_a_push_tokens_issue_time_cannot_be_moved() -> None:
+    subject, issued, nonce, mac = push_token(PUSH_SECRET, "SHOP-7", "m1", now=1000).split(".")
+
+    assert (
+        issue_of_push_token(PUSH_SECRET, f"{subject}.{int(issued) + 10**6}.{nonce}.{mac}") is None
+    )
+
+
 # Push to comment
 
 
@@ -671,6 +694,37 @@ async def test_other_tasks_comments_do_not_count_as_duplicates(adapter: Adapter)
     await push(adapter.client, status_update("TASK_STATE_COMPLETED", "b", "task-10"), token_for())
 
     assert len(adapter.jira.comments["SHOP-7"]) == 2
+
+
+async def test_a_task_whose_id_extends_another_ones_is_not_its_duplicate(
+    adapter: Adapter,
+) -> None:
+    await push(adapter.client, status_update("TASK_STATE_COMPLETED", "b", "task-10"), token_for())
+    await push(adapter.client, status_update("TASK_STATE_COMPLETED", "a", "task-1"), token_for())
+
+    assert len(adapter.jira.comments["SHOP-7"]) == 2
+
+
+async def test_a_marker_in_the_runs_own_text_does_not_silence_another_task(
+    adapter: Adapter,
+) -> None:
+    # The text carries the run's report, which an untrusted Job wrote.
+    forged = status_update("TASK_STATE_FAILED", "golem-task:task-2", "task-1")
+    await push(adapter.client, forged, token_for())
+    await push(adapter.client, status_update("TASK_STATE_COMPLETED", "ok", "task-2"), token_for())
+
+    assert len(adapter.jira.comments["SHOP-7"]) == 2
+
+
+async def test_the_runs_text_mentions_nobody(adapter: Adapter) -> None:
+    await push(
+        adapter.client,
+        status_update("TASK_STATE_FAILED", "ask [~admin] or [~accountid:5b10a2844c20165700ede21g]"),
+        token_for(),
+    )
+
+    [comment] = adapter.jira.comments["SHOP-7"]
+    assert "[~" not in comment.replace("\\[~", "")
 
 
 @pytest.mark.parametrize(

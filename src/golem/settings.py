@@ -15,19 +15,26 @@ import yaml
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.fernet import Fernet
 
-from golem.adapters.jira import WEBHOOK_RATE
-from golem.adapters.mattermost import COMMAND_RATE
-from golem.edge.app import AUTH_FAILURE_RATE, CALLER_RATE, DIRECTORY_RATE
 from golem.edge.policy import Registry
 from golem.metrics import DEFAULT_METRICS_PORT
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef
 from golem.orchestrator.merge_requests import GitLabProject
 from golem.orchestrator.service import JobTemplate
-from golem.ratelimit import Network, Rate, parse_networks
+from golem.ratelimit import (
+    AUTH_FAILURE_RATE,
+    CALLER_RATE,
+    COMMAND_RATE,
+    DIRECTORY_RATE,
+    LOGIN_RATE,
+    START_RATE,
+    WEBHOOK_RATE,
+    Network,
+    Rate,
+    parse_networks,
+)
 from golem.run_token import ISSUER as GOLEM_ISSUER
 from golem.run_token import SigningKey
-from golem.ui.app import LOGIN_RATE, START_RATE
 
 DEFAULT_PORT = "8000"
 DEFAULT_INTERNAL_READ_PORT = "8001"
@@ -56,7 +63,7 @@ class EdgeSettings:
     oidc_discovery_url: str
     registry_file: Path
     max_chain_depth: int
-    audit_dsn: str
+    audit_dsn: str = field(repr=False)
     task_service_url: str
     catalogs_dir: Path
     public_base_url: str
@@ -80,8 +87,8 @@ class EdgeSettings:
 
 @dataclass(frozen=True)
 class TaskServiceSettings:
-    runs_dsn: str
-    tasks_db_url: str
+    runs_dsn: str = field(repr=False)
+    tasks_db_url: str = field(repr=False)
     limits: Limits
     estimated_cost: Decimal
     template: JobTemplate
@@ -98,18 +105,18 @@ class TaskServiceSettings:
     internal_write_port: int
     edge_token: str = field(repr=False)
     push_allowed_prefixes: tuple[str, ...] = ()
-    push_config_key: str | None = None
+    push_config_key: str | None = field(default=None, repr=False)
     # Scraped from the monitoring namespace only; no caller of the service reaches it (ADR 0013).
     metrics_port: int = DEFAULT_METRICS_PORT
 
 
 @dataclass(frozen=True)
 class ReconcilerSettings:
-    runs_dsn: str
+    runs_dsn: str = field(repr=False)
     interval_seconds: float
     task_service_url: str
     gitlab_url: str
-    gitlab_token: str
+    gitlab_token: str = field(repr=False)
     gitlab_projects_file: Path
     namespace: str
     kubernetes: Kubernetes
@@ -472,14 +479,14 @@ class AdapterSettings:
     edge_url: str
     token_url: str
     client_id: str
-    client_secret: str
+    client_secret: str = field(repr=False)
     jira_url: str
     # Set: Basic auth with the account's email and an API token (Jira Cloud).
     # Unset: the token is a personal access token sent as Bearer (Jira Data Center).
     jira_user: str | None
-    jira_token: str
-    webhook_secret: bytes
-    push_secret: bytes
+    jira_token: str = field(repr=False)
+    webhook_secret: bytes = field(repr=False)
+    push_secret: bytes = field(repr=False)
     labels_file: Path
     public_base_url: str
     port: int

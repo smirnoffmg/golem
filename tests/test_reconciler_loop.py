@@ -46,6 +46,28 @@ async def test_stop_interrupts_the_wait_between_passes() -> None:
     assert time.monotonic() - started < 5
 
 
+async def test_a_pass_that_hangs_is_abandoned_and_the_next_one_runs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stop = asyncio.Event()
+    passes: list[int] = []
+
+    async def reconcile_pass() -> None:
+        passes.append(len(passes))
+        if len(passes) == 1:
+            await asyncio.Event().wait()
+        stop.set()
+
+    with caplog.at_level(logging.ERROR):
+        await asyncio.wait_for(
+            run_forever(reconcile_pass, interval_seconds=0.01, stop=stop, pass_timeout_seconds=0.1),
+            5,
+        )
+
+    assert len(passes) == 2
+    assert "reconcile pass failed" in caplog.text
+
+
 def free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))

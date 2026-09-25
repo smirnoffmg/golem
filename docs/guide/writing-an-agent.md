@@ -35,6 +35,7 @@ skills:                         # shown on the agent card and in the UI
   - {id: research, name: Research a hypothesis, description: ..., tags: [discovery]}
 kinds:                          # the kinds of records, their statuses and sections
   - name: hypothesis
+    initial: proposed           # the only status a role may give a record it creates
     statuses: [proposed, validated, rejected]
     sections: [Problem, Evidence]
 roles:
@@ -140,11 +141,12 @@ nothing is pushed, and the task says why:
 | every changed file is under the role's `writes` | `<path> is outside the role's writes directory <dir>` |
 | the context repository still parses | `the context no longer builds: <file>: <problem>` |
 | no record changed its status | `<id> changed status from '<a>' to '<b>'; status changes are human decisions` |
+| a new record starts in its kind's `initial` status | `new record <id> has status '<a>'; a new <kind> starts as '<initial>'` |
 | something changed | `the role changed no files` |
 | the target, or a changed record linking to it, changed | `neither the target <id> (<path>) nor a changed record linking to it changed` |
 
-A run is also bounded: 60 model calls, `GOLEM_MODEL_TIMEOUT_SECONDS` per call, replies of at
-most 1 MiB, and the Job's deadline.
+A run is also bounded: 60 model calls for the role and every subagent it starts together,
+`GOLEM_MODEL_TIMEOUT_SECONDS` per call, replies of at most 1 MiB, and the Job's deadline.
 
 ## Tools
 

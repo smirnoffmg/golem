@@ -19,3 +19,13 @@ repos:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
+  # Types of src/golem with the project's own environment, so the checked library versions are
+  # the ones in uv.lock ([tool.mypy] in pyproject.toml).
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false

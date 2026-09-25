@@ -42,7 +42,7 @@ from typing import Any
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.messages import BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 from opentelemetry import trace
 from opentelemetry.context import Context
@@ -332,7 +332,7 @@ def response_attributes(generations: Sequence[Any]) -> dict[str, Any]:
     models = [m.response_metadata.get("model_name") for m in messages]
     if any(models):
         attributes["gen_ai.response.model"] = str(next(m for m in models if m))
-    usages = [m.usage_metadata for m in messages if getattr(m, "usage_metadata", None)]
+    usages = [m.usage_metadata for m in messages if isinstance(m, AIMessage) and m.usage_metadata]
     if usages:
         attributes["gen_ai.usage.input_tokens"] = sum(u.get("input_tokens", 0) for u in usages)
         attributes["gen_ai.usage.output_tokens"] = sum(u.get("output_tokens", 0) for u in usages)

@@ -22,7 +22,8 @@ it starts:
   [`orchestrator/schema.sql`](../../src/golem/orchestrator/schema.sql) under a Postgres
   advisory lock (`golem_runs:schema`), so two starting processes do not collide;
 - the UI runs its `CREATE TABLE IF NOT EXISTS` statements
-  ([`ui/store.py`](../../src/golem/ui/store.py)).
+  ([`ui/store.py`](../../src/golem/ui/store.py)) under its own lock (`golem_ui:schema`), since
+  its two replicas start together.
 
 Every statement is idempotent (`CREATE ... IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT
 EXISTS`), so a restart applies nothing twice. This is safe only while schema changes are

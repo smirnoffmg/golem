@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -29,6 +30,11 @@ from golem.tasks.ports import Refused, RunOutcome, RunStart, Started, TaskRun
 # is not refused on clock skew between the orchestrator and an MCP server.
 TOKEN_GRACE_SECONDS = 60
 UNKNOWN_AGENT = "unknown_agent"
+# psycopg's default is 130 s, and every A2A start, status and cancel would wait that long for
+# an unreachable database; statement_timeout does not cover connecting.
+CONNECT_TIMEOUT_SECONDS = 5
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -136,7 +142,9 @@ class PostgresOrchestrator:
             # A delegated run shares its chain's concurrency and budget (ADR 0004, ADR 0014).
             root_run_id=run.root_run_id or None,
         )
-        async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:
+        async with await AsyncConnection.connect(
+            self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        ) as conn:
             outcome = await start_run(conn, request, self.limits)
             if isinstance(outcome, Rejected):
                 self.metrics.admission_rejected(outcome.reason.value)
@@ -163,15 +171,31 @@ class PostgresOrchestrator:
                 ended = await fail_run(conn, outcome.run_id)
                 if ended is not None:
                     self.metrics.run_ended(ended.agent, "failed", ended.seconds)
+                # The Job may exist without its token Secret, waiting for it until the deadline.
+                await self._delete_job(outcome.run_id)
                 return Refused(reason=f"Could not launch run {outcome.run_id}: {error}")
+            # A cancel, or a reconciler, may have ended the run while its Job was created; the
+            # Job would otherwise run to its deadline for a run nobody waits for.
+            if await run_status(conn, outcome.run_id) != "running":
+                await self._delete_job(outcome.run_id)
         return Started(run_id=outcome.run_id)
 
+    async def _delete_job(self, run_id: str) -> None:
+        try:
+            await asyncio.to_thread(self.launcher.delete, run_id)
+        except Exception:
+            log.exception("could not delete the Job of run %s", run_id)
+
     async def status(self, run_id: str) -> str | None:
-        async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:
+        async with await AsyncConnection.connect(
+            self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        ) as conn:
             return await run_status(conn, run_id)
 
     async def run_of_task(self, task_id: str) -> TaskRun | None:
-        async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:
+        async with await AsyncConnection.connect(
+            self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        ) as conn:
             run = await run_of_task(conn, task_id)
         if run is None:
             return None
@@ -185,11 +209,13 @@ class PostgresOrchestrator:
         return TaskRun(run.run_id, run.caller, run.agent, outcome)
 
     async def cancel(self, task_id: str) -> None:
-        async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:
+        async with await AsyncConnection.connect(
+            self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        ) as conn:
             ended = await cancel_run_of_task(conn, task_id)
         if ended is not None:
             self.metrics.run_ended(ended.agent, "canceled", ended.seconds)
-            await asyncio.to_thread(self.launcher.delete, ended.run_id)
+            await self._delete_job(ended.run_id)
 
 
 def _is_run_id(value: str) -> bool:

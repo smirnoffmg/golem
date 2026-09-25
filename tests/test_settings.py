@@ -1,3 +1,7 @@
+import dataclasses
+import re
+import subprocess
+import sys
 from decimal import Decimal
 from pathlib import Path
 
@@ -8,14 +12,20 @@ from test_mcp_settings import TRACKER_ENV
 from test_ui import UI_ENV
 
 from golem.edge.policy import Registry
-from golem.mcp.settings import mcp_settings
+from golem.mcp.settings import McpSettings, mcp_settings
 from golem.orchestrator.jobs import CatalogRef
 from golem.orchestrator.merge_requests import GitLabProject
 from golem.ratelimit import Rate, parse_networks
 from golem.run_token import SigningKey
 from golem.settings import (
+    AdapterSettings,
+    EdgeSettings,
     Kubernetes,
+    MattermostAdapterSettings,
+    ReconcilerSettings,
     SettingsError,
+    TaskServiceSettings,
+    UiSettings,
     adapter_settings,
     edge_settings,
     mattermost_adapter_settings,
@@ -513,3 +523,50 @@ def test_the_metrics_port_is_never_a_port_callers_reach(process: str) -> None:
 def test_the_task_services_metrics_port_is_not_an_internal_one(port: str) -> None:
     with pytest.raises(SettingsError, match="distinct"):
         task_service_settings(TASKS_ENV | {"GOLEM_METRICS_PORT": port})
+
+
+SECRET_FIELD = re.compile(r"(dsn|secret|token|key|db_url)$")
+
+
+@pytest.mark.parametrize(
+    "settings_class",
+    [
+        EdgeSettings,
+        TaskServiceSettings,
+        ReconcilerSettings,
+        AdapterSettings,
+        MattermostAdapterSettings,
+        UiSettings,
+        McpSettings,
+    ],
+    ids=lambda cls: cls.__name__,
+)
+def test_no_secret_setting_appears_in_a_repr(settings_class: type) -> None:
+    # A DSN carries its password; a logged settings object or a rich traceback prints its repr.
+    shown = [
+        f.name for f in dataclasses.fields(settings_class) if SECRET_FIELD.search(f.name) and f.repr
+    ]
+    assert shown == []
+
+
+def test_settings_import_no_process_handlers() -> None:
+    # Each process parses its settings through this module; were it to import the handlers,
+    # the edge would load the web UI, the adapters would load the edge, and so on.
+    handlers = [
+        "golem.edge.app",
+        "golem.ui.app",
+        "golem.adapters.jira",
+        "golem.adapters.mattermost",
+    ]
+    loaded = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, golem.settings; print(' '.join(sorted(sys.modules)))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+
+    assert [name for name in handlers if name in loaded] == []

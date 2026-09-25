@@ -4,6 +4,7 @@ service, with the identity provider faked at its HTTP boundary.
 The identity provider is tests/support/idp.py.
 """
 
+import asyncio
 import base64
 import hashlib
 import html
@@ -52,8 +53,9 @@ from golem.ratelimit import Limiter, Rate, parse_networks
 from golem.settings import SettingsError, ui_settings
 from golem.tasks.app import create_listeners
 from golem.tasks.ports import Orchestrator
+from golem.ui.__main__ import prepare
 from golem.ui.app import SESSION_COOKIE, create_ui_app
-from golem.ui.oidc import CLOCK_SKEW_SECONDS, OidcClient
+from golem.ui.oidc import CLOCK_SKEW_SECONDS, OidcClient, Tokens
 from golem.ui.store import SessionStore, apply_schema
 from golem.ui.views import merge_request_link, shown_time
 
@@ -410,7 +412,9 @@ async def test_tokens_are_encrypted_at_rest_and_the_session_id_is_not_stored(
 
     stored = " ".join(str(column) for column in row)
     assert refresh_token not in stored
-    assert "eyJ" not in stored, "a JWT (access or ID token) is stored in the clear"
+    # A JWT is dot-separated base64url starting with "eyJ"; Fernet text has no dots, so a bare
+    # "eyJ" can turn up in it by chance.
+    assert not re.search(r"eyJ[\w-]*\.eyJ", stored), "a JWT is stored in the clear"
     assert browser.cookies[SESSION_COOKIE] not in stored
     assert token_request["code"][0] not in stored
 
@@ -1047,3 +1051,34 @@ async def test_ui_requests_are_counted_by_route_template_and_refusals_by_kind(
     assert value("golem_rate_limit_refusals_total", {"process": "ui", "limit": "start"}) == 1
     assert value("golem_rate_limit_refusals_total", {"process": "ui", "limit": "login"}) == 1
     assert value("golem_authentication_failures_total", {"process": "ui"}) == 1
+
+
+async def test_replicas_starting_together_on_an_empty_database_all_start(
+    postgres: PostgresContainer,
+) -> None:
+    # Concurrent CREATE TABLE IF NOT EXISTS can still collide in the catalog
+    # (pg_type_typname_nsp_index); the UI runs two replicas.
+    dsn = ui_dsn_of(postgres)
+    for _ in range(5):
+        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+            await conn.execute("DROP TABLE IF EXISTS sessions, logins")
+
+        await asyncio.gather(*(prepare(dsn) for _ in range(8)))
+
+
+async def test_concurrent_requests_share_the_roles_few_connections_instead_of_failing(
+    ui_db: str,
+) -> None:
+    # golem_ui has CONNECTION LIMIT 10 (deploy/postgres/init.sql) across both replicas; here
+    # the other replica holds all but one.
+    store = SessionStore(ui_db, SESSION_KEY, connections=1)
+    tokens = Tokens(access_token="a", refresh_token="r", id_token=None, expires_in=300)
+    cookie, _ = await store.create(subject="alice", name="Alice", tokens=tokens, replacing=None)
+    others = [await psycopg.AsyncConnection.connect(ui_db) for _ in range(9)]
+    try:
+        sessions = await asyncio.gather(*(store.get(cookie) for _ in range(20)))
+    finally:
+        for conn in others:
+            await conn.close()
+
+    assert all(session is not None for session in sessions)

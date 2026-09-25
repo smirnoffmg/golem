@@ -6,6 +6,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SLUG = r"^[a-z][a-z0-9-]*$"
 TOOL_GROUP = r"^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*$"
+# A relative directory whose segments never start with a dot and hold no glob characters: the
+# file tools turn it into an allow rule, and `.git`, `.` or `*` there would open more than it.
+WRITES_DIR = r"^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*/?$"
 # The one tool group the runtime serves itself, not an MCP server: `delegate_to_agent`, which
 # asks another agent for work through the edge (ADR 0014). Like every group, deny by default.
 DELEGATE_GROUP = "agents.delegate"
@@ -46,16 +49,28 @@ class Rule(_Frozen):
 
 
 class Kind(_Frozen):
-    """A kind of record in the context repository, with the statuses and sections it may have."""
+    """A kind of record in the context repository, with the statuses and sections it may have.
+
+    A role may create a record only in the ``initial`` status: every later status is a human
+    decision, and a record born in one would skip it."""
 
     name: str
+    initial: str
     statuses: frozenset[str]
     sections: frozenset[str] = frozenset()
+
+    @model_validator(mode="after")
+    def _initial_is_a_status(self) -> "Kind":
+        if self.initial not in self.statuses:
+            raise ValueError(
+                f"initial status {self.initial!r} of kind {self.name!r} is not one of its statuses"
+            )
+        return self
 
 
 class Role(_Frozen):
     name: str = Field(pattern=SLUG)
-    writes: str
+    writes: str = Field(pattern=WRITES_DIR)
     tools: tuple[Annotated[str, Field(pattern=TOOL_GROUP)], ...] = ()
 
     @model_validator(mode="after")

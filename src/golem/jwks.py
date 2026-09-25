@@ -8,6 +8,9 @@ import httpx
 import jwt
 
 MIN_REFRESH_SECONDS = 60.0
+# How long a fetched key set is trusted before it is fetched again, as PyJWKClient's lifespan:
+# a key the publisher deleted (a leaked one, say) keeps verifying tokens that name it until then.
+MAX_AGE_SECONDS = 300.0
 # The first retry of a verifier that has never had keys; each failure doubles it, up to the
 # refresh interval.
 FIRST_RETRY_SECONDS = 1.0
@@ -22,13 +25,15 @@ def fetch_jwks(client: httpx.Client, url: str) -> jwt.PyJWKSet:
 
 
 class SigningKeys:
-    """Signing keys from a JWKS URL, refetched when a token names an unknown key id.
+    """Signing keys from a JWKS URL, refetched when a token names an unknown key id or they age.
 
     Refetching is rate limited so that tokens with made-up key ids cannot turn a verifier into
     a request flood against the key publisher; a failed fetch keeps the keys already known, and
     a verifier that never got any has none, so it refuses every token. Until it has keys, it
     retries sooner, doubling the wait from ``first_retry_seconds`` up to the interval: a verifier
     that starts before the key publisher would otherwise refuse every token for a whole interval.
+    Keys older than ``max_age_seconds`` are fetched again on the next lookup, so a key deleted at
+    the publisher stops verifying within that time.
     Fetching is synchronous: callers verify off the event loop, so a refetch blocks one worker
     thread for at most the client's timeout, at most once per wait.
     """
@@ -40,11 +45,13 @@ class SigningKeys:
         clock: Callable[[], float] = time.monotonic,
         min_refresh_seconds: float = MIN_REFRESH_SECONDS,
         first_retry_seconds: float = FIRST_RETRY_SECONDS,
+        max_age_seconds: float = MAX_AGE_SECONDS,
     ) -> None:
         self._fetch = fetch
         self._clock = clock
         self._min_refresh_seconds = min_refresh_seconds
         self._first_retry_seconds = first_retry_seconds
+        self._max_age_seconds = max_age_seconds
         self._failures = 0
         self._keys: jwt.PyJWKSet | None = None
         self._fetched_at: float | None = None
@@ -58,7 +65,8 @@ class SigningKeys:
             self._failures += 1
 
     def for_key_id(self, kid: str | None) -> jwt.PyJWKSet | None:
-        if kid is not None and not self._knows(kid) and self._may_refresh():
+        unknown = kid is not None and not self._knows(kid)
+        if (unknown and self._may_refresh()) or self._aged():
             self.refresh()
         return self._keys
 
@@ -67,6 +75,13 @@ class SigningKeys:
             return self._keys is not None and self._keys[kid] is not None
         except KeyError:
             return False
+
+    def _aged(self) -> bool:
+        return (
+            self._keys is not None
+            and self._fetched_at is not None
+            and self._clock() - self._fetched_at >= self._max_age_seconds
+        )
 
     def _may_refresh(self) -> bool:
         if self._fetched_at is None:

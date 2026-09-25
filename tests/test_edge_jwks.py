@@ -16,7 +16,7 @@ from golem import call_token
 from golem.call_token import CallClaims
 from golem.edge.__main__ import authenticator, call_authenticator
 from golem.edge.auth import AuthFailure, Principal, authenticate_any
-from golem.jwks import SigningKeys, fetch_jwks
+from golem.jwks import MAX_AGE_SECONDS, SigningKeys, fetch_jwks
 from golem.run_token import SigningKey, public_jwks
 
 JWKS_URL = "https://idp.example.test/realms/golem/protocol/openid-connect/certs"
@@ -124,6 +124,32 @@ def test_a_failed_refresh_keeps_the_keys_already_known(
     check(keys, token(NEW_KEY, "new"))
 
     assert isinstance(check(keys, token(OLD_KEY, "old")), Principal)
+
+
+def test_a_key_the_idp_removed_stops_verifying_once_the_keys_age_out(
+    keys: SigningKeys, idp: IdP, clock: Clock
+) -> None:
+    # A leaked key is revoked by deleting it at the IdP; tokens signed with it name a key id
+    # the verifier knows, so only the key set's age can make it look again.
+    keys.refresh()
+    idp.keys = [jwk(NEW_KEY, "new")]
+    clock.now += MAX_AGE_SECONDS - 1
+    assert isinstance(check(keys, token(OLD_KEY, "old")), Principal)
+
+    clock.now += 1
+    assert check(keys, token(OLD_KEY, "old")) == AuthFailure("unknown signing key 'old'")
+    assert idp.fetches == 2
+
+
+def test_known_keys_are_fetched_again_at_most_once_per_max_age(
+    keys: SigningKeys, idp: IdP, clock: Clock
+) -> None:
+    keys.refresh()
+    for _ in range(3):
+        clock.now += MAX_AGE_SECONDS / 3
+        check(keys, token(OLD_KEY, "old"))
+
+    assert idp.fetches == 2
 
 
 def test_a_token_without_key_id_does_not_trigger_a_fetch(keys: SigningKeys, idp: IdP) -> None:

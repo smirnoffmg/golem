@@ -28,6 +28,9 @@ MCP_REGISTRY_VOLUME = "mcp-registry"
 RUNTIME_COMMAND = ("python", "-m", "golem.runtime")
 WORKSPACE = "/workspace"
 RUN_AS_USER = 10001
+# The clone of the context repository and the role's scratch space; far above a repository of
+# Markdown records, and a bound on what an untrusted run can write to the node's disk.
+EPHEMERAL_STORAGE = "2Gi"
 
 DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 DNS_SUBDOMAIN = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$")
@@ -82,6 +85,7 @@ class JobSpec:
     traceparent: str = ""
     tracestate: str = ""
     mcp_registry_configmap: str | None = None
+    ephemeral_storage: str = EPHEMERAL_STORAGE
 
     def __post_init__(self) -> None:
         # The run id becomes both the Job name suffix and a label value, so it must fit both.
@@ -110,6 +114,7 @@ class JobSpec:
         )
         _require(bool(self.cpu.strip()), "cpu must not be empty")
         _require(bool(self.memory.strip()), "memory must not be empty")
+        _require(bool(self.ephemeral_storage.strip()), "ephemeral_storage must not be empty")
         _require(self.command is None or len(self.command) > 0, "command must not be empty")
         _require(bool(self.run_token.strip()), "run_token must not be empty")
         _require(bool(self.call_token.strip()), "call_token must not be empty")
@@ -157,7 +162,11 @@ def mcp_registry_volumes(spec: JobSpec) -> list[dict]:
 
 
 def _container(spec: JobSpec) -> dict:
-    resources = {"cpu": spec.cpu, "memory": spec.memory}
+    resources = {
+        "cpu": spec.cpu,
+        "memory": spec.memory,
+        "ephemeral-storage": spec.ephemeral_storage,
+    }
     return {
         "name": "runtime",
         "image": spec.image,
@@ -209,6 +218,8 @@ def build_job_manifest(spec: JobSpec) -> dict:
                 "spec": {
                     "restartPolicy": "Never",
                     "automountServiceAccountToken": False,
+                    # Otherwise every Service in the namespace arrives as environment variables.
+                    "enableServiceLinks": False,
                     "securityContext": {
                         "runAsNonRoot": True,
                         "runAsUser": RUN_AS_USER,
@@ -218,8 +229,8 @@ def build_job_manifest(spec: JobSpec) -> dict:
                     },
                     "containers": [_container(spec)],
                     "volumes": [
-                        {"name": "workspace", "emptyDir": {}},
-                        {"name": "tmp", "emptyDir": {}},
+                        {"name": "workspace", "emptyDir": {"sizeLimit": spec.ephemeral_storage}},
+                        {"name": "tmp", "emptyDir": {"sizeLimit": spec.ephemeral_storage}},
                         *mcp_registry_volumes(spec),
                     ],
                 },
@@ -300,12 +311,16 @@ def termination_message_of(pods: list[V1Pod]) -> str | None:
 
 HTTP_NOT_FOUND = 404
 HTTP_CONFLICT = 409
+# (connect, read) seconds. The client's default is no timeout at all: one stalled connection
+# to the API server would hold a reconcile pass, or a task service thread, forever.
+REQUEST_TIMEOUT = (5.0, 30.0)
 
 
 @dataclass(frozen=True)
 class KubernetesJobLauncher:
     api_client: ApiClient
     namespace: str
+    request_timeout: tuple[float, float] = REQUEST_TIMEOUT
 
     @property
     def _batch(self) -> BatchV1Api:
@@ -319,7 +334,9 @@ class KubernetesJobLauncher:
         job = self._create_job(spec)
         try:
             CoreV1Api(self.api_client).create_namespaced_secret(
-                self.namespace, build_token_secret(spec, job.metadata.uid)
+                self.namespace,
+                build_token_secret(spec, job.metadata.uid),
+                _request_timeout=self.request_timeout,
             )
         except ApiException as error:
             # A relaunch keeps the token the Job already has.
@@ -328,18 +345,24 @@ class KubernetesJobLauncher:
 
     def _create_job(self, spec: JobSpec) -> V1Job:
         try:
-            return self._batch.create_namespaced_job(self.namespace, build_job_manifest(spec))
+            return self._batch.create_namespaced_job(
+                self.namespace, build_job_manifest(spec), _request_timeout=self.request_timeout
+            )
         except ApiException as error:
             if error.status != HTTP_CONFLICT:
                 raise
-            existing = self._batch.read_namespaced_job(job_name(spec.run_id), self.namespace)
+            existing = self._batch.read_namespaced_job(
+                job_name(spec.run_id), self.namespace, _request_timeout=self.request_timeout
+            )
             if (existing.metadata.labels or {}).get(RUN_ID_LABEL) != spec.run_id:
                 raise JobNameTaken(job_name(spec.run_id)) from error
             return existing
 
     def status(self, run_id: str) -> JobStatus:
         try:
-            job = self._batch.read_namespaced_job(job_name(run_id), self.namespace)
+            job = self._batch.read_namespaced_job(
+                job_name(run_id), self.namespace, _request_timeout=self.request_timeout
+            )
         except ApiException as error:
             if error.status == HTTP_NOT_FOUND:
                 return JobStatus.MISSING
@@ -348,7 +371,9 @@ class KubernetesJobLauncher:
 
     def termination_message(self, run_id: str) -> str | None:
         pods = CoreV1Api(self.api_client).list_namespaced_pod(
-            self.namespace, label_selector=f"{RUN_ID_LABEL}={run_id}"
+            self.namespace,
+            label_selector=f"{RUN_ID_LABEL}={run_id}",
+            _request_timeout=self.request_timeout,
         )
         return termination_message_of(pods.items)
 
@@ -357,7 +382,10 @@ class KubernetesJobLauncher:
             # Job deletion through the API orphans its dependents (pods, the token Secret)
             # unless propagation is set.
             self._batch.delete_namespaced_job(
-                job_name(run_id), self.namespace, propagation_policy="Background"
+                job_name(run_id),
+                self.namespace,
+                propagation_policy="Background",
+                _request_timeout=self.request_timeout,
             )
         except ApiException as error:
             if error.status != HTTP_NOT_FOUND:

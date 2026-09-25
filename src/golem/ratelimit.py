@@ -107,6 +107,22 @@ class Limiter:
             return decision
 
 
+# The default rates of every public entry point (ADR 0012), each overridable by a setting.
+# Per authenticated caller at the edge, and per client address for failed authentications
+# (the edge and the MCP servers).
+CALLER_RATE = Rate(per_minute=60, burst=20)
+AUTH_FAILURE_RATE = Rate(per_minute=30, burst=10)
+# Anonymous reads of the directory and the card keys, per client address (ADR 0014).
+DIRECTORY_RATE = Rate(per_minute=120, burst=60)
+# The UI: /login writes a row per request, POST /tasks starts a run.
+LOGIN_RATE = Rate(per_minute=30, burst=10)
+START_RATE = Rate(per_minute=10, burst=5)
+# Jira sends every update of every issue the webhook covers, from a few addresses.
+WEBHOOK_RATE = Rate(per_minute=300, burst=100)
+# Every user's Mattermost command comes from the Mattermost server's address.
+COMMAND_RATE = Rate(per_minute=120, burst=60)
+
+
 def parse_networks(text: str) -> tuple[Network, ...]:
     """Comma-separated CIDRs; a host address is its /32 or /128. Host bits set are refused,
     since ``10.0.0.1/8`` is more likely a typo than a meant ``10.0.0.0/8``."""
@@ -133,6 +149,21 @@ def client_address(
             break
         current = previous
     return str(current)
+
+
+UNKNOWN_ADDRESS = "unknown"
+IPV6_CLIENT_PREFIX = 64
+
+
+def address_key(address: str | None) -> str:
+    """The rate limit key of a client address: an IPv6 client by its /64, the block one host is
+    commonly given and can rotate through; an address that is not an IP shares one bucket."""
+    parsed = _address(address)
+    if parsed is None:
+        return UNKNOWN_ADDRESS
+    if isinstance(parsed, ipaddress.IPv6Address):
+        return str(ipaddress.ip_network(f"{parsed}/{IPV6_CLIENT_PREFIX}", strict=False))
+    return str(parsed)
 
 
 def _address(text: str | None) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:

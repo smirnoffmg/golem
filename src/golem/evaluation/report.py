@@ -78,7 +78,9 @@ def summary(results: Sequence[CaseResult], verdict: Verdict) -> str:
 
 def baseline_of(data: Any, source: str) -> dict[str, bool]:
     cases = data.get("cases") if isinstance(data, dict) else None
-    valid = isinstance(cases, list) and all(
+    if not isinstance(cases, list):
+        raise ReportError(f"{source}: not an evaluation report: expected cases with id and passed")
+    valid = all(
         isinstance(case, dict)
         and isinstance(case.get("id"), str)
         and isinstance(case.get("passed"), bool)

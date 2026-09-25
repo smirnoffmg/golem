@@ -320,7 +320,38 @@ async def test_model_call_limit_also_bounds_a_subagent(tmp_path: Path) -> None:
     with pytest.raises(ModelCallLimitExceededError):
         await runner.run(make_brief(tmp_path))
 
-    assert len(model.prompts) == 1 + 3
+    assert len(model.prompts) == 3
+
+
+def delegating_again_and_again() -> Iterator[AIMessage]:
+    for n in count():
+        yield tool_call("task", description=f"step {n}", subagent_type="general-purpose")
+        yield AIMessage(content="done")
+
+
+async def test_the_model_call_limit_is_one_budget_for_the_run_and_all_its_subagents(
+    tmp_path: Path,
+) -> None:
+    # Per-agent limits would let each of the lead's calls start a subagent with a fresh limit.
+    model = ScriptedModel(messages=islice(delegating_again_and_again(), 100))
+    runner = DeepAgentsRunner(model=model, limits=Limits(max_model_calls=5, recursion_limit=1000))
+
+    with pytest.raises(ModelCallLimitExceededError):
+        await runner.run(make_brief(tmp_path))
+
+    assert len(model.prompts) == 5
+
+
+async def test_each_run_gets_its_own_budget(tmp_path: Path) -> None:
+    runner = DeepAgentsRunner(
+        model=ScriptedModel(messages=iter(["one", "two"])),
+        limits=Limits(max_model_calls=1, recursion_limit=100),
+    )
+
+    first = await runner.run(make_brief(tmp_path / "a"))
+    second = await runner.run(make_brief(tmp_path / "b"))
+
+    assert (first.summary, second.summary) == ("one", "two")
 
 
 class Unreachable(GenericFakeChatModel):

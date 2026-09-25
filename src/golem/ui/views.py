@@ -51,11 +51,13 @@ def shown_time(timestamp: str) -> str:
 def task_view(task: Any, agents: tuple[str, ...]) -> TaskView | None:
     if not isinstance(task, dict) or not isinstance(task.get("id"), str) or not task["id"]:
         return None
-    status = task.get("status") if isinstance(task.get("status"), dict) else {}
+    status = task.get("status")
+    status = status if isinstance(status, dict) else {}
     state = status.get("state") if isinstance(status.get("state"), str) else ""
     message = message_text(status.get("message"))
     first = _first_user_message(task.get("history"))
-    metadata = first.get("metadata") if isinstance(first.get("metadata"), dict) else {}
+    metadata = first.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
     agent = metadata.get(AGENT_METADATA)
     return TaskView(
         id=task["id"],

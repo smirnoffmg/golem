@@ -29,3 +29,8 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS detail text;
 -- A succeeded run's merge request is opened (or found unnecessary) before its tasks hear of
 -- it; until then the run stays unsettled and its notifications wait in the outbox.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS proposal_settled_at timestamptz;
+
+-- The reconciler looks for these every pass; both sets stay small while the tables only grow.
+CREATE INDEX IF NOT EXISTS runs_unsettled ON runs (id)
+    WHERE status = 'succeeded' AND proposal_settled_at IS NULL;
+CREATE INDEX IF NOT EXISTS run_tasks_unnotified ON run_tasks (run_id) WHERE notified_at IS NULL;

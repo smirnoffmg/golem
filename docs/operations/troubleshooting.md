@@ -107,9 +107,10 @@ kubectl -n golem-jobs get pods -l golem.dev/run-id=<run id> \
 | `terminated` shows | Cause |
 | --- | --- |
 | `"reason": "OOMKilled"` | the run exceeded `GOLEM_JOB_MEMORY` |
+| pod `Evicted`, `ephemeral local storage usage exceeds` | the run wrote more than 2Gi to `/workspace` and `/tmp` together |
 | nothing (no container ran), Job condition `DeadlineExceeded` | the run hit `GOLEM_JOB_DEADLINE_SECONDS`, or its pod never started |
 | `"exitCode": 1` and a Python traceback in the log | the process died before writing a report (a broken image) |
-| no pod at all | the Job's TTL removed it; the reconciler reads the report as soon as the Job ends, so this means it was not running then |
+| no pod at all | the Job's TTL removed it; the reconciler reads the report as soon as the Job ends, so this means it was not running then. A run whose branch was pushed is still settled as succeeded; one without a branch is failed |
 
 ## Jira labels start nothing, or no comment comes back
 
@@ -151,7 +152,7 @@ The edge answers in JSON-RPC; the `error.message` is the reason
 | 401, -32040 | `token expired`, `token not yet valid` | the token's time, or clocks |
 | 401, -32040 | `token has no preferred username`, `service account token has no authorized client (azp)` | the provider's claims do not name a caller |
 | 401, -32040 | `algorithm 'HS256' is not allowed`, `token has no key id`, `bad signature`, `malformed token` | not a token of the provider |
-| 401, -32040 | `edge token required` | from the task service: `GOLEM_EDGE_TOKEN` differs between `golem-edge` and `golem-tasks` |
+| 502, -32603 | `task service refused the edge` | `GOLEM_EDGE_TOKEN` differs between `golem-edge` and `golem-tasks`; the edge logs it as an error |
 | 429, -32042 | `rate limited: retry after N s` | the caller's limit (`GOLEM_RATE_CALLER`, per replica), or, before the token is checked, the client address has too many failed authentications |
 | 200, -32041 | `not_allowed: 'user:bob' may not call agent 'discovery'` | the call registry |
 | 200, -32041 | `unknown_agent: agent 'x' is not registered` | the agent is not in the call registry |

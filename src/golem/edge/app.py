@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -24,7 +25,16 @@ from golem.edge.auth import AuthFailure, Principal
 from golem.edge.card_signing import KEYS_PATH
 from golem.edge.policy import Call, ChainLimits, Deny, Registry, callable_agents, evaluate
 from golem.metrics import Instrumented, Metrics
-from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
+from golem.ratelimit import (
+    AUTH_FAILURE_RATE,
+    CALLER_RATE,
+    DIRECTORY_RATE,
+    Decision,
+    Limiter,
+    Network,
+    address_key,
+    client_address,
+)
 from golem.run_status import RUNNING, RunStatuses, StatusUnavailable
 
 RPC_PATH = "/a2a"
@@ -40,6 +50,13 @@ FORWARDED_METHODS = frozenset({"SendMessage", "GetTask", "ListTasks", "CancelTas
 # start a task and nothing else, so an agent never reads, lists or cancels the subject's tasks.
 DELEGATED_METHOD = "SendMessage"
 AUDIT_CONNECT_TIMEOUT_SECONDS = 2
+# golem_edge's CONNECTION LIMIT (10) is shared by every replica, a surge pod during a rollout
+# included: three replicas of three stay under it. A call past its replica's share waits for a
+# connection as long as it would for the database, then is refused as the audit's failure.
+AUDIT_CONNECTIONS = 3
+# Far above any A2A message a person or an agent writes; the body is buffered before the
+# caller's rate limit is taken, so without a bound one caller could hold gigabytes per request.
+MAX_BODY_BYTES = 1024 * 1024
 
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
@@ -51,17 +68,12 @@ UNAUTHENTICATED = -32040
 CALL_DENIED = -32041
 RATE_LIMITED = -32042
 AUDIT_UNAVAILABLE = INTERNAL_ERROR
-# ADR 0012: per authenticated caller, and per client address for failed authentications.
-CALLER_RATE = Rate(per_minute=60, burst=20)
-AUTH_FAILURE_RATE = Rate(per_minute=30, burst=10)
-# Anonymous reads of the directory and the card keys, per client address (ADR 0014).
-DIRECTORY_RATE = Rate(per_minute=120, burst=60)
 RATE_LIMITED_REASON = "rate_limited"
 RUN_NOT_ACTIVE = "run_not_active"
-# An address that is not an IP (a test client, a Unix socket) shares one bucket.
-UNKNOWN_ADDRESS = "unknown"
 
 RpcId = str | int | None
+
+log = logging.getLogger("golem.edge")
 
 # A2A 1.0, 8.6.1: card endpoints "SHOULD include a Cache-Control response header with a
 # max-age directive" and "an ETag". The directory changes as rarely, but only with a restart.
@@ -104,10 +116,27 @@ def bearer_token(authorization: str | None) -> str | None:
     return token if scheme.lower() == "bearer" and token else None
 
 
-def parse_call(body: bytes) -> RpcCall | Rejected:
+async def read_body(request: Request, limit: int = MAX_BODY_BYTES) -> bytes | None:
+    """The body, or None as soon as it passes `limit`: the rest is never read."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        return None
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            return None
+    return bytes(body)
+
+
+def parse_call(body: bytes | None) -> RpcCall | Rejected:
+    if body is None:
+        refusal = Refusal(INVALID_REQUEST, f"request body exceeds {MAX_BODY_BYTES} bytes", 413)
+        return Rejected(None, "", "", refusal)
     try:
         request = json.loads(body)
-    except ValueError:
+    # Deep nesting exhausts the parser's recursion, not its grammar.
+    except (ValueError, RecursionError):
         return Rejected(None, "", "", Refusal(PARSE_ERROR, "parse error"))
     if not isinstance(request, dict):
         return Rejected(None, "", "", Refusal(INVALID_REQUEST, "request must be a JSON object"))
@@ -291,7 +320,7 @@ def public_json(request: Request, body: bytes, max_age: int) -> Response:
 
 
 def json_bytes(content: Any) -> bytes:
-    return JSONResponse(content).body
+    return bytes(JSONResponse(content).body)
 
 
 def plain_error(message: str, status_code: int, **headers: str) -> JSONResponse:
@@ -358,6 +387,7 @@ def create_edge_app(
     trusted_proxies: tuple[Network, ...] = (),
     metrics: Metrics | None = None,
     run_statuses: RunStatuses | None = None,
+    audit_connections: int = AUDIT_CONNECTIONS,
 ) -> ASGIApp:
     """``cards`` are served as given, so they arrive signed (``golem.edge.card_signing``), and
     ``card_keys`` is the JWKS that verifies them."""
@@ -368,6 +398,7 @@ def create_edge_app(
     card_bodies = {name: json_bytes(agent_card_to_dict(card)) for name, card in cards.items()}
     key_set_body = json_bytes(dict(card_keys))
     published = tuple(sorted(cards))
+    audit_slots = asyncio.Semaphore(audit_connections)
 
     async def audited(address: str | None, principal: Principal, call: RpcCall | Rejected) -> bool:
         refusal = call.refusal if isinstance(call, Rejected) else None
@@ -382,6 +413,11 @@ def create_edge_app(
 
     async def written(entry: AuditEntry) -> bool:
         try:
+            await asyncio.wait_for(audit_slots.acquire(), AUDIT_CONNECT_TIMEOUT_SECONDS)
+        except TimeoutError:
+            metrics.audit_write_failed()
+            return False
+        try:
             async with await psycopg.AsyncConnection.connect(
                 audit_dsn, autocommit=True, connect_timeout=AUDIT_CONNECT_TIMEOUT_SECONDS
             ) as conn:
@@ -389,39 +425,39 @@ def create_edge_app(
         except (psycopg.Error, OSError):
             metrics.audit_write_failed()
             return False
+        finally:
+            audit_slots.release()
         return True
 
-    async def verified(
-        request: Request, address_key: str
-    ) -> Principal | AuthFailure | Decision | None:
+    async def verified(request: Request, key: str) -> Principal | AuthFailure | Decision | None:
         """The caller, a failure (None: no bearer token), or the address's refusal."""
         # An address that keeps failing is refused before its tokens cost a verification.
-        admitted = auth_failures.admits(address_key)
+        admitted = auth_failures.admits(key)
         if not admitted.allowed:
             metrics.rate_limit_refused("auth_failures")
             return admitted
         token = bearer_token(request.headers.get("Authorization"))
         if token is None:
-            auth_failures.take(address_key)
+            auth_failures.take(key)
             metrics.authentication_failed()
             return None
         # Verification may refetch the identity provider's keys; that must not stall the loop.
         principal = await asyncio.to_thread(authenticate, token)
         if isinstance(principal, AuthFailure):
-            auth_failures.take(address_key)
+            auth_failures.take(key)
             metrics.authentication_failed()
         return principal
 
     async def a2a(request: Request) -> Response:
         address = request_address(request, trusted_proxies)
-        outcome = await verified(request, address or UNKNOWN_ADDRESS)
+        outcome = await verified(request, address_key(address))
         if isinstance(outcome, Decision):
             return too_many(None, outcome)
         if not isinstance(outcome, Principal):
             return unauthenticated(outcome)
         principal = outcome
-        address_key = address or UNKNOWN_ADDRESS
-        body = await request.body()
+        key = address_key(address)
+        body = await read_body(request)
         call = parse_call(body)
         decision = callers.take(principal.name)
         if not decision.allowed:
@@ -437,7 +473,7 @@ def create_edge_app(
         revoked = await revocation_refusal(principal, run_statuses)
         if revoked is not None:
             if revoked.status_code == 401:
-                auth_failures.take(address_key)
+                auth_failures.take(key)
                 metrics.authentication_failed()
             await audited(address, principal, Rejected(call.id, call.method, call.tenant, revoked))
             return revoked_response(call.id, revoked)
@@ -454,13 +490,19 @@ def create_edge_app(
         if not await audited(address, principal, call):
             return rpc_error(call.id, Refusal(AUDIT_UNAVAILABLE, "audit log unavailable"))
         if isinstance(call, Rejected):
-            return rpc_error(call.id, call.refusal)
+            return rpc_error(call.id, call.refusal, status_code=call.refusal.status_code)
         try:
             upstream = await forward.post(
                 RPC_PATH, content=body, headers=forward_headers(request, principal, edge_token)
             )
         except httpx.HTTPError:
             return rpc_error(call.id, Refusal(INTERNAL_ERROR, "task service unavailable"))
+        if upstream.status_code == 401:
+            # The task service checks only the edge's own token, never the caller's: this is
+            # the edge misconfigured, and passing the 401 on would sign the UI's users out.
+            log.error("the task service refused the edge token; check GOLEM_EDGE_TOKEN")
+            refusal = Refusal(INTERNAL_ERROR, "task service refused the edge")
+            return rpc_error(call.id, refusal, status_code=502)
         return Response(
             upstream.content,
             status_code=upstream.status_code,
@@ -475,7 +517,7 @@ def create_edge_app(
         return public_json(request, body, CARD_MAX_AGE_SECONDS)
 
     def anonymous_refusal(request: Request) -> Response | None:
-        admitted = directory.take(request_address(request, trusted_proxies) or UNKNOWN_ADDRESS)
+        admitted = directory.take(address_key(request_address(request, trusted_proxies)))
         if admitted.allowed:
             return None
         metrics.rate_limit_refused("directory")
@@ -490,7 +532,7 @@ def create_edge_app(
         if "authorization" not in request.headers:
             return anonymous_refusal(request) or listing(published, public=True)
         address = request_address(request, trusted_proxies)
-        outcome = await verified(request, address or UNKNOWN_ADDRESS)
+        outcome = await verified(request, address_key(address))
         if isinstance(outcome, Decision):
             return plain_too_many(outcome)
         if not isinstance(outcome, Principal):
@@ -513,7 +555,7 @@ def create_edge_app(
         revoked = await revocation_refusal(principal, run_statuses)
         if revoked is not None:
             if revoked.status_code == 401:
-                auth_failures.take(address or UNKNOWN_ADDRESS)
+                auth_failures.take(address_key(address))
                 metrics.authentication_failed()
             await written(
                 directory_entry(

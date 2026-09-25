@@ -22,7 +22,15 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from golem.metrics import Instrumented, Metrics
-from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
+from golem.ratelimit import (
+    LOGIN_RATE,
+    START_RATE,
+    Decision,
+    Limiter,
+    Network,
+    address_key,
+    client_address,
+)
 from golem.ui.edge import TASK_NOT_FOUND, EdgeError, EdgeUnauthorized, agent_card, rpc
 from golem.ui.oidc import (
     OidcClient,
@@ -53,10 +61,6 @@ MAX_GOAL_CHARS = 4000
 LIST_PAGE_SIZE = 50
 # a2a-sdk's page token is the base64 of a task id; anything else never came from the edge.
 PAGE_TOKEN = re.compile(r"^[A-Za-z0-9+/=_-]{1,256}$")
-# ADR 0012: /login writes a row per request, POST /tasks starts a run.
-LOGIN_RATE = Rate(per_minute=30, burst=10)
-START_RATE = Rate(per_minute=10, burst=5)
-UNKNOWN_ADDRESS = "unknown"
 NONCE = re.compile(r"^[A-Za-z0-9_-]{22,64}$")
 FORM = "application/x-www-form-urlencoded"
 
@@ -203,7 +207,7 @@ def create_ui_app(
         # Every sign-in started stores a transaction; anonymous GETs must not fill the table.
         peer = request.client.host if request.client else None
         address = client_address(peer, request.headers.getlist("x-forwarded-for"), trusted_proxies)
-        decision = logins.take(address or UNKNOWN_ADDRESS)
+        decision = logins.take(address_key(address))
         if not decision.allowed:
             metrics.rate_limit_refused("login")
             return too_many(decision)
@@ -338,7 +342,8 @@ def create_ui_app(
             )
         except EdgeError as failure:
             return error(502, f"The task was not started: {failure}", session)
-        task = result.get("task") if isinstance(result.get("task"), dict) else {}
+        task = result.get("task")
+        task = task if isinstance(task, dict) else {}
         if not isinstance(task.get("id"), str) or not task["id"]:
             return error(502, "The task was not started.", session)
         return RedirectResponse(f"/tasks/{agent}/{task['id']}", status_code=303)
@@ -356,7 +361,8 @@ def create_ui_app(
             result = await rpc(edge, session.access_token, "ListTasks", params)
         except EdgeError as failure:
             return error(502, f"Tasks could not be listed: {failure}", session)
-        tasks = result.get("tasks") if isinstance(result.get("tasks"), list) else []
+        tasks = result.get("tasks")
+        tasks = tasks if isinstance(tasks, list) else []
         views = [view for view in (task_view(t, agents) for t in tasks) if view is not None]
         next_page = result.get("nextPageToken")
         return render(

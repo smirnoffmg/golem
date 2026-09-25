@@ -1,3 +1,5 @@
+import socket
+import threading
 from collections.abc import AsyncIterator, Iterator
 from typing import TYPE_CHECKING
 
@@ -80,3 +82,31 @@ def k3s_api_client(k3s: "K3SContainer") -> Iterator[ApiClient]:
     )
     with api_client:
         yield api_client
+
+
+@pytest.fixture
+def silent_server() -> Iterator[str]:
+    """``host:port`` of a server that accepts connections and never answers, like a peer
+    behind a stalled link."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    server.settimeout(0.1)
+    accepted: list[socket.socket] = []
+    stopping = threading.Event()
+
+    def accept() -> None:
+        while not stopping.is_set():
+            try:
+                accepted.append(server.accept()[0])
+            except OSError:
+                continue
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    yield f"127.0.0.1:{server.getsockname()[1]}"
+    stopping.set()
+    thread.join()
+    for conn in accepted:
+        conn.close()
+    server.close()

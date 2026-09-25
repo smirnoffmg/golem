@@ -37,10 +37,10 @@ async def rpc(
         body = response.json()
     except ValueError as error:
         raise EdgeError(None, f"the edge answered {response.status_code}") from error
-    error = body.get("error") if isinstance(body, dict) else None
-    if isinstance(error, dict):
-        code = error.get("code") if isinstance(error.get("code"), int) else None
-        raise EdgeError(code, str(error.get("message") or "error"))
+    refusal = body.get("error") if isinstance(body, dict) else None
+    if isinstance(refusal, dict):
+        code = refusal.get("code") if isinstance(refusal.get("code"), int) else None
+        raise EdgeError(code, str(refusal.get("message") or "error"))
     result = body.get("result") if isinstance(body, dict) else None
     if not isinstance(result, dict):
         raise EdgeError(None, "the edge answered without a result")

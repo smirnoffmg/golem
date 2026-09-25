@@ -7,13 +7,13 @@ from decimal import Decimal
 
 import psycopg
 import pytest
-from test_reconcile import Inbox, StatusBoard, new_run
+from test_reconcile import Inbox, StatusBoard, age, new_run
 from test_tasks_to_runs import CATALOG, SIGNING_KEY, TEMPLATE, FakeLauncher
 
 from golem.metrics import OTHER, Metrics, ReconcilerMetrics
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import JobStatus
-from golem.orchestrator.reconcile import SucceededRun, reconcile_once
+from golem.orchestrator.reconcile import LAUNCH_GRACE_SECONDS, SucceededRun, reconcile_once
 from golem.orchestrator.reconciler import run_forever
 from golem.orchestrator.service import PostgresOrchestrator
 from golem.tasks.ports import Refused, RunStart, Started
@@ -104,6 +104,7 @@ async def test_the_reconciler_records_each_run_outcome_once(
 ) -> None:
     metrics = ReconcilerMetrics(Metrics("reconciler", agents={"discovery"}))
     run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
     board = StatusBoard(statuses={run_id: job})
     if report is not None:
         board.messages[run_id] = json.dumps(report)

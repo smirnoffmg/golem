@@ -13,17 +13,18 @@ from typing import Any
 
 import httpx
 import pytest
-from test_reconcile import Inbox, StatusBoard, connect, new_run, recorded, run_status
+from test_reconcile import Inbox, StatusBoard, age, connect, new_run, recorded, run_status
 
 from golem.orchestrator.jobs import JobStatus
 from golem.orchestrator.merge_requests import (
     GitLabError,
     GitLabMergeRequests,
     GitLabProject,
+    has_proposal,
     propose_merge_request,
     run_branch,
 )
-from golem.orchestrator.reconcile import SucceededRun, reconcile_once
+from golem.orchestrator.reconcile import LAUNCH_GRACE_SECONDS, SucceededRun, reconcile_once
 
 PROJECT = "product/discovery-context"
 ENCODED_PROJECT = "product%2Fdiscovery-context"
@@ -234,8 +235,71 @@ async def reconcile(dsn: str, board: StatusBoard, inbox: Inbox, gitlab: GitLabMe
     async def propose(run: SucceededRun) -> str:
         return await propose_merge_request(gitlab, run)
 
+    async def proposed(run: SucceededRun) -> bool:
+        return await has_proposal(gitlab, run)
+
     async with await connect(dsn) as conn:
-        await reconcile_once(conn, board, inbox.notify, propose)
+        await reconcile_once(conn, board, inbox.notify, propose, proposed=proposed)
+
+
+# A Job is deleted by its TTL after it finishes; a reconciler that was down longer than that
+# finds it gone. The branch the run pushed is the durable proof that it succeeded.
+
+
+async def test_a_job_gone_after_pushing_its_branch_is_a_succeeded_run(
+    runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    board, inbox = StatusBoard(), Inbox()
+    run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
+    gitlab.branches = [f"golem/H-7/{run_id}"]
+    board.statuses[run_id] = JobStatus.MISSING
+
+    await reconcile(runs_db, board, inbox, merge_requests)
+
+    [mr] = gitlab.merge_requests
+    [outcome] = inbox.received
+    run = await recorded(runs_db, outcome.task_id)
+    assert run.status == "succeeded"
+    assert mr["web_url"] in run.detail
+
+
+async def test_a_job_gone_without_a_branch_is_a_failed_run(
+    runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    board, inbox = StatusBoard(), Inbox()
+    run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
+    board.statuses[run_id] = JobStatus.MISSING
+
+    await reconcile(runs_db, board, inbox, merge_requests)
+
+    assert await run_status(runs_db, run_id) == "failed"
+    assert gitlab.merge_requests == []
+
+
+async def test_a_job_gone_while_gitlab_is_down_stays_running_until_gitlab_answers(
+    runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    board, inbox = StatusBoard(), Inbox()
+    run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
+    gitlab.branches = [f"golem/H-7/{run_id}"]
+    board.statuses[run_id] = JobStatus.MISSING
+    gitlab.down = True
+
+    await reconcile(runs_db, board, inbox, merge_requests)
+    assert await run_status(runs_db, run_id) == "running"
+
+    gitlab.down = False
+    await reconcile(runs_db, board, inbox, merge_requests)
+    assert await run_status(runs_db, run_id) == "succeeded"
+
+
+async def test_an_agent_without_a_project_has_no_proposal(
+    merge_requests: GitLabMergeRequests,
+) -> None:
+    assert not await has_proposal(merge_requests, SucceededRun("run-1", "unconfigured"))
 
 
 async def test_a_succeeded_run_notifies_its_task_with_the_merge_request_url(
@@ -243,6 +307,7 @@ async def test_a_succeeded_run_notifies_its_task_with_the_merge_request_url(
 ) -> None:
     board, inbox = StatusBoard(), Inbox()
     run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
     gitlab.branches = [f"golem/H-7/{run_id}"]
     board.statuses[run_id] = JobStatus.SUCCEEDED
 
@@ -261,6 +326,7 @@ async def test_an_idle_run_notifies_that_it_proposed_nothing(
 ) -> None:
     board, inbox = StatusBoard(), Inbox()
     run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
     board.statuses[run_id] = JobStatus.SUCCEEDED
 
     await reconcile(runs_db, board, inbox, merge_requests)
@@ -275,6 +341,7 @@ async def test_a_gitlab_outage_holds_the_notification_until_the_merge_request_op
 ) -> None:
     board, inbox = StatusBoard(), Inbox()
     run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
     gitlab.branches = [f"golem/H-7/{run_id}"]
     board.statuses[run_id] = JobStatus.SUCCEEDED
     gitlab.down = True
@@ -319,6 +386,7 @@ async def test_a_merge_request_opened_before_a_crash_is_not_opened_twice(
 ) -> None:
     board, inbox = StatusBoard(), Inbox()
     run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
     branch = f"golem/H-7/{run_id}"
     gitlab.branches = [branch]
     board.statuses[run_id] = JobStatus.SUCCEEDED
@@ -336,6 +404,7 @@ async def test_an_idle_run_keeps_the_reasons_from_its_report(
 ) -> None:
     board, inbox = StatusBoard(), Inbox()
     run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
     board.statuses[run_id] = JobStatus.SUCCEEDED
     board.messages[run_id] = '{"outcome": "idle", "reasons": ["researcher: all pending"]}'
 

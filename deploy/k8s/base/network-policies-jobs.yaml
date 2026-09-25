@@ -55,15 +55,14 @@ spec:
       ports:
         - protocol: TCP
           port: 443
-    # Placeholder: the Git host (clone and push of the run's branch), HTTPS and SSH.
+    # Placeholder: the Git host (clone and push of the run's branch). HTTPS only: the runtime
+    # authenticates with a header, never over SSH.
     - to:
         - ipBlock:
             cidr: 198.51.100.30/32
       ports:
         - protocol: TCP
           port: 443
-        - protocol: TCP
-          port: 22
     - to:
         - namespaceSelector:
             matchLabels:

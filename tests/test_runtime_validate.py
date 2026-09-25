@@ -1,12 +1,13 @@
 from pathlib import Path
 
-from golem.catalog import Role
+from golem.catalog import Kind, Role
 from golem.runtime.lead import Record
 from golem.runtime.snapshot import Located
 from golem.runtime.validate import (
     ContextState,
     broken_context,
     changed_statuses,
+    new_records_start_initial,
     no_changes,
     outside_writes,
     read_state,
@@ -15,6 +16,9 @@ from golem.runtime.validate import (
 )
 
 RESEARCHER = Role(name="researcher", writes="hypotheses/")
+KINDS = (
+    Kind(name="hypothesis", initial="proposed", statuses=frozenset({"proposed", "validated"})),
+)
 
 
 def located(source: str, rid: str, status: str = "proposed") -> Located:
@@ -167,6 +171,7 @@ def test_validate_collects_every_violation():
         changed=("solutions/S-1.md",),
         before=before,
         after=after,
+        kinds=KINDS,
     )
 
     assert violations == (
@@ -187,6 +192,44 @@ def test_validate_passes_a_clean_change():
             changed=("hypotheses/H-2.md",),
             before=records,
             after=records,
+            kinds=KINDS,
         )
         == ()
+    )
+
+
+def test_a_new_record_starts_in_its_kinds_initial_status():
+    before = state(located("hypotheses/H-1.md", "H-1"))
+    after = state(located("hypotheses/H-1.md", "H-1"), located("hypotheses/H-2.md", "H-2"))
+
+    assert new_records_start_initial(before, after, KINDS) == ()
+
+
+def test_a_new_record_may_not_arrive_already_decided():
+    # Otherwise a role skips the human decision by creating the record in its decided status.
+    before = state(located("hypotheses/H-1.md", "H-1"))
+    after = state(
+        located("hypotheses/H-1.md", "H-1"), located("hypotheses/H-2.md", "H-2", "validated")
+    )
+
+    assert new_records_start_initial(before, after, KINDS) == (
+        "new record H-2 has status 'validated'; a new hypothesis starts as 'proposed'",
+    )
+
+
+def test_a_renamed_record_is_a_new_record():
+    before = state(located("hypotheses/H-1.md", "H-1", "validated"))
+    after = state(located("hypotheses/H-1.md", "H-9", "validated"))
+
+    assert new_records_start_initial(before, after, KINDS) != ()
+
+
+def test_a_new_record_of_an_undeclared_kind_is_refused():
+    record = Record(
+        id="X-1", kind="memo", status="draft", links=frozenset(), empty_sections=frozenset()
+    )
+    after = state(Located(source="hypotheses/X-1.md", record=record))
+
+    assert new_records_start_initial(state(), after, KINDS) == (
+        "new record X-1 is of kind 'memo', which the catalog does not declare",
     )

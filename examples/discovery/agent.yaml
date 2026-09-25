@@ -19,9 +19,11 @@ skills:
     tags: [discovery]
 kinds:
   - name: hypothesis
+    initial: proposed
     statuses: [proposed, validated, rejected]
     sections: [Problem, Evidence]
   - name: solution
+    initial: proposed
     statuses: [proposed, accepted, rejected]
     sections: [Approach, Risks, Review]
 roles:

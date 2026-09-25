@@ -83,7 +83,7 @@ A2A tasks, run admission, Job launch, run tokens. Three listeners, one per kind 
 | `GOLEM_KUBERNETES_NAMESPACE` | required | where runs' Jobs are created (`golem-jobs`) |
 | `GOLEM_KUBERNETES` | required | `in-cluster`, `kubeconfig` or `none` (starts, refuses every run: local development only) |
 | `GOLEM_PUBLIC_BASE_URL` | required | the edge's public address, written into the service card |
-| `GOLEM_EDGE_TOKEN` | required | the same value as the edge's; requests without it get 401 |
+| `GOLEM_EDGE_TOKEN` | required | the same value as the edge's; requests without it get 401, which the edge turns into 502 for its caller |
 | `GOLEM_PUSH_ALLOWED_PREFIXES` | none: push notifications off | comma-separated URL prefixes, each ending with `/`, a push may go to (the adapters' Services) |
 | `GOLEM_PUSH_CONFIG_KEY` | required with `GOLEM_PUSH_ALLOWED_PREFIXES` | Fernet key that encrypts push configs (they hold the adapters' push tokens) in `golem_tasks` |
 | `GOLEM_MCP_REGISTRY_CONFIGMAP` | none | a ConfigMap in the Jobs namespace mounted into every run as the [MCP registry](#mcp-registry) |

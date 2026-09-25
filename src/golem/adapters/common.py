@@ -17,9 +17,11 @@ from a2a.utils.constants import VERSION_HEADER
 from starlette.requests import Request
 from starlette.responses import Response
 
-from golem.ratelimit import Limiter, Network, client_address
+from golem.ratelimit import Limiter, Network, address_key, client_address
 
 PUSH_PATH = "/a2a/push"
+# Far past a run's deadline and the reconciler's retries of its outcome.
+PUSH_TOKEN_LIFETIME_SECONDS = 24 * 3600
 EDGE_RPC_PATH = "/a2a"
 A2A_VERSION = "1.0"
 # The header a2a-sdk's push sender puts the configured per-task token in.
@@ -33,7 +35,6 @@ TERMINAL_STATES = frozenset(
     }
 )
 TOKEN_REFRESH_MARGIN_SECONDS = 30.0
-UNKNOWN_ADDRESS = "unknown"
 
 log = logging.getLogger("golem.adapters")
 
@@ -98,25 +99,30 @@ def rate_limited(
     so a flood of forged requests costs no HMAC and no log line past the limit."""
     peer = request.client.host if request.client else None
     address = client_address(peer, request.headers.getlist("x-forwarded-for"), trusted_proxies)
-    decision = limiter.take(address or UNKNOWN_ADDRESS)
+    decision = limiter.take(address_key(address))
     if decision.allowed:
         return None
     return Response(status_code=429, headers={"Retry-After": str(decision.retry_after)})
 
 
-def push_token(secret: bytes, subject: str, message: str) -> str:
+def push_token(secret: bytes, subject: str, message: str, *, now: float | None = None) -> str:
     """A token naming where a run's outcome goes; only the adapter holding the secret can mint
-    one, so a push that names a subject the adapter never started is refused."""
+    one, so a push that names a subject the adapter never started is refused. It expires, so a
+    token that leaks from the task service's push config stops working."""
     nonce = hashlib.sha256(message.encode()).hexdigest()[:16]
-    return f"{subject}.{nonce}.{_push_mac(secret, subject, nonce)}"
+    issued = str(int(time.time() if now is None else now))
+    return f"{subject}.{issued}.{nonce}.{_push_mac(secret, subject, issued, nonce)}"
 
 
-def subject_of_push_token(secret: bytes, token: str) -> str | None:
-    parts = token.rsplit(".", 2)
-    if len(parts) != 3 or not all(parts):
+def subject_of_push_token(secret: bytes, token: str, *, now: float | None = None) -> str | None:
+    parts = token.rsplit(".", 3)
+    if len(parts) != 4 or not all(parts) or not parts[1].isdigit():
         return None
-    subject, nonce, mac = parts
-    return subject if hmac.compare_digest(_push_mac(secret, subject, nonce), mac) else None
+    subject, issued, nonce, mac = parts
+    if not hmac.compare_digest(_push_mac(secret, subject, issued, nonce), mac):
+        return None
+    age = (time.time() if now is None else now) - int(issued)
+    return subject if age <= PUSH_TOKEN_LIFETIME_SECONDS else None
 
 
 def send_message_request(
@@ -198,8 +204,8 @@ def state_word(state: str) -> str:
     return state.removeprefix("TASK_STATE_").lower()
 
 
-def _push_mac(secret: bytes, subject: str, nonce: str) -> str:
-    return hmac.new(secret, f"push:{subject}.{nonce}".encode(), hashlib.sha256).hexdigest()
+def _push_mac(secret: bytes, subject: str, issued: str, nonce: str) -> str:
+    return hmac.new(secret, f"push:{subject}.{issued}.{nonce}".encode(), hashlib.sha256).hexdigest()
 
 
 def _message_text(message: Any) -> str:

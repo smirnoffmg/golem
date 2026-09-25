@@ -97,6 +97,14 @@ class GitLabMergeRequests:
         return response.json()
 
 
+async def has_proposal(gitlab: GitLabMergeRequests, run: SucceededRun) -> bool:
+    """Whether the run pushed its branch; raises GitLabError when GitLab cannot say."""
+    try:
+        return await gitlab.find_branch(run.agent, run.run_id) is not None
+    except ProjectNotConfigured:
+        return False
+
+
 async def propose_merge_request(gitlab: GitLabMergeRequests, run: SucceededRun) -> str:
     try:
         branch = await gitlab.find_branch(run.agent, run.run_id)
