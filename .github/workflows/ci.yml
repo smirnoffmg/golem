@@ -19,7 +19,8 @@ jobs:
       - run: uv run pre-commit run --all-files --show-diff-on-failure
       - run: uv run pytest
 
-  # A second stage: the real image as a Job in k3s. It runs only after the fast checks pass.
+  # A second stage: the real image as a Job in k3s, and the web UI in Chromium. It runs only
+  # after the fast checks pass.
   e2e:
     needs: check
     runs-on: ubuntu-latest
@@ -28,4 +29,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - run: uv sync --frozen
+      # The headless shell is what headless Chromium runs; --with-deps adds its system libraries.
+      - run: uv run playwright install --with-deps --only-shell chromium
       - run: uv run pytest -m e2e

@@ -150,7 +150,10 @@ def seed_bare(work: Path, branch: str, bare: Path) -> Path:
         [*AUTHOR, *NO_SIGNING, "commit", "--quiet", "--no-verify", "--allow-empty", "-m", "seed"],
         work,
     )
-    git(["clone", "--quiet", "--bare", "--", str(work), str(bare)])
+    # --no-local: a local clone walks the source's object directory and hardlinks each file,
+    # which failed now and then with "No such file or directory" on an object; the pack
+    # protocol reads objects through git instead.
+    git(["clone", "--quiet", "--bare", "--no-local", "--", str(work), str(bare)])
     return bare
 
 

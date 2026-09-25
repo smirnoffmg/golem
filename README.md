@@ -93,10 +93,15 @@ examples/
   discovery/evals/         its golden set; discovery/.gitlab-ci.yml runs the gate on merge requests
   context/                 an example context repository the discovery agent works on
   mcp-registry.yaml        an example platform MCP registry for the discovery roles
+scripts/
+  ui_demo.py               the web UI with seeded tasks on localhost, to look around
+  ui_screenshots.py        the screenshots in docs/images/ui
+tests/support/             the fake identity provider and the UI demo stack, shared with scripts/
 docs/
   architecture.md          C4 diagrams (PlantUML)
   adr/                     architecture decision records
   operations/alerts.md     the metrics and PrometheusRule examples
+  images/ui/               screenshots of the web UI
 Dockerfile                 one image; the container role is chosen by the command
 ```
 
@@ -111,7 +116,8 @@ uv run pytest               # needs Docker: Postgres tests run in testcontainers
 uv run ruff check .
 docker compose -f deploy/compose.yaml up --build
 GOLEM_SMOKE=1 uv run pytest tests/test_compose_smoke.py   # builds, starts and removes compose
-uv run pytest -m e2e        # the image as a Job in k3s; about two minutes with a warm build cache
+uv run playwright install --only-shell chromium   # once, for the web UI in a browser
+uv run pytest -m e2e        # the image as a Job in k3s, the UI in Chromium; about two minutes
 ```
 
 The e2e suite (`tests/e2e`) is excluded from a plain `pytest` and runs in CI as a second stage
@@ -120,7 +126,11 @@ container with `ctr images import`, starts a `git daemon` with the example catal
 tools) and context, and a scripted OpenAI-compatible model server from a ConfigMap. Then it
 launches runs through `KubernetesJobLauncher`: one that proposes `golem/H-2/<run>` with only the
 Evidence section changed, and three against a gateway that answers garbage, answers megabytes
-or never answers, each of which must fail with nothing pushed.
+or never answers, each of which must fail with nothing pushed. `tests/e2e/test_ui_browser.py`
+drives the web UI in headless Chromium against the demo stack below: no console errors and no
+CSP violation reports, golem.css applied, the security headers on every response, every link
+answering, the form starting exactly one run, sign-out back on the landing page, and the task
+list fitting a 390 px wide screen.
 
 One image, seven processes: `python -m golem.edge`, `python -m golem.tasks`,
 `python -m golem.orchestrator.reconciler`, the channel adapters
@@ -279,6 +289,23 @@ backend-for-frontend: the browser gets pages and one cookie, never a token.
 - **In the browser**: server-rendered Jinja2 with autoescape, no scripts, no third-party
   assets; every `POST` carries the session's CSRF token; every response has a strict
   Content-Security-Policy, `nosniff`, `Referrer-Policy: same-origin` and, over https, HSTS.
+
+To look at it, `uv run python scripts/ui_demo.py` starts Postgres (testcontainers), the real
+UI, edge and task service with a fake Job launcher, and a fake identity provider that signs in
+`alice` without a password, then seeds a task in every state; open `http://localhost:8090`
+(`--port` to change it). `uv run python scripts/ui_screenshots.py` runs the same stack with ids
+and timestamps frozen and writes the screenshots below to `docs/images/ui/` (headless Chromium,
+1280x800, the task list also 390x844; the same bytes on every run).
+
+| | |
+|---|---|
+| ![Sign in](docs/images/ui/sign-in.png) | ![Agents](docs/images/ui/agents.png) |
+| ![New task](docs/images/ui/new-task.png) | ![My tasks](docs/images/ui/tasks.png) |
+| ![Working](docs/images/ui/task-working.png) | ![Completed, with a merge request](docs/images/ui/task-completed.png) |
+| ![Failed validation](docs/images/ui/task-failed.png) | ![Rejected by admission](docs/images/ui/task-rejected.png) |
+| ![Canceled](docs/images/ui/task-canceled.png) | ![Rate limited](docs/images/ui/error-rate-limited.png) |
+
+![My tasks on a phone](docs/images/ui/tasks-narrow.png)
 
 At the identity provider, register `GOLEM_OIDC_REDIRECT_URL` (`GOLEM_PUBLIC_BASE_URL` +
 `/callback`) and `GOLEM_PUBLIC_BASE_URL` + `/` as the post-logout redirect URL.

@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -36,6 +37,17 @@ def merge_request_link(text: str) -> str | None:
     return match[1] if url.scheme in ("http", "https") and url.hostname else None
 
 
+def shown_time(timestamp: str) -> str:
+    """An RFC 3339 status timestamp to the minute in UTC; anything else as it came."""
+    try:
+        moment = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return timestamp
+    if moment.tzinfo is None:
+        return timestamp
+    return moment.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
 def task_view(task: Any, agents: tuple[str, ...]) -> TaskView | None:
     if not isinstance(task, dict) or not isinstance(task.get("id"), str) or not task["id"]:
         return None
@@ -51,7 +63,7 @@ def task_view(task: Any, agents: tuple[str, ...]) -> TaskView | None:
         state=state_word(state) if state else "unknown",
         goal=message_text(first),
         message=message,
-        updated=str(status.get("timestamp") or ""),
+        updated=shown_time(str(status.get("timestamp") or "")),
         merge_request=merge_request_link(message),
         finished=state in TERMINAL_STATES,
     )

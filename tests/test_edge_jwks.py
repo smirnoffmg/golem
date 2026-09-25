@@ -1,6 +1,5 @@
 """The edge's signing keys: fetched from the IdP's JWKS URL, refreshed on an unknown key id."""
 
-import json
 import time
 from functools import partial
 from typing import Any
@@ -9,6 +8,7 @@ import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from support.idp import jwk
 from test_edge_auth import AUDIENCE, ISSUER, claims
 
 from golem.edge.__main__ import authenticator
@@ -18,11 +18,6 @@ from golem.jwks import SigningKeys, fetch_jwks
 JWKS_URL = "https://idp.example.test/realms/golem/protocol/openid-connect/certs"
 OLD_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 NEW_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-
-
-def jwk(private_key: Any, kid: str) -> dict[str, Any]:
-    public = json.loads(jwt.get_algorithm_by_name("RS256").to_jwk(private_key.public_key()))
-    return {**public, "kid": kid, "alg": "RS256", "use": "sig"}
 
 
 class IdP:

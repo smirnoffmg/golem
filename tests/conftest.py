@@ -1,25 +1,19 @@
 from collections.abc import AsyncIterator, Iterator
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import psycopg
 import pytest
 from kubernetes.client import ApiClient
+from support.demo import postgres_container
 from testcontainers.community.postgres import PostgresContainer
 
 if TYPE_CHECKING:
     from testcontainers.community.k3s import K3SContainer
 
-INIT_SQL = Path(__file__).parent.parent / "deploy" / "postgres" / "init.sql"
-
 
 @pytest.fixture(scope="session")
 def postgres() -> Iterator[PostgresContainer]:
-    # The same init.sql as deploy/, so tests exercise the real roles and grants.
-    container = PostgresContainer("postgres:17", driver=None).with_volume_mapping(
-        str(INIT_SQL), "/docker-entrypoint-initdb.d/init.sql", "ro"
-    )
-    with container:
+    with postgres_container() as container:
         yield container
 
 

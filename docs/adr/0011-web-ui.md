@@ -114,8 +114,11 @@ minute or less left, under a row lock so concurrent requests refresh once; a ref
 must name the same subject. A failed refresh, or a refused token at the edge, deletes the
 session and sends the browser to sign in. Twelve hours after login a session ends whatever the
 refreshes. `/logout` deletes the row, clears the cookie and, if discovery names an
-`end_session_endpoint`, redirects there with `id_token_hint`, `client_id` and
-`post_logout_redirect_uri` = the UI's base URL + `/`.
+`end_session_endpoint`, sends the browser there with `id_token_hint`, `client_id` and
+`post_logout_redirect_uri` = the UI's base URL + `/`. It answers with a page that moves on by
+`<meta http-equiv="refresh">` (and a link), not with a redirect: browsers apply CSP
+`form-action` to the redirects that follow a form's `POST`, so `form-action 'self'` would block
+a redirect to the provider, as Chromium did in the browser check.
 
 **Pages.** Jinja2 with autoescape on, no inline script or style, no third-party assets; the one
 stylesheet is served by the UI. Agents come from the edge's public cards for

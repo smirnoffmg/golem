@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Golem: signed out{% endblock %}
+{% block head %}<meta http-equiv="refresh" content="0; url={{ target }}">{% endblock %}
+{% block main %}
+<h1>Signed out</h1>
+<p>You are signed out of Golem. Signing you out at your identity provider too&hellip;</p>
+<p><a class="button" href="{{ target }}">Continue</a></p>
+{% endblock %}

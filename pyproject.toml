@@ -43,10 +43,10 @@ packages = ["src/golem"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-# Slow checks in a real cluster (the image as a Job, network traffic); CI runs them as their
-# own stage after the fast checks.
+# Slow checks in a real cluster (the image as a Job, network traffic) and in a real browser
+# (the web UI in Chromium); CI runs them as their own stage after the fast checks.
 addopts = "-m 'not e2e'"
-markers = ["e2e: slow checks in a real cluster (run with -m e2e)"]
+markers = ["e2e: slow checks in a real cluster or browser (run with -m e2e)"]
 
 [tool.ruff]
 line-length = 100

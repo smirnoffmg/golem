@@ -280,7 +280,13 @@ def create_ui_app(
             )
         except OidcError:
             target = None
-        response = RedirectResponse(target or "/", status_code=303)
+        # Browsers apply CSP form-action to the redirects that follow a form's POST, so this
+        # POST cannot redirect to the provider; the page it returns refreshes there instead.
+        response = (
+            RedirectResponse("/", status_code=303)
+            if target is None
+            else render("signed_out.html", session=None, target=target)
+        )
         response.headers.append("set-cookie", cleared(SESSION_COOKIE))
         return response
 

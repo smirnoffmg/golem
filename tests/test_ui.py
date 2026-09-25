@@ -1,36 +1,20 @@
 """The web UI as a backend-for-frontend, end to end: browser -> UI -> real edge -> real task
 service, with the identity provider faked at its HTTP boundary.
 
-The fake identity provider implements what the UI calls, with the shapes of:
-
-- OpenID Connect Discovery 1.0, section 3 (provider metadata: issuer, authorization_endpoint,
-  token_endpoint, jwks_uri) and 4.3 (the issuer must equal the one discovery was asked for);
-  OpenID Connect RP-Initiated Logout 1.0, section 2 (end_session_endpoint, id_token_hint,
-  client_id, post_logout_redirect_uri).
-- OpenID Connect Core 1.0, 3.1.2.1 (authorization request: scope with openid, response_type
-  code, client_id, redirect_uri, state, nonce), 3.1.2.5 (code and state back to redirect_uri),
-  3.1.2.6 (error and state back), 3.1.3.1 (token request), 3.1.3.3 (token response: id_token,
-  access_token, token_type Bearer, expires_in), 3.1.3.7 (ID token validation), 12.1 and 12.2
-  (refresh: iss, sub and aud of a new ID token are those of the first).
-- RFC 6749, 2.3.1 (client_secret_basic, the id and secret form-urlencoded first), 4.1.3 (token
-  request with the authorization_code grant), 5.1 (token response, no-store), 5.2 (error
-  invalid_grant with status 400), 6 (refresh_token grant; a new refresh token replaces the old).
-- RFC 7636, 4.1 (verifier: 43 to 128 unreserved characters), 4.2 (S256: BASE64URL(SHA256(
-  ASCII(verifier)))), 4.3 (code_challenge, code_challenge_method), 4.5 and 4.6 (code_verifier in
-  the token request, checked against the challenge).
+The identity provider is tests/support/idp.py.
 """
 
 import base64
 import hashlib
+import html
 import re
 import secrets
-import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from functools import partial
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import jwt
@@ -38,8 +22,21 @@ import psycopg
 import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import rsa
+from support.idp import (
+    AUTHORIZE_PATH,
+    CLIENT_ID,
+    CLIENT_SECRET,
+    DISCOVERY_PATH,
+    EDGE_AUDIENCE,
+    END_SESSION_PATH,
+    IDP_KEY,
+    ISSUER,
+    JWKS_PATH,
+    PUBLIC_URL,
+    Clock,
+    FakeIdP,
+)
 from test_edge_app import EDGE_TOKEN, discovery_card
-from test_edge_jwks import jwk
 from test_tasks_service import FakeOrchestrator, make_card
 from test_tasks_to_runs import CATALOG, SIGNING_KEY, TEMPLATE, FakeLauncher
 from testcontainers.community.postgres import PostgresContainer
@@ -56,171 +53,20 @@ from golem.settings import SettingsError, ui_settings
 from golem.tasks.app import create_listeners
 from golem.tasks.ports import Orchestrator
 from golem.ui.app import SESSION_COOKIE, create_ui_app
-from golem.ui.oidc import CLOCK_SKEW_SECONDS, OidcClient, s256
+from golem.ui.oidc import CLOCK_SKEW_SECONDS, OidcClient
 from golem.ui.store import SessionStore, apply_schema
-from golem.ui.views import merge_request_link
+from golem.ui.views import merge_request_link, shown_time
 
-ISSUER = "https://idp.example.test/realms/golem"
-DISCOVERY_URL = f"{ISSUER}/.well-known/openid-configuration"
-AUTHORIZE_URL = f"{ISSUER}/protocol/openid-connect/auth"
-TOKEN_URL = f"{ISSUER}/protocol/openid-connect/token"
-JWKS_URL = f"{ISSUER}/protocol/openid-connect/certs"
-END_SESSION_URL = f"{ISSUER}/protocol/openid-connect/logout"
-CLIENT_ID = "golem-ui"
-# Characters that client_secret_basic must form-urlencode before Base64 (RFC 6749, 2.3.1).
-CLIENT_SECRET = "s3cret:with/odd+chars"
-EDGE_AUDIENCE = "golem-edge"
-PUBLIC_URL = "https://golem-ui.example.test"
+DISCOVERY_URL = f"{ISSUER}{DISCOVERY_PATH}"
+AUTHORIZE_URL = f"{ISSUER}{AUTHORIZE_PATH}"
+JWKS_URL = f"{ISSUER}{JWKS_PATH}"
+END_SESSION_URL = f"{ISSUER}{END_SESSION_PATH}"
 REDIRECT_URL = f"{PUBLIC_URL}/callback"
 AGENTS = ("discovery", "reviewer")
-IDP_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 ROGUE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 SESSION_KEY = Fernet.generate_key().decode()
 CSP = "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
 PKCE_ALPHABET = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
-
-
-class Clock:
-    def __init__(self) -> None:
-        self.now = time.time()
-
-    def __call__(self) -> float:
-        return self.now
-
-
-@dataclass
-class Grant:
-    user: str
-    client_id: str
-    redirect_uri: str
-    nonce: str
-    challenge: str
-
-
-@dataclass
-class FakeIdP:
-    clock: Clock
-    expires_in: int = 300
-    codes: dict[str, Grant] = field(default_factory=dict)
-    refresh_tokens: dict[str, Grant] = field(default_factory=dict)
-    token_requests: list[dict[str, list[str]]] = field(default_factory=list)
-    refuse_refresh: bool = False
-    end_session: bool = True
-    # Overrides of the ID token's claims, or another signing key, to test the UI's checks.
-    id_token_claims: dict[str, Any] = field(default_factory=dict)
-    id_token_key: Any = IDP_KEY
-
-    def handle(self, request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        if url == DISCOVERY_URL and request.method == "GET":
-            return httpx.Response(200, json=self.metadata())
-        if url == JWKS_URL and request.method == "GET":
-            return httpx.Response(200, json={"keys": [jwk(IDP_KEY, "idp-key")]})
-        if url == TOKEN_URL and request.method == "POST":
-            return self.token(request)
-        return httpx.Response(404)
-
-    def metadata(self) -> dict[str, Any]:
-        metadata = {
-            "issuer": ISSUER,
-            "authorization_endpoint": AUTHORIZE_URL,
-            "token_endpoint": TOKEN_URL,
-            "jwks_uri": JWKS_URL,
-            "response_types_supported": ["code"],
-            "subject_types_supported": ["public"],
-            "id_token_signing_alg_values_supported": ["RS256"],
-            "code_challenge_methods_supported": ["S256"],
-        }
-        if self.end_session:
-            metadata["end_session_endpoint"] = END_SESSION_URL
-        return metadata
-
-    def authorize(self, location: str, user: str) -> str:
-        """The user agent at the authorization endpoint: the user signs in, a code is issued."""
-        assert location.startswith(f"{AUTHORIZE_URL}?")
-        params = {k: v for k, [v] in parse_qs(urlsplit(location).query).items()}
-        assert params["response_type"] == "code"
-        assert "openid" in params["scope"].split()
-        assert params["client_id"] == CLIENT_ID
-        assert params["redirect_uri"] == REDIRECT_URL
-        assert params["code_challenge_method"] == "S256"
-        assert params["state"] and params["nonce"]
-        code = secrets.token_urlsafe(16)
-        self.codes[code] = Grant(
-            user, CLIENT_ID, params["redirect_uri"], params["nonce"], params["code_challenge"]
-        )
-        return code
-
-    def token(self, request: httpx.Request) -> httpx.Response:
-        assert request.headers["content-type"] == "application/x-www-form-urlencoded"
-        scheme, _, credentials = request.headers.get("authorization", "").partition(" ")
-        client_id, _, secret = base64.b64decode(credentials).decode().partition(":")
-        if scheme != "Basic" or (unquote(client_id), unquote(secret)) != (CLIENT_ID, CLIENT_SECRET):
-            return httpx.Response(401, json={"error": "invalid_client"})
-        form = parse_qs(request.content.decode())
-        self.token_requests.append(form)
-        grant_type = form["grant_type"][0]
-        if grant_type == "authorization_code":
-            grant = self.codes.pop(form["code"][0], None)
-            if (
-                grant is None
-                or form["redirect_uri"] != [grant.redirect_uri]
-                or s256(form["code_verifier"][0]) != grant.challenge
-            ):
-                return httpx.Response(400, json={"error": "invalid_grant"})
-            return self.issue(grant, nonce=grant.nonce)
-        if grant_type == "refresh_token":
-            grant = self.refresh_tokens.pop(form["refresh_token"][0], None)
-            if grant is None or self.refuse_refresh:
-                return httpx.Response(400, json={"error": "invalid_grant"})
-            return self.issue(grant, nonce=None)
-        return httpx.Response(400, json={"error": "unsupported_grant_type"})
-
-    def issue(self, grant: Grant, nonce: str | None) -> httpx.Response:
-        refresh_token = secrets.token_urlsafe(24)
-        self.refresh_tokens[refresh_token] = grant
-        # The edge checks the access token against the wall clock; the UI's clock may run ahead.
-        now = int(time.time())
-        access = jwt.encode(
-            {
-                "iss": ISSUER,
-                "aud": EDGE_AUDIENCE,
-                "azp": CLIENT_ID,
-                "sub": f"sub-{grant.user}",
-                "preferred_username": grant.user,
-                "iat": now,
-                "exp": now + self.expires_in,
-            },
-            IDP_KEY,
-            algorithm="RS256",
-            headers={"kid": "idp-key"},
-        )
-        issued = int(self.clock())
-        id_claims = {
-            "iss": ISSUER,
-            "aud": CLIENT_ID,
-            "sub": f"sub-{grant.user}",
-            "preferred_username": grant.user,
-            "iat": issued,
-            "exp": issued + self.expires_in,
-        } | ({"nonce": nonce} if nonce is not None else {})
-        id_token = jwt.encode(
-            id_claims | self.id_token_claims,
-            self.id_token_key,
-            algorithm="RS256",
-            headers={"kid": "idp-key"},
-        )
-        return httpx.Response(
-            200,
-            headers={"Cache-Control": "no-store"},
-            json={
-                "access_token": access,
-                "token_type": "Bearer",
-                "expires_in": self.expires_in,
-                "refresh_token": refresh_token,
-                "id_token": id_token,
-            },
-        )
 
 
 def ui_dsn_of(postgres: PostgresContainer, user: str = "golem_ui") -> str:
@@ -640,6 +486,14 @@ async def test_a_session_ends_after_its_absolute_lifetime(
     assert response.status_code == 303
 
 
+def end_session_target(page: str) -> str:
+    refresh = re.search(r'<meta http-equiv="refresh" content="0; url=([^"]+)">', page)
+    link = re.search(r'<a class="button" href="([^"]+)">', page)
+    assert refresh and link, "no way on to the end-session endpoint"
+    assert refresh[1] == link[1]
+    return html.unescape(refresh[1])
+
+
 async def test_logout_ends_the_session_and_the_idp_session(
     stack: Stack, browser: httpx.AsyncClient
 ) -> None:
@@ -648,8 +502,10 @@ async def test_logout_ends_the_session_and_the_idp_session(
 
     response = await browser.post("/logout", data={"csrf": hidden(page, "csrf")})
 
-    assert response.status_code == 303
-    location = response.headers["location"]
+    # Not a redirect: CSP form-action 'self' would block a form's POST redirecting to the
+    # provider (browsers apply it to redirects), so a page moves on by meta refresh.
+    assert response.status_code == 200
+    location = end_session_target(response.text)
     assert location.startswith(f"{END_SESSION_URL}?")
     params = query_of(location)
     assert params["client_id"] == CLIENT_ID
@@ -907,6 +763,20 @@ async def test_a_goal_with_markup_is_escaped_everywhere(
 )
 def test_only_an_http_merge_request_url_becomes_a_link(text: str, link: str | None) -> None:
     assert merge_request_link(text) == link
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "shown"),
+    [
+        ("2026-09-01T09:12:00Z", "2026-09-01 09:12 UTC"),
+        ("2026-09-25T10:18:16.617532Z", "2026-09-25 10:18 UTC"),
+        ("2026-09-25T12:18:16+02:00", "2026-09-25 10:18 UTC"),
+        ("", ""),
+        ("not a time", "not a time"),
+    ],
+)
+def test_a_status_timestamp_is_shown_to_the_minute_in_utc(timestamp: str, shown: str) -> None:
+    assert shown_time(timestamp) == shown
 
 
 # --- Headers -------------------------------------------------------------------------------------
