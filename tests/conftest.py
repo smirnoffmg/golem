@@ -1,10 +1,14 @@
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import psycopg
 import pytest
 from kubernetes.client import ApiClient
 from testcontainers.community.postgres import PostgresContainer
+
+if TYPE_CHECKING:
+    from testcontainers.community.k3s import K3SContainer
 
 INIT_SQL = Path(__file__).parent.parent / "deploy" / "postgres" / "init.sql"
 
@@ -62,17 +66,23 @@ async def audit_admin_dsn(postgres: PostgresContainer) -> AsyncIterator[str]:
 
 
 @pytest.fixture(scope="session")
-def k3s_api_client() -> Iterator[ApiClient]:
-    import yaml
-    from kubernetes.config import new_client_from_config_dict
+def k3s() -> Iterator["K3SContainer"]:
     from testcontainers.community.k3s import K3SContainer
 
     # Mounting the host's /sys/fs/cgroup (the module's default) breaks pod sandboxes on cgroup v2
     # hosts such as CI runners: "cgroup.procs: no such file or directory" (testcontainers-python
     # issue 591).
-    with K3SContainer("rancher/k3s:v1.33.4-k3s1", enable_cgroup_mount=False) as k3s:
-        api_client = new_client_from_config_dict(
-            yaml.safe_load(k3s.config_yaml()), persist_config=False
-        )
-        with api_client:
-            yield api_client
+    with K3SContainer("rancher/k3s:v1.33.4-k3s1", enable_cgroup_mount=False) as container:
+        yield container
+
+
+@pytest.fixture(scope="session")
+def k3s_api_client(k3s: "K3SContainer") -> Iterator[ApiClient]:
+    import yaml
+    from kubernetes.config import new_client_from_config_dict
+
+    api_client = new_client_from_config_dict(
+        yaml.safe_load(k3s.config_yaml()), persist_config=False
+    )
+    with api_client:
+        yield api_client

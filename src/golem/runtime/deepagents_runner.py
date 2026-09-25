@@ -1,6 +1,8 @@
 """A role runner on deepagents: one agent loop over the context repository clone, no shell."""
 
-from collections.abc import Mapping, Sequence
+import json
+import math
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -9,11 +11,19 @@ from deepagents.backends import CompositeBackend, FilesystemBackend, StateBacken
 from deepagents.backends.protocol import BackendProtocol
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    ExtendedModelResponse,
+    ModelCallResult,
+    ModelRequest,
+    ModelResponse,
+)
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
+from langgraph.errors import GraphBubbleUp
 from langgraph.graph.state import CompiledStateGraph
 
 from golem.runtime.ports import Brief, RoleResult
@@ -28,12 +38,19 @@ BUILTIN_TOOLS = frozenset(
     {"ls", "read_file", "write_file", "edit_file", "delete", "glob", "grep", "execute"}
     | {"write_todos", "task"}
 )
+DEFAULT_MODEL_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
 class Limits:
     max_model_calls: int = 60
     recursion_limit: int = 250
+    # Far above what a model's output token limit allows; a larger reply is a broken gateway.
+    max_response_bytes: int = 1024 * 1024
+
+
+class ModelResponseError(RuntimeError):
+    """The model gateway answered with nothing the run can use."""
 
 
 @dataclass(frozen=True)
@@ -60,7 +77,23 @@ def gateway_model(settings: Mapping[str, str]) -> ChatOpenAI:
         model=settings["GOLEM_MODEL"],
         # Gateway aliases can look like Responses-only model names; the gateway speaks Chat.
         use_responses_api=False,
+        # Per attempt; the client retries a timeout twice. ChatOpenAI's own default (None)
+        # waits for a silent gateway until the Job's deadline.
+        timeout=model_timeout(settings),
     )
+
+
+def model_timeout(settings: Mapping[str, str]) -> float:
+    raw = settings.get("GOLEM_MODEL_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_MODEL_TIMEOUT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = math.nan
+    if not (math.isfinite(seconds) and seconds > 0):
+        raise ValueError(f"GOLEM_MODEL_TIMEOUT_SECONDS must be a positive number: {raw!r}")
+    return seconds
 
 
 def build_agent(
@@ -74,7 +107,7 @@ def build_agent(
         backend=workspace_backend(brief.workspace, brief.skills_dir if skills else None),
         permissions=role_permissions(brief.role.writes),
         skills=skills,
-        middleware=[call_limit(limits)],
+        middleware=[call_limit(limits), ModelResponseGuard(limits.max_response_bytes)],
         subagents=[general_purpose(limits, skills)],
         name=brief.role.name,
     )
@@ -91,10 +124,60 @@ def call_limit(limits: Limits) -> ModelCallLimitMiddleware:
     return ModelCallLimitMiddleware(run_limit=limits.max_model_calls, exit_behavior="error")
 
 
+class ModelResponseGuard(AgentMiddleware):
+    """Turns a gateway's broken answer into one error that names it, before any tool runs.
+
+    Without it a body that is not a chat completion surfaces as whatever the client library
+    tripped over (a decode error, an attribute error), and an oversized reply is acted on:
+    megabytes written into the clone and pushed.
+    """
+
+    def __init__(self, max_response_bytes: int) -> None:
+        super().__init__()
+        self.max_response_bytes = max_response_bytes
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        try:
+            response = await handler(request)
+        except GraphBubbleUp:
+            raise
+        except Exception as error:
+            raise ModelResponseError(
+                f"no usable model response: {type(error).__name__}: {error}"
+            ) from error
+        size = response_bytes(response)
+        if size > self.max_response_bytes:
+            raise ModelResponseError(
+                f"model response of {size} bytes exceeds {self.max_response_bytes} bytes"
+            )
+        return response
+
+
+def response_bytes(response: ModelCallResult) -> int:
+    if isinstance(response, ExtendedModelResponse):
+        response = response.model_response
+    messages: Sequence[BaseMessage] = (
+        [response] if isinstance(response, AIMessage) else response.result
+    )
+    return sum(message_bytes(message) for message in messages)
+
+
+def message_bytes(message: BaseMessage) -> int:
+    calls = (getattr(message, "tool_calls", []), getattr(message, "invalid_tool_calls", []))
+    return len(json.dumps([message.content, *calls], default=str).encode())
+
+
 def general_purpose(limits: Limits, skills: list[str] | None) -> SubAgent:
     # The auto-added subagent takes neither the caller's middleware nor the invoke-time
     # recursion_limit, so without its own call limit it could loop unbounded.
-    spec: SubAgent = {**GENERAL_PURPOSE_SUBAGENT, "middleware": [call_limit(limits)]}
+    spec: SubAgent = {
+        **GENERAL_PURPOSE_SUBAGENT,
+        "middleware": [call_limit(limits), ModelResponseGuard(limits.max_response_bytes)],
+    }
     if skills:
         spec["skills"] = skills
     return spec

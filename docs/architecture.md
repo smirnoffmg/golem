@@ -423,7 +423,7 @@ Container_Boundary(job, "Runtime Job (Python agent runtime image)") {
   Component(tools, "MCP client", "", "platform server calls with the run token; result size limit")
   Component(ask, "Ask an agent", "A2A client, a2a-sdk", "synchronous consultation with a timeout; traceparent in metadata")
   Component(ask_long, "Delegate long work", "A2A client", "task with push notification; run ends waiting", $tags="target")
-  Component(model, "Gateway client", "OpenAI-compatible", "model per role and data class; agent key")
+  Component(model, "Gateway client", "OpenAI-compatible", "model per role and data class; agent key; timeout per call; response size limit")
   Component(trace, "Tracing", "OpenTelemetry GenAI", "invoke_agent, chat, execute_tool; catalog, image and model versions; masking")
   Component(validate, "Validators", "", "schema, links, immutability, empty sections, structural checks")
   Component(git, "Branch client", "", "unique branch per run; commits the result")
@@ -450,6 +450,19 @@ Rel(git, gitlab, "branch")
 Rel(git, orch, "done: branch, version, cost", "Job exit")
 @enduml
 ```
+
+The gateway is an integration point that can fail in every way a network peer can, so the
+gateway client bounds it: each call times out (`GOLEM_MODEL_TIMEOUT_SECONDS`, 120 s by default,
+retried twice by the client) and a reply that cannot be parsed or exceeds 1 MiB fails the run
+with a reason naming the model response, before any tool call in it runs.
+
+The whole Job is tested end to end in k3s (`tests/e2e`, run with `pytest -m e2e`): the image
+built from the Dockerfile is imported into the cluster's containerd, the unmodified Job manifest
+runs it under the restricted security context, the catalog and the context come from a
+`git daemon` in the cluster, and a scripted OpenAI-compatible server plays the gateway, well and
+badly: a normal run proposes the target's branch; a body that is not JSON, a reply of megabytes
+and a gateway that never answers each fail the run by the runtime's own limits, with nothing
+pushed.
 
 ## Not shown
 

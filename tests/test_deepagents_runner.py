@@ -15,7 +15,14 @@ from langgraph.errors import GraphRecursionError
 from pydantic import Field
 
 from golem.catalog import Role
-from golem.runtime.deepagents_runner import DeepAgentsRunner, Limits, gateway_model, preamble
+from golem.runtime.deepagents_runner import (
+    DEFAULT_MODEL_TIMEOUT_SECONDS,
+    DeepAgentsRunner,
+    Limits,
+    ModelResponseError,
+    gateway_model,
+    preamble,
+)
 from golem.runtime.lead import Record
 from golem.runtime.ports import Brief, LinkedRecord
 
@@ -258,6 +265,30 @@ def test_gateway_model_points_chat_openai_at_the_gateway() -> None:
     assert model.use_responses_api is False
 
 
+GATEWAY = {
+    "GOLEM_MODEL_GATEWAY_URL": "http://gateway.local/v1",
+    "GOLEM_MODEL_KEY": "agent-key",
+    "GOLEM_MODEL": "team-default",
+}
+
+
+def test_gateway_model_has_a_timeout_by_default() -> None:
+    # ChatOpenAI hands the client timeout=None, which waits for a silent gateway forever.
+    assert gateway_model(GATEWAY).request_timeout == DEFAULT_MODEL_TIMEOUT_SECONDS
+
+
+def test_gateway_model_timeout_is_a_setting() -> None:
+    model = gateway_model({**GATEWAY, "GOLEM_MODEL_TIMEOUT_SECONDS": "7.5"})
+
+    assert model.request_timeout == 7.5
+
+
+@pytest.mark.parametrize("value", ["soon", "0", "-1", "nan", "inf"])
+def test_gateway_model_refuses_a_timeout_that_is_not_a_positive_number(value: str) -> None:
+    with pytest.raises(ValueError, match="GOLEM_MODEL_TIMEOUT_SECONDS"):
+        gateway_model({**GATEWAY, "GOLEM_MODEL_TIMEOUT_SECONDS": value})
+
+
 def test_gateway_model_requires_every_setting() -> None:
     with pytest.raises(KeyError, match="GOLEM_MODEL_KEY"):
         gateway_model({"GOLEM_MODEL_GATEWAY_URL": "http://gateway.local/v1", "GOLEM_MODEL": "m"})
@@ -290,3 +321,52 @@ async def test_model_call_limit_also_bounds_a_subagent(tmp_path: Path) -> None:
         await runner.run(make_brief(tmp_path))
 
     assert len(model.prompts) == 1 + 3
+
+
+class Unreachable(GenericFakeChatModel):
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> "Unreachable":
+        return self
+
+    def _generate(self, *args: Any, **kwargs: Any) -> ChatResult:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+
+async def test_a_failed_model_call_is_reported_as_the_model_response(tmp_path: Path) -> None:
+    model = Unreachable(messages=iter(()))
+
+    with pytest.raises(ModelResponseError, match="no usable model response: UnicodeDecodeError"):
+        await DeepAgentsRunner(model=model).run(make_brief(tmp_path))
+
+
+async def test_an_oversized_model_response_is_refused_before_its_tool_call_runs(
+    tmp_path: Path,
+) -> None:
+    brief = make_brief(tmp_path)
+    before = (tmp_path / "hypotheses" / "H-1.md").read_text()
+    model = scripted(
+        tool_call("write_file", file_path="/hypotheses/H-1.md", content="x" * 2_000),
+        "Done.",
+    )
+    runner = DeepAgentsRunner(model=model, limits=Limits(max_response_bytes=1_000))
+
+    with pytest.raises(ModelResponseError, match=r"model response of \d+ bytes exceeds 1000"):
+        await runner.run(brief)
+
+    assert (tmp_path / "hypotheses" / "H-1.md").read_text() == before
+
+
+async def test_the_response_limit_also_holds_in_a_subagent(tmp_path: Path) -> None:
+    brief = make_brief(tmp_path)
+    before = (tmp_path / "hypotheses" / "H-1.md").read_text()
+    model = scripted(
+        tool_call("task", description="fill evidence", subagent_type="general-purpose"),
+        tool_call("write_file", file_path="/hypotheses/H-1.md", content="x" * 2_000),
+        "Subagent done.",
+        "Done.",
+    )
+    runner = DeepAgentsRunner(model=model, limits=Limits(max_response_bytes=1_000))
+
+    with pytest.raises(ModelResponseError):
+        await runner.run(brief)
+
+    assert (tmp_path / "hypotheses" / "H-1.md").read_text() == before

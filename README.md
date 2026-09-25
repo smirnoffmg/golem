@@ -100,7 +100,16 @@ uv run pytest               # needs Docker: Postgres tests run in testcontainers
 uv run ruff check .
 docker compose -f deploy/compose.yaml up --build
 GOLEM_SMOKE=1 uv run pytest tests/test_compose_smoke.py   # builds, starts and removes compose
+uv run pytest -m e2e        # the image as a Job in k3s; about two minutes with a warm build cache
 ```
+
+The e2e suite (`tests/e2e`) is excluded from a plain `pytest` and runs in CI as a second stage
+after the checks pass. It builds the image with `docker build`, imports it into the k3s
+container with `ctr images import`, starts a `git daemon` with the example catalog (without MCP
+tools) and context, and a scripted OpenAI-compatible model server from a ConfigMap. Then it
+launches runs through `KubernetesJobLauncher`: one that proposes `golem/H-2/<run>` with only the
+Evidence section changed, and three against a gateway that answers garbage, answers megabytes
+or never answers, each of which must fail with nothing pushed.
 
 One image, five processes: `python -m golem.edge`, `python -m golem.tasks`,
 `python -m golem.orchestrator.reconciler`, the Jira adapter `python -m golem.adapters` and a

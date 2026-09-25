@@ -18,3 +18,14 @@ jobs:
       # The same hooks as locally (ruff at the version in uv.lock, YAML/TOML, private keys).
       - run: uv run pre-commit run --all-files --show-diff-on-failure
       - run: uv run pytest
+
+  # A second stage: the real image as a Job in k3s. It runs only after the fast checks pass.
+  e2e:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv sync --frozen
+      - run: uv run pytest -m e2e

@@ -76,7 +76,7 @@ Without the operator, create the same Secrets with the same keys some other way.
 | golem-system | `golem-reconciler` | `GOLEM_RUNS_DSN`, `GOLEM_GITLAB_TOKEN` (merge requests) | reconciler |
 | golem-system | `golem-jira-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_JIRA_TOKEN`, `GOLEM_JIRA_WEBHOOK_SECRET`, `GOLEM_PUSH_TOKEN_SECRET` | Jira adapter |
 | golem-system | `golem-mcp-tracker-read`, `golem-mcp-wiki-read` | `GOLEM_MCP_UPSTREAM_TOKEN` (Jira, Confluence), `GOLEM_AUDIT_DSN` (role `golem_mcp`) | MCP servers |
-| golem-jobs | `golem-run-secrets` (`GOLEM_JOB_SECRET`) | `GOLEM_MODEL_GATEWAY_URL`, `GOLEM_MODEL`, `GOLEM_MODEL_KEY`, `GOLEM_GIT_TOKEN` (branch-only), `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | every run's Job |
+| golem-jobs | `golem-run-secrets` (`GOLEM_JOB_SECRET`) | `GOLEM_MODEL_GATEWAY_URL`, `GOLEM_MODEL`, `GOLEM_MODEL_KEY`, optional `GOLEM_MODEL_TIMEOUT_SECONDS` (per call, default 120), `GOLEM_GIT_TOKEN` (branch-only), `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | every run's Job |
 
 `GOLEM_EDGE_TOKEN` is one value in both Secrets (the overlay reads it from one remote key): the
 edge sends it with every forwarded request, and the task service trusts the principal header
