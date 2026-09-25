@@ -1,0 +1,98 @@
+# Every ConfigMap value of the base that names something outside the cluster, set for one
+# environment. The hosts under .internal, the team id and the addresses are examples.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-config
+  namespace: golem-system
+data:
+  call-registry.yaml: |
+    discovery: ["user:*", "service:golem-jira-adapter", "service:golem-mattermost-adapter"]
+  catalogs.yaml: |
+    discovery: https://gitlab.internal/agents/discovery.git#main
+  agent-tools.yaml: |
+    discovery: [tracker.read, wiki.read]
+  gitlab-projects.yaml: |
+    discovery:
+      project: product/discovery-context
+      target_branch: main
+  jira-labels.yaml: |
+    golem:discovery: discovery
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-edge-env
+  namespace: golem-system
+data:
+  GOLEM_OIDC_ISSUER: https://idp.internal/realms/golem
+  GOLEM_OIDC_JWKS_URL: https://idp.internal/realms/golem/protocol/openid-connect/certs
+  GOLEM_OIDC_DISCOVERY_URL: https://idp.internal/realms/golem/.well-known/openid-configuration
+  GOLEM_PUBLIC_BASE_URL: https://golem.internal
+  GOLEM_TRUSTED_PROXIES: 10.40.0.0/24
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-tasks-env
+  namespace: golem-system
+data:
+  # The same reference as `images` in kustomization.yaml: kustomize does not rewrite env values.
+  GOLEM_JOB_IMAGE: registry.internal/golem:0.1.0
+  GOLEM_PUBLIC_BASE_URL: https://golem.internal
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-reconciler-env
+  namespace: golem-system
+data:
+  GOLEM_GITLAB_URL: https://gitlab.internal
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-jira-adapter-env
+  namespace: golem-system
+data:
+  GOLEM_OIDC_TOKEN_URL: https://idp.internal/realms/golem/protocol/openid-connect/token
+  GOLEM_JIRA_URL: https://jira.internal
+  GOLEM_TRUSTED_PROXIES: 10.40.0.0/24
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mattermost-adapter-env
+  namespace: golem-system
+data:
+  GOLEM_OIDC_TOKEN_URL: https://idp.internal/realms/golem/protocol/openid-connect/token
+  GOLEM_MATTERMOST_URL: https://mattermost.internal
+  GOLEM_MATTERMOST_TEAMS: 4xp9fdt7pbgium38k5ugsxxm1e
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-tracker-read-env
+  namespace: golem-system
+data:
+  GOLEM_MCP_UPSTREAM_URL: https://jira.internal
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-wiki-read-env
+  namespace: golem-system
+data:
+  GOLEM_MCP_UPSTREAM_URL: https://confluence.internal
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-ui-env
+  namespace: golem-system
+data:
+  GOLEM_OIDC_ISSUER: https://idp.internal/realms/golem
+  GOLEM_OIDC_DISCOVERY_URL: https://idp.internal/realms/golem/.well-known/openid-configuration
+  GOLEM_OIDC_REDIRECT_URL: https://golem-ui.internal/callback
+  GOLEM_PUBLIC_BASE_URL: https://golem-ui.internal
+  GOLEM_TRUSTED_PROXIES: 10.40.0.0/24

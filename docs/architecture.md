@@ -549,6 +549,5 @@ pushed.
   twice. No branch means the run proposed nothing, and the task hears so. A succeeded run's
   tasks are notified only after its proposal is settled (`runs.proposal_settled_at`); while
   GitLab fails, the run stays unsettled, is retried every pass, and its notifications wait.
-  Still open: a run whose agent has no configured GitLab project is retried forever (logged
-  every pass), and the edge refetches signing keys synchronously, blocking its event loop for
-  at most two seconds once a minute.
+  A run whose agent has no configured GitLab project is settled with that reason instead of
+  being retried, and the edge verifies tokens, key refetches included, off its event loop.

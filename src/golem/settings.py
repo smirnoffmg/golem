@@ -180,7 +180,18 @@ def _push_config_key(env: Env) -> str | None:
             "GOLEM_PUSH_CONFIG_KEY is required with GOLEM_PUSH_ALLOWED_PREFIXES:"
             " push tokens are stored encrypted"
         )
+    if key is not None:
+        _fernet_key(key, "GOLEM_PUSH_CONFIG_KEY")
     return key
+
+
+def _fernet_key(key: str, name: str) -> None:
+    try:
+        Fernet(key)
+    except ValueError as error:
+        raise SettingsError(
+            f"{name} must be a Fernet key (32 url-safe base64-encoded bytes)"
+        ) from error
 
 
 def task_service_settings(env: Env) -> TaskServiceSettings:
@@ -606,12 +617,7 @@ def ui_settings(env: Env) -> UiSettings:
             f"GOLEM_OIDC_REDIRECT_URL must be GOLEM_PUBLIC_BASE_URL + {UI_CALLBACK_PATH!r},"
             f" got {v['GOLEM_OIDC_REDIRECT_URL']!r}"
         )
-    try:
-        Fernet(v["GOLEM_UI_SESSION_KEY"])
-    except ValueError as error:
-        raise SettingsError(
-            "GOLEM_UI_SESSION_KEY must be a Fernet key (32 url-safe base64-encoded bytes)"
-        ) from error
+    _fernet_key(v["GOLEM_UI_SESSION_KEY"], "GOLEM_UI_SESSION_KEY")
     agents = tuple(a.strip() for a in v["GOLEM_UI_AGENTS"].split(",") if a.strip())
     if not agents:
         raise SettingsError("GOLEM_UI_AGENTS must list at least one name, separated by commas")

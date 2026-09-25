@@ -215,6 +215,18 @@ def test_push_receivers_need_a_key_for_stored_tokens() -> None:
         task_service_settings({**TASKS_ENV, "GOLEM_PUSH_ALLOWED_PREFIXES": "http://adapter:8080/"})
 
 
+@pytest.mark.parametrize("key", ["not-a-fernet-key", "k" * 44])
+def test_the_key_for_stored_push_tokens_must_be_a_fernet_key(key: str) -> None:
+    with pytest.raises(SettingsError, match="GOLEM_PUSH_CONFIG_KEY must be a Fernet key"):
+        task_service_settings(
+            {
+                **TASKS_ENV,
+                "GOLEM_PUSH_ALLOWED_PREFIXES": "http://adapter:8080/",
+                "GOLEM_PUSH_CONFIG_KEY": key,
+            }
+        )
+
+
 def test_task_service_accepts_no_cluster() -> None:
     settings = task_service_settings({**TASKS_ENV, "GOLEM_KUBERNETES": "none"})
 

@@ -76,7 +76,10 @@ IDP_PLACEHOLDER = "198.51.100.10/32"
 MATTERMOST_PLACEHOLDER = "203.0.113.30/32"
 POSTGRES_PLACEHOLDER = "192.0.2.10/32"
 # Secret values whose format the settings parser checks.
-PLACEHOLDER_SECRETS = {"GOLEM_UI_SESSION_KEY": Fernet.generate_key().decode()}
+PLACEHOLDER_SECRETS = {
+    "GOLEM_UI_SESSION_KEY": Fernet.generate_key().decode(),
+    "GOLEM_PUSH_CONFIG_KEY": Fernet.generate_key().decode(),
+}
 INGRESS_CONTROLLER = {
     "namespaceSelector": {"matchLabels": {"golem.dev/ingress-controller": "true"}}
 }

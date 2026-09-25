@@ -7,16 +7,22 @@ Kustomize manifests for the platform's processes. Decisions and their reasons:
 deploy/k8s/
   base/                            namespaces, RBAC, config, workloads, network policies
   overlays/external-secrets/       optional: the base plus ExternalSecrets for every Secret
+  overlays/prometheus-operator/    optional: the base plus a ServiceMonitor
+  overlays/example/                an environment's overlay: every placeholder replaced
   netcheck/                        the network check to run after deploy (see below)
 ```
 
 ```sh
 kubectl kustomize deploy/k8s/base                     # render
-kubectl apply -k deploy/k8s/overlays/external-secrets # with External Secrets Operator
+kubectl kustomize deploy/k8s/overlays/example         # render an environment's overlay
 ```
 
 Apply an overlay of your own that replaces the placeholders below; never edit the base per
-environment. `tests/test_k8s_render.py` checks that every process's settings parser accepts the
+environment. `overlays/example` is such an overlay, and
+[docs/operations/install.md](../../docs/operations/install.md) walks through an install with
+it. The `external-secrets` and `prometheus-operator` overlays still carry the placeholders:
+build your overlay on one of them instead of on `base`, never apply them alone.
+`tests/test_k8s_render.py` checks that every process's settings parser accepts the
 environment the manifests give it, and `tests/test_k8s_manifests.py` applies the base to k3s
 and checks RBAC and network policies with real traffic; `tests/test_k8s_network_k3s.py` adds
 kubelet probes, the Kubernetes API egress and the network check below. k3s is not your cluster:

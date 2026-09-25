@@ -36,7 +36,7 @@ is the catalog, and the figure is stopped by the platform, not by the model.
 | Postgres cluster | `golem_tasks`, `golem_runs`, `golem_audit`, `golem_ui` | one cluster, one owner per database |
 
 Details and diagrams: [docs/architecture.md](docs/architecture.md). Decisions:
-[docs/adr](docs/adr).
+[docs/adr](docs/adr). Guides for users and operators: [docs/README.md](docs/README.md).
 
 ## Pilot and target
 
@@ -86,7 +86,8 @@ src/golem/
 deploy/
   compose.yaml             local Postgres, edge, task service and reconciler
   k8s/                     kustomize manifests: namespaces, RBAC, workloads, network policies;
-                           overlays for External Secrets and the Prometheus Operator
+                           overlays for External Secrets and the Prometheus Operator, and an
+                           example of an environment's overlay
   postgres/init.sql        databases, roles and grants
 examples/
   discovery/               an example agent catalog: kinds, roles, rules, role instructions
@@ -98,9 +99,12 @@ scripts/
   ui_screenshots.py        the screenshots in docs/images/ui
 tests/support/             the fake identity provider and the UI demo stack, shared with scripts/
 docs/
+  README.md                index of the guides
   architecture.md          C4 diagrams (PlantUML)
   adr/                     architecture decision records
-  operations/alerts.md     the metrics and PrometheusRule examples
+  guide/                   for users: getting started, reviewing proposals, channels, writing an agent
+  operations/              for operators: install, configuration, security, backup, upgrade,
+                           alerts, runbooks, troubleshooting
   images/ui/               screenshots of the web UI
 Dockerfile                 one image; the container role is chosen by the command
 ```
@@ -156,7 +160,8 @@ that lets only the task service and the reconciler touch the Kubernetes API, nei
 read a Secret. Secrets are not in git; an optional overlay creates them with the External
 Secrets Operator. Secret names and keys, the placeholders to replace and how to apply:
 [deploy/k8s/README.md](deploy/k8s/README.md). Decisions:
-[ADR 0009](docs/adr/0009-deployment-on-kubernetes.md).
+[ADR 0009](docs/adr/0009-deployment-on-kubernetes.md). From an empty cluster to a first run:
+[docs/operations/install.md](docs/operations/install.md).
 
 ## A run, end to end
 
