@@ -27,7 +27,7 @@ data:
   GOLEM_KUBERNETES_NAMESPACE: golem-jobs
   GOLEM_KUBERNETES: in-cluster
   GOLEM_PUBLIC_BASE_URL: https://golem.example.com
-  GOLEM_PUSH_ALLOWED_PREFIXES: http://jira-adapter.golem-system.svc:8000/
+  GOLEM_PUSH_ALLOWED_PREFIXES: http://jira-adapter.golem-system.svc:8000/,http://mattermost-adapter.golem-system.svc:8000/
 ---
 apiVersion: apps/v1
 kind: Deployment

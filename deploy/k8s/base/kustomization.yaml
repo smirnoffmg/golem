@@ -11,6 +11,7 @@ resources:
   - tasks.yaml
   - reconciler.yaml
   - jira-adapter.yaml
+  - mattermost-adapter.yaml
   - mcp-servers.yaml
   - network-policies-system.yaml
   - network-policies-jobs.yaml

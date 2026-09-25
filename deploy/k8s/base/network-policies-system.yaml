@@ -62,6 +62,9 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-jira-adapter
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-mattermost-adapter
       ports:
         - protocol: TCP
           port: 8000
@@ -129,6 +132,9 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-jira-adapter
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-mattermost-adapter
       ports:
         - protocol: TCP
           port: 8000
@@ -238,6 +244,59 @@ spec:
     - to:
         - ipBlock:
             cidr: 198.51.100.20/32
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# The slash command's only credential is a shared token in a header (ADR 0010), so who may
+# send one is narrowed here too: the Mattermost server alone. If commands arrive through the
+# ingress controller instead, the policy sees the controller: admit its namespace and restrict
+# the source to Mattermost at the ingress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mattermost-adapter
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: golem-mattermost-adapter
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Placeholder: the Mattermost server (slash commands).
+    - from:
+        - ipBlock:
+            cidr: 203.0.113.30/32
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Push notifications.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-tasks
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-edge
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Placeholder: the identity provider (client credentials).
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.10/32
+      ports:
+        - protocol: TCP
+          port: 443
+    # Placeholder: the Mattermost server (REST API, posts).
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.30/32
       ports:
         - protocol: TCP
           port: 443

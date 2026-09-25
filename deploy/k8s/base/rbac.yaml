@@ -30,6 +30,13 @@ automountServiceAccountToken: false
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  name: golem-mattermost-adapter
+  namespace: golem-system
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
   name: golem-mcp
   namespace: golem-system
 automountServiceAccountToken: false

@@ -1,42 +1,46 @@
-# The Jira adapter: Jira webhooks in through the ingress controller, SendMessage out to the
-# edge, task push notifications in from the task service.
+# The Mattermost adapter: /golem slash commands in from the Mattermost server, SendMessage out
+# to the edge, task push notifications in from the task service, outcomes out as posts through
+# Mattermost's REST API (ADR 0010).
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: golem-jira-adapter-env
+  name: golem-mattermost-adapter-env
   namespace: golem-system
 data:
   GOLEM_EDGE_URL: http://edge.golem-system.svc:8000
   GOLEM_OIDC_TOKEN_URL: https://idp.example.com/realms/golem/protocol/openid-connect/token
-  GOLEM_OIDC_CLIENT_ID: golem-jira-adapter
-  GOLEM_JIRA_URL: https://jira.example.com
-  # Empty: Jira Data Center, GOLEM_JIRA_TOKEN is a personal access token. Jira Cloud: the
-  # account's email, and GOLEM_JIRA_TOKEN is its API token.
-  GOLEM_JIRA_USER: ""
-  GOLEM_JIRA_LABELS_FILE: /etc/golem/jira-labels.yaml
+  GOLEM_OIDC_CLIENT_ID: golem-mattermost-adapter
+  GOLEM_MATTERMOST_URL: https://mattermost.example.com
+  # Agents the command may start; each needs service:golem-mattermost-adapter in the call
+  # registry.
+  GOLEM_MATTERMOST_AGENTS: discovery
+  # Placeholders: Mattermost team ids (and optionally channel ids) where the command is
+  # enabled. No channel list: every channel of these teams.
+  GOLEM_MATTERMOST_TEAMS: replace-with-team-id
+  GOLEM_MATTERMOST_CHANNELS: ""
   # Where the task service delivers pushes: in-cluster, and within its
   # GOLEM_PUSH_ALLOWED_PREFIXES.
-  GOLEM_PUBLIC_BASE_URL: http://jira-adapter.golem-system.svc:8000
+  GOLEM_PUBLIC_BASE_URL: http://mattermost-adapter.golem-system.svc:8000
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: jira-adapter
+  name: mattermost-adapter
   namespace: golem-system
   labels:
-    app.kubernetes.io/name: golem-jira-adapter
+    app.kubernetes.io/name: golem-mattermost-adapter
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: golem-jira-adapter
+      app.kubernetes.io/name: golem-mattermost-adapter
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: golem-jira-adapter
+        app.kubernetes.io/name: golem-mattermost-adapter
         app.kubernetes.io/part-of: golem
     spec:
-      serviceAccountName: golem-jira-adapter
+      serviceAccountName: golem-mattermost-adapter
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -46,17 +50,17 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: jira-adapter
+        - name: mattermost-adapter
           image: golem
-          command: ["python", "-m", "golem.adapters", "jira"]
+          command: ["python", "-m", "golem.adapters", "mattermost"]
           ports:
             - name: http
               containerPort: 8000
           envFrom:
             - configMapRef:
-                name: golem-jira-adapter-env
+                name: golem-mattermost-adapter-env
             - secretRef:
-                name: golem-jira-adapter
+                name: golem-mattermost-adapter
           resources:
             requests:
               cpu: 50m
@@ -64,7 +68,7 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
-          # TCP: both routes are signed POSTs; there is no health route.
+          # TCP: both routes are authenticated POSTs; there is no health route.
           readinessProbe:
             tcpSocket:
               port: http
@@ -84,27 +88,18 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            - name: config
-              mountPath: /etc/golem
-              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
-        - name: config
-          configMap:
-            name: golem-config
-            items:
-              - key: jira-labels.yaml
-                path: jira-labels.yaml
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: jira-adapter
+  name: mattermost-adapter
   namespace: golem-system
 spec:
   selector:
-    app.kubernetes.io/name: golem-jira-adapter
+    app.kubernetes.io/name: golem-mattermost-adapter
   ports:
     - name: http
       port: 8000

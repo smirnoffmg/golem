@@ -20,15 +20,17 @@ from test_edge_auth import AUDIENCE, ISSUER, RSA_KEY, claims
 from test_edge_jwks import jwk
 
 from golem.adapters.__main__ import build_app
-from golem.adapters.jira import (
+from golem.adapters.common import (
     NOTIFICATION_TOKEN_HEADER,
     ClientCredentials,
+    push_token,
+)
+from golem.adapters.common import subject_of_push_token as issue_of_push_token
+from golem.adapters.jira import (
     create_jira_adapter_app,
-    issue_of_push_token,
     jira_authorization,
     labels_added,
     message_id,
-    push_token,
     signature_valid,
 )
 from golem.edge.__main__ import authenticator
@@ -97,6 +99,7 @@ class IdP:
     """Keycloak's token endpoint for the client credentials grant."""
 
     expires_in: int = 300
+    client_id: str = "jira-adapter"
     grants: list[dict[str, list[str]]] = field(default_factory=list)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
@@ -107,8 +110,8 @@ class IdP:
         now = int(time.time())
         token = jwt.encode(
             claims(
-                preferred_username="service-account-jira-adapter",
-                azp="jira-adapter",
+                preferred_username=f"service-account-{self.client_id}",
+                azp=self.client_id,
                 sub=f"grant-{len(self.grants)}",
                 iat=now,
                 nbf=now,

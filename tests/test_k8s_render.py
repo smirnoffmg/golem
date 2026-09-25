@@ -23,6 +23,7 @@ from golem.runtime import tools
 from golem.settings import (
     adapter_settings,
     edge_settings,
+    mattermost_adapter_settings,
     parse_agent_tools,
     parse_catalog_refs,
     parse_gitlab_projects,
@@ -44,6 +45,7 @@ SETTINGS: dict[str, Callable[[Mapping[str, str]], object]] = {
     "tasks": task_service_settings,
     "reconciler": reconciler_settings,
     "jira-adapter": adapter_settings,
+    "mattermost-adapter": mattermost_adapter_settings,
     "mcp-tracker-read": mcp_settings,
     "mcp-wiki-read": mcp_settings,
 }
@@ -54,6 +56,11 @@ FILE_PARSERS: dict[str, Callable[[str], object]] = {
     "GOLEM_GITLAB_PROJECTS_FILE": parse_gitlab_projects,
     "GOLEM_JIRA_LABELS_FILE": parse_label_agents,
 }
+# The adapters' Deployments, their commands, and the agents each one may start.
+ADAPTERS = {
+    "jira-adapter": ["python", "-m", "golem.adapters", "jira"],
+    "mattermost-adapter": ["python", "-m", "golem.adapters", "mattermost"],
+}
 KUBERNETES_API_USERS = {"tasks": "golem-tasks", "reconciler": "golem-reconciler"}
 # Who may call the task service, and on which of its ports (ADR 0009): NetworkPolicy admits a
 # caller to a port, and each port serves only that caller's routes.
@@ -62,6 +69,8 @@ TASK_SERVICE_PORTS = {
     "golem-mcp": "internal-read",
     "golem-reconciler": "internal-write",
 }
+IDP_PLACEHOLDER = "198.51.100.10/32"
+MATTERMOST_PLACEHOLDER = "203.0.113.30/32"
 SERVICE_URL = re.compile(r"^http://([a-z0-9-]+)\.([a-z0-9-]+)\.svc:(\d+)(/.*)?$")
 
 
@@ -436,3 +445,80 @@ def test_runs_resolve_names_through_kube_dns_only() -> None:
             "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}],
         }
     ]
+
+
+# --- Channel adapters ---------------------------------------------------------------------------
+
+
+def adapter_agents(name: str, env: Mapping[str, str], objects: list[dict]) -> set[str]:
+    if name == "mattermost-adapter":
+        return set(mattermost_adapter_settings(env).agents)
+    labels = find(objects, "ConfigMap", "golem-config", SYSTEM)["data"]["jira-labels.yaml"]
+    return set(parse_label_agents(labels).values())
+
+
+@pytest.mark.parametrize("name", sorted(ADAPTERS))
+def test_each_adapter_runs_its_own_subcommand(name: str) -> None:
+    assert container(find(render(BASE), "Deployment", name, SYSTEM))["command"] == ADAPTERS[name]
+
+
+@pytest.mark.parametrize("name", sorted(ADAPTERS))
+def test_the_call_registry_lets_each_adapter_start_the_agents_it_offers(name: str) -> None:
+    objects = render(EXTERNAL_SECRETS)
+    env = env_of(find(objects, "Deployment", name, SYSTEM), objects, secret_keys(objects))
+    registry = parse_registry(
+        find(objects, "ConfigMap", "golem-config", SYSTEM)["data"]["call-registry.yaml"]
+    )
+    caller = f"service:{env['GOLEM_OIDC_CLIENT_ID']}"
+
+    agents = adapter_agents(name, env, objects)
+    assert agents
+    for agent in agents:
+        assert caller in registry.allowed_callers[agent], agent
+
+
+@pytest.mark.parametrize("name", sorted(ADAPTERS))
+def test_the_task_service_may_push_to_each_adapter_and_nothing_else_may(name: str) -> None:
+    objects = render(EXTERNAL_SECRETS)
+    tasks_env = env_of(find(objects, "Deployment", "tasks", SYSTEM), objects, secret_keys(objects))
+    adapter = find(objects, "Deployment", name, SYSTEM)
+    env = env_of(adapter, objects, secret_keys(objects))
+    app = adapter["spec"]["template"]["metadata"]["labels"][APP_LABEL]
+    match = SERVICE_URL.fullmatch(env["GOLEM_PUBLIC_BASE_URL"])
+    assert match, env["GOLEM_PUBLIC_BASE_URL"]
+    port = int(match[3])
+
+    assert f"{env['GOLEM_PUBLIC_BASE_URL']}/" in tasks_env["GOLEM_PUSH_ALLOWED_PREFIXES"].split(",")
+    tasks_policy = find(objects, "NetworkPolicy", "tasks", SYSTEM)
+    assert port in ports_by_peer(tasks_policy["spec"]["egress"], "to")[app]
+    [policy] = [
+        p
+        for p in of_kind(objects, "NetworkPolicy")
+        if p["spec"]["podSelector"].get("matchLabels") == {APP_LABEL: app}
+    ]
+    assert ports_by_peer(policy["spec"]["ingress"], "from") == {"golem-tasks": {port}}
+
+
+def test_slash_commands_are_admitted_from_the_mattermost_server_only() -> None:
+    policy = find(policies(), "NetworkPolicy", "mattermost-adapter", SYSTEM)
+    sources = [
+        peer
+        for rule in policy["spec"]["ingress"]
+        for peer in rule["from"]
+        if set(peer) != {"podSelector"}
+    ]
+
+    assert sources == [{"ipBlock": {"cidr": MATTERMOST_PLACEHOLDER}}]
+
+
+def test_the_mattermost_adapter_reaches_the_edge_the_idp_and_mattermost_only() -> None:
+    policy = find(policies(), "NetworkPolicy", "mattermost-adapter", SYSTEM)
+    egress = policy["spec"]["egress"]
+
+    assert ports_by_peer(egress, "to") == {"golem-edge": {8000}}
+    blocks = {
+        peer["ipBlock"]["cidr"] for rule in egress for peer in rule["to"] if "ipBlock" in peer
+    }
+    assert blocks == {IDP_PLACEHOLDER, MATTERMOST_PLACEHOLDER}
+    edge = find(policies(), "NetworkPolicy", "edge", SYSTEM)
+    assert "golem-mattermost-adapter" in ports_by_peer(edge["spec"]["ingress"], "from")

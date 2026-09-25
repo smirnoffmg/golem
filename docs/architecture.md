@@ -2,9 +2,9 @@
 
 The intended architecture of Golem in C4 notation: context, containers, and components of the
 four containers that matter most. There is no code level on purpose. Nothing here is deployed;
-the run lifecycle and the Jira channel adapter are implemented (see the README), and
-evaluation runs in its pilot form in the catalog's CI job; the other channel adapters, UI and
-the orchestrator's evaluation workflow are not.
+the run lifecycle and the Jira and Mattermost channel adapters are implemented (see the
+README), and evaluation runs in its pilot form in the catalog's CI job; the GitLab adapter, UI
+and the orchestrator's evaluation workflow are not.
 
 **Pilot and target on the same diagrams.** Pale elements and dashed relationships are the
 target picture and are not part of the pilot. Everything else is the pilot: entry over A2A,
@@ -132,6 +132,16 @@ agent as `tenant`, a message id derived from the issue, the label and the signed
 Jira's retries start one run, and a push notification config with a per-run token. A terminal
 push becomes one comment on the issue: the comment carries the task id, and the adapter looks
 for it before posting, so a repeated push does not comment twice and the adapter keeps no state.
+
+**The Mattermost adapter is the same client with a weaker door**
+([ADR 0010](adr/0010-mattermost-adapter.md)). A `/golem <agent> <goal>` slash command carries
+only the command's shared token, so the token is compared in constant time and backed by a
+NetworkPolicy that admits only the Mattermost server, team and channel allowlists and an
+agent allowlist; the message id comes from Mattermost's per-invocation `trigger_id`. The run's
+caller is `service:<client id>`; the chat user is in the message metadata and the goal, a
+claim the edge cannot verify. A terminal push becomes one post in the channel mentioning the
+user: the task service tells each task its outcome at most once, so the adapter keeps no
+state and does no lookup.
 
 ```plantuml
 @startuml

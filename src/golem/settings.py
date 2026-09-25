@@ -430,3 +430,60 @@ def parse_label_agents(text: str) -> dict[str, str]:
             raise SettingsError(f"Jira labels: {label!r} must map to an agent name, got {agent!r}")
         labels[str(label)] = agent
     return labels
+
+
+@dataclass(frozen=True)
+class MattermostAdapterSettings:
+    edge_url: str
+    token_url: str
+    client_id: str
+    client_secret: str = field(repr=False)
+    mattermost_url: str
+    bot_token: str = field(repr=False)
+    command_token: bytes = field(repr=False)
+    push_secret: bytes = field(repr=False)
+    agents: frozenset[str]
+    teams: frozenset[str]
+    # Empty: every channel of the allowed teams.
+    channels: frozenset[str]
+    public_base_url: str
+    port: int
+
+
+def mattermost_adapter_settings(env: Env) -> MattermostAdapterSettings:
+    v = _values(
+        env,
+        "GOLEM_EDGE_URL",
+        "GOLEM_OIDC_TOKEN_URL",
+        "GOLEM_OIDC_CLIENT_ID",
+        "GOLEM_OIDC_CLIENT_SECRET",
+        "GOLEM_PUSH_TOKEN_SECRET",
+        "GOLEM_PUBLIC_BASE_URL",
+        "GOLEM_MATTERMOST_URL",
+        "GOLEM_MATTERMOST_BOT_TOKEN",
+        "GOLEM_MATTERMOST_COMMAND_TOKEN",
+        "GOLEM_MATTERMOST_AGENTS",
+        "GOLEM_MATTERMOST_TEAMS",
+    )
+    return MattermostAdapterSettings(
+        edge_url=_base_url(v, "GOLEM_EDGE_URL"),
+        token_url=v["GOLEM_OIDC_TOKEN_URL"],
+        client_id=v["GOLEM_OIDC_CLIENT_ID"],
+        client_secret=v["GOLEM_OIDC_CLIENT_SECRET"],
+        mattermost_url=_base_url(v, "GOLEM_MATTERMOST_URL"),
+        bot_token=v["GOLEM_MATTERMOST_BOT_TOKEN"],
+        command_token=v["GOLEM_MATTERMOST_COMMAND_TOKEN"].encode(),
+        push_secret=v["GOLEM_PUSH_TOKEN_SECRET"].encode(),
+        agents=_names(v, "GOLEM_MATTERMOST_AGENTS"),
+        teams=_names(v, "GOLEM_MATTERMOST_TEAMS"),
+        channels=_names(env, "GOLEM_MATTERMOST_CHANNELS", required=False),
+        public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
+        port=_port(env),
+    )
+
+
+def _names(env: Mapping[str, str], name: str, *, required: bool = True) -> frozenset[str]:
+    names = frozenset(n.strip() for n in env.get(name, "").split(",") if n.strip())
+    if required and not names:
+        raise SettingsError(f"{name} must list at least one name, separated by commas")
+    return names

@@ -71,7 +71,9 @@ src/golem/
   tasks/                   A2A task service: tasks in golem_tasks; three listeners (A2A for the
                            edge, run keys and status for MCP servers, run outcomes for the reconciler)
   evaluation/              the quality gate of catalog merge requests: golden set, runs, gate, CLI
+  adapters/common.py       what adapters share: service token, SendMessage, per-run push tokens
   adapters/jira.py         Jira adapter: signed label webhook to SendMessage, task push to a comment
+  adapters/mattermost.py   Mattermost adapter: /golem slash command to SendMessage, push to a post
   mcp/                     platform MCP servers: run token gate, audit, read-only Jira and Confluence tools
   jwks.py                  signing keys from a JWKS URL, shared by the edge and the MCP servers
 deploy/
@@ -111,13 +113,14 @@ launches runs through `KubernetesJobLauncher`: one that proposes `golem/H-2/<run
 Evidence section changed, and three against a gateway that answers garbage, answers megabytes
 or never answers, each of which must fail with nothing pushed.
 
-One image, five processes: `python -m golem.edge`, `python -m golem.tasks`,
-`python -m golem.orchestrator.reconciler`, the Jira adapter `python -m golem.adapters` and a
-platform MCP server `python -m golem.mcp`.
+One image, six processes: `python -m golem.edge`, `python -m golem.tasks`,
+`python -m golem.orchestrator.reconciler`, the channel adapters
+`python -m golem.adapters jira` (the default without an argument) and
+`python -m golem.adapters mattermost`, and a platform MCP server `python -m golem.mcp`.
 Each reads its settings from `GOLEM_*` environment variables (`src/golem/settings.py`) and
 refuses to start with a list of every missing one; `deploy/compose.yaml` sets them all for the
-first three. The Jira adapter and the MCP servers are not in compose: they need Jira and
-Confluence, and the adapter an identity provider.
+first three. The adapters and the MCP servers are not in compose: they need Jira, Confluence
+or Mattermost, and the adapters an identity provider.
 Compose has no Kubernetes, GitLab or identity provider:
 the task service runs with `GOLEM_KUBERNETES=none` and refuses every run with that reason, and
 the edge cannot fetch signing keys, so it serves public agent cards on
@@ -211,11 +214,36 @@ Putting a label on an issue starts an agent; the outcome comes back as a comment
   Jira Data Center: leave `GOLEM_JIRA_USER` unset and put a personal access token in
   `GOLEM_JIRA_TOKEN` (Bearer).
 
-The task service does not send push notifications yet (its request handler has no push
-config store or sender), so until it does, a run started from Jira ends without a comment.
+The task service pushes only to URLs under its `GOLEM_PUSH_ALLOWED_PREFIXES`, so the
+adapter's `GOLEM_PUBLIC_BASE_URL` must be under one of them.
 
 Other settings: `GOLEM_EDGE_URL`, `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_JIRA_URL`,
 `GOLEM_JIRA_WEBHOOK_SECRET`, `GOLEM_PUSH_TOKEN_SECRET`, `GOLEM_PORT`.
+
+## Mattermost adapter
+
+`/golem <agent> <goal>` in a channel starts an agent; the outcome comes back as a post in that
+channel ([ADR 0010](docs/adr/0010-mattermost-adapter.md)).
+
+- **Slash command** (`POST /mattermost/command`): create a custom slash command `/golem`
+  pointing here and put its token in `GOLEM_MATTERMOST_COMMAND_TOKEN`. A request without
+  `Authorization: Token <that token>` is refused with 401. Mattermost signs nothing else, so
+  the NetworkPolicy admits only the Mattermost server, and the command works only in
+  `GOLEM_MATTERMOST_TEAMS` (team ids) and, if set, `GOLEM_MATTERMOST_CHANNELS` (channel ids).
+  `<agent>` must be in `GOLEM_MATTERMOST_AGENTS`; anything else gets a private usage reply.
+- **To the edge**: `SendMessage` as `service:<GOLEM_OIDC_CLIENT_ID>` (client credentials, as
+  for Jira), message id `mattermost:<hash of trigger_id>` (a replayed request starts no second
+  run), the chat user's id and name in the message metadata and the goal text, and a push
+  config with a per-run token naming the channel and the user. The user gets a private reply
+  with the task id. The run's caller is the adapter, not the user: the edge cannot verify who
+  typed the command (ADR 0010).
+- **Back to Mattermost** (`POST /a2a/push`): a terminal task state becomes one post in the
+  channel mentioning the user, with the state and the reason or the merge request URL, through
+  `POST /api/v4/posts` with a bot account's access token (`GOLEM_MATTERMOST_BOT_TOKEN`). Add
+  the bot to every allowed channel.
+
+Other settings: `GOLEM_EDGE_URL`, `GOLEM_OIDC_TOKEN_URL`, `GOLEM_OIDC_CLIENT_SECRET`,
+`GOLEM_MATTERMOST_URL`, `GOLEM_PUSH_TOKEN_SECRET`, `GOLEM_PUBLIC_BASE_URL`, `GOLEM_PORT`.
 
 ## Evaluation of a catalog change
 
@@ -234,11 +262,13 @@ format and the commands: [examples/discovery/evals/README.md](examples/discovery
 Not deployed. The whole run lifecycle above is implemented and tested: Postgres and Kubernetes
 parts against real Postgres 17 and k3s in testcontainers, git against real repositories, the
 model and GitLab through fakes at their boundaries. The Kubernetes manifests are applied to k3s
-in tests: RBAC through access reviews, network policies with real traffic. The Jira adapter is tested against the real
-edge and task service, with Jira and the identity provider faked at their HTTP boundaries.
+in tests: RBAC through access reviews, network policies with real traffic. The Jira and
+Mattermost adapters are tested against the real edge and task service (for Mattermost, the
+push back from the task service too), with Jira, Mattermost and the identity provider faked at
+their HTTP boundaries.
 The Jira and Confluence MCP servers are tested with the runtime's own MCP client against the
 real task service and audit log, with Jira and Confluence faked at their HTTP boundaries.
 The evaluation of catalog merge requests runs in the catalog's CI job, tested with fake roles
-over the example golden set. Not built yet: the Mattermost and GitLab adapters, the GitLab MCP
+over the example golden set. Not built yet: the GitLab adapter, the GitLab MCP
 server, a UI, the orchestrator's evaluation workflow with a model judge and trace store, and
 Temporal (target).

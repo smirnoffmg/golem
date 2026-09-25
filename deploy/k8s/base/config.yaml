@@ -6,10 +6,10 @@ metadata:
   name: golem-config
   namespace: golem-system
 data:
-  # The edge's call registry: callee agent to the callers allowed to call it. The Jira adapter
-  # calls as service:<its OIDC client id>.
+  # The edge's call registry: callee agent to the callers allowed to call it. The adapters
+  # call as service:<their OIDC client id>.
   call-registry.yaml: |
-    discovery: ["user:*", "service:golem-jira-adapter"]
+    discovery: ["user:*", "service:golem-jira-adapter", "service:golem-mattermost-adapter"]
   catalogs.yaml: |
     discovery: https://gitlab.example.com/agents/discovery.git#main
   # The platform's grant per agent, whatever the agent's catalog asks for (ADR 0007).

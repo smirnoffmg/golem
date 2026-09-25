@@ -151,6 +151,7 @@ RBAC = [
         for account in (
             f"{SYSTEM}/golem-edge",
             f"{SYSTEM}/golem-jira-adapter",
+            f"{SYSTEM}/golem-mattermost-adapter",
             f"{SYSTEM}/golem-mcp",
             f"{SYSTEM}/default",
             f"{JOBS}/default",
