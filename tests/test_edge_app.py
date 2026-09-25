@@ -19,6 +19,7 @@ UNREACHABLE_DSN = "host=127.0.0.1 port=1 dbname=golem_audit user=golem_edge conn
 
 TOKENS = {
     "alice-token": Principal(name="user:alice", chain=()),
+    "bob-token": Principal(name="user:bob", chain=()),
     "ci-token": Principal(name="service:ci", chain=()),
 }
 
@@ -271,6 +272,36 @@ async def test_get_and_cancel_are_forwarded(
     ]
 
 
+def list_tasks(tenant: str = "reviewer") -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": 10, "method": "ListTasks", "params": {"tenant": tenant}}
+
+
+async def test_list_tasks_is_audited_and_shows_only_the_callers_tasks(
+    edge: httpx.AsyncClient, audit_admin_dsn: str
+) -> None:
+    mine = (await call(edge, send_message())).json()["result"]["task"]
+
+    alice = await call(edge, list_tasks())
+    bob = await call(edge, list_tasks(), token="bob-token")
+
+    assert [task["id"] for task in alice.json()["result"]["tasks"]] == [mine["id"]]
+    assert bob.json()["result"]["tasks"] == []
+    assert [(row[0], row[2], row[3]) for row in await audit_rows(audit_admin_dsn)] == [
+        ("user:alice", "SendMessage", "allow"),
+        ("user:alice", "ListTasks", "allow"),
+        ("user:bob", "ListTasks", "allow"),
+    ]
+
+
+async def test_list_tasks_is_subject_to_the_call_registry(
+    edge: httpx.AsyncClient, tasks: TaskService
+) -> None:
+    response = await call(edge, list_tasks(tenant="evaluator"))
+
+    assert error_of(response)["code"] == CALL_DENIED
+    assert tasks.received == []
+
+
 async def test_unknown_agent_is_denied_audited_and_not_forwarded(
     edge: httpx.AsyncClient, tasks: TaskService, audit_admin_dsn: str
 ) -> None:
@@ -308,7 +339,7 @@ async def test_caller_not_in_the_registry_entry_is_denied(
 @pytest.mark.parametrize(
     ("body", "code"),
     [
-        (send_message(method="ListTasks"), -32601),
+        (send_message(method="ListTaskPushNotificationConfigs"), -32601),
         (send_message(method="SendStreamingMessage"), -32601),
         (send_message(tenant=None), -32602),
         (send_message(tenant=""), -32602),

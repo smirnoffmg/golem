@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Golem: agents{% endblock %}
+{% block main %}
+<h1>Agents</h1>
+{% for name, card in cards %}
+<section class="card">
+  {% if card %}
+  <h2>{{ card.name }} <span class="version">{{ card.version }}</span></h2>
+  <p>{{ card.description }}</p>
+  {% if card.skills %}
+  <ul>
+    {% for skill in card.skills %}
+    <li><strong>{{ skill.name }}</strong>: {{ skill.description }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <p><a class="button" href="/tasks/new?agent={{ name | urlencode }}">Give {{ name }} a task</a></p>
+  {% else %}
+  <h2>{{ name }}</h2>
+  <p class="muted">Its card is unavailable right now.</p>
+  {% endif %}
+</section>
+{% endfor %}
+{% endblock %}

@@ -41,6 +41,13 @@ metadata:
   namespace: golem-system
 automountServiceAccountToken: false
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: golem-ui
+  namespace: golem-system
+automountServiceAccountToken: false
+---
 # The task service launches a run's Job, reads it back on a name conflict, deletes it on cancel,
 # and creates the run token Secret. No get/list/watch on Secrets: it never reads a token back.
 apiVersion: rbac.authorization.k8s.io/v1

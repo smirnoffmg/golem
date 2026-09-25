@@ -30,9 +30,10 @@ is the catalog, and the figure is stopped by the platform, not by the model.
 | Task service | `golem_tasks` | A2A task lifecycle: executor, store, push notifications, resume after a human answer |
 | Orchestrator | `golem_runs` | run admission and quotas; run, process and evaluation workflows; Jobs; merge requests |
 | Runtime Job | none (ephemeral) | one image for every agent: loads the catalog, runs the lead and roles, writes a branch, emits traces |
-| Channel adapters | none | UI, Jira and GitLab webhooks, chat bot, all as A2A clients |
+| Web UI | `golem_ui` | sign-in, agents, starting, listing and canceling one's own tasks; calls the edge with the user's own token |
+| Channel adapters | none | Jira and GitLab webhooks, chat bot, all as A2A clients |
 | Platform MCP servers | none | Jira, Confluence and GitLab tools; accept run tokens only; hold their own secrets; audit every decision |
-| Postgres cluster | `golem_tasks`, `golem_runs`, `golem_audit` | one cluster, one owner per database |
+| Postgres cluster | `golem_tasks`, `golem_runs`, `golem_audit`, `golem_ui` | one cluster, one owner per database |
 
 Details and diagrams: [docs/architecture.md](docs/architecture.md). Decisions:
 [docs/adr](docs/adr).
@@ -74,6 +75,8 @@ src/golem/
   adapters/common.py       what adapters share: service token, SendMessage, per-run push tokens
   adapters/jira.py         Jira adapter: signed label webhook to SendMessage, task push to a comment
   adapters/mattermost.py   Mattermost adapter: /golem slash command to SendMessage, push to a post
+  ui/                      web UI, a backend-for-frontend: OIDC login with PKCE, sessions in golem_ui,
+                           Jinja2 pages, A2A calls to the edge with the user's own token
   mcp/                     platform MCP servers: run token gate, audit, read-only Jira and Confluence tools
   jwks.py                  signing keys from a JWKS URL, shared by the edge and the MCP servers
 deploy/
@@ -113,14 +116,15 @@ launches runs through `KubernetesJobLauncher`: one that proposes `golem/H-2/<run
 Evidence section changed, and three against a gateway that answers garbage, answers megabytes
 or never answers, each of which must fail with nothing pushed.
 
-One image, six processes: `python -m golem.edge`, `python -m golem.tasks`,
+One image, seven processes: `python -m golem.edge`, `python -m golem.tasks`,
 `python -m golem.orchestrator.reconciler`, the channel adapters
 `python -m golem.adapters jira` (the default without an argument) and
-`python -m golem.adapters mattermost`, and a platform MCP server `python -m golem.mcp`.
+`python -m golem.adapters mattermost`, a platform MCP server `python -m golem.mcp`, and the
+web UI `python -m golem.ui`.
 Each reads its settings from `GOLEM_*` environment variables (`src/golem/settings.py`) and
 refuses to start with a list of every missing one; `deploy/compose.yaml` sets them all for the
-first three. The adapters and the MCP servers are not in compose: they need Jira, Confluence
-or Mattermost, and the adapters an identity provider.
+first three. The adapters, the MCP servers and the UI are not in compose: they need Jira,
+Confluence or Mattermost, and the adapters and the UI an identity provider.
 Compose has no Kubernetes, GitLab or identity provider:
 the task service runs with `GOLEM_KUBERNETES=none` and refuses every run with that reason, and
 the edge cannot fetch signing keys, so it serves public agent cards on
@@ -245,6 +249,39 @@ channel ([ADR 0010](docs/adr/0010-mattermost-adapter.md)).
 Other settings: `GOLEM_EDGE_URL`, `GOLEM_OIDC_TOKEN_URL`, `GOLEM_OIDC_CLIENT_SECRET`,
 `GOLEM_MATTERMOST_URL`, `GOLEM_PUSH_TOKEN_SECRET`, `GOLEM_PUBLIC_BASE_URL`, `GOLEM_PORT`.
 
+## Web UI
+
+`python -m golem.ui` serves pages for people: sign in, see the agents, give one a goal, see
+one's own tasks and cancel one ([ADR 0011](docs/adr/0011-web-ui.md)). It is a
+backend-for-frontend: the browser gets pages and one cookie, never a token.
+
+- **Sign-in**: OpenID Connect authorization code flow with PKCE S256, the UI a confidential
+  client (`client_secret_basic`). `state`, `nonce` and the verifier are used once, expire after
+  ten minutes and are bound to the browser that started the sign-in. The ID token's signature,
+  issuer, audience, `azp`, expiry and nonce are checked.
+- **Sessions** live in `golem_ui` (role `golem_ui`): the row is keyed by a hash of the cookie,
+  and the access, refresh and ID tokens are encrypted with `GOLEM_UI_SESSION_KEY` (a Fernet
+  key). The cookie is `__Host-golem-session` with `Path=/; Secure; HttpOnly; SameSite=Lax`. The
+  access token is refreshed a minute before it expires; a failed refresh ends the session, and
+  every session ends twelve hours after sign-in. Signing out deletes the session and, if the
+  identity provider offers one, goes through its end-session endpoint.
+- **To the edge**: `SendMessage`, `GetTask`, `ListTasks` and `CancelTask` with the user's own
+  access token, so the run's caller is `user:<name>`; the call registry must allow `user:*`
+  (or the users) for each agent in `GOLEM_UI_AGENTS`. The message id comes from a nonce in each
+  rendered form, so a double submit starts one run. The access token must carry the edge's
+  audience.
+- **In the browser**: server-rendered Jinja2 with autoescape, no scripts, no third-party
+  assets; every `POST` carries the session's CSRF token; every response has a strict
+  Content-Security-Policy, `nosniff`, `Referrer-Policy: same-origin` and, over https, HSTS.
+
+At the identity provider, register `GOLEM_OIDC_REDIRECT_URL` (`GOLEM_PUBLIC_BASE_URL` +
+`/callback`) and `GOLEM_PUBLIC_BASE_URL` + `/` as the post-logout redirect URL.
+Settings: `GOLEM_OIDC_ISSUER`, `GOLEM_OIDC_DISCOVERY_URL`, `GOLEM_OIDC_CLIENT_ID`,
+`GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_OIDC_REDIRECT_URL`, `GOLEM_EDGE_URL`, `GOLEM_UI_DSN`,
+`GOLEM_UI_SESSION_KEY` (`python -c "from cryptography.fernet import Fernet;
+print(Fernet.generate_key().decode())"`), `GOLEM_UI_AGENTS`, `GOLEM_PUBLIC_BASE_URL` (https, or
+http on localhost), `GOLEM_PORT`.
+
 ## Evaluation of a catalog change
 
 A merge request to an agent catalog runs `python -m golem.evaluation run` in the catalog
@@ -265,10 +302,11 @@ model and GitLab through fakes at their boundaries. The Kubernetes manifests are
 in tests: RBAC through access reviews, network policies with real traffic. The Jira and
 Mattermost adapters are tested against the real edge and task service (for Mattermost, the
 push back from the task service too), with Jira, Mattermost and the identity provider faked at
-their HTTP boundaries.
+their HTTP boundaries. The web UI is tested through the real edge and task service with its
+sessions in real Postgres and the identity provider faked at its HTTP boundary.
 The Jira and Confluence MCP servers are tested with the runtime's own MCP client against the
 real task service and audit log, with Jira and Confluence faked at their HTTP boundaries.
 The evaluation of catalog merge requests runs in the catalog's CI job, tested with fake roles
 over the example golden set. Not built yet: the GitLab adapter, the GitLab MCP
-server, a UI, the orchestrator's evaluation workflow with a model judge and trace store, and
+server, the UI's decision queue, the orchestrator's evaluation workflow with a model judge and trace store, and
 Temporal (target).

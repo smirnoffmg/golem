@@ -1,0 +1,105 @@
+# The web UI: a backend-for-frontend (ADR 0011). Browsers reach it through the ingress
+# controller; it signs users in at the identity provider, keeps their tokens in golem_ui and
+# calls the edge with each user's own access token.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-ui-env
+  namespace: golem-system
+data:
+  GOLEM_OIDC_ISSUER: https://idp.example.com/realms/golem
+  GOLEM_OIDC_DISCOVERY_URL: https://idp.example.com/realms/golem/.well-known/openid-configuration
+  # A confidential client with the standard flow, PKCE S256 required, the redirect URL below
+  # and GOLEM_PUBLIC_BASE_URL + "/" as its post-logout redirect URL. Its access tokens must
+  # carry the edge's audience (golem-edge).
+  GOLEM_OIDC_CLIENT_ID: golem-ui
+  GOLEM_OIDC_REDIRECT_URL: https://golem-ui.example.com/callback
+  # The edge's Service, not its public host: the UI calls it inside the cluster.
+  GOLEM_EDGE_URL: http://edge.golem-system.svc:8000
+  # Agents the UI offers; the call registry must allow user:* (or the users) for each.
+  GOLEM_UI_AGENTS: discovery
+  GOLEM_PUBLIC_BASE_URL: https://golem-ui.example.com
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  namespace: golem-system
+  labels:
+    app.kubernetes.io/name: golem-ui
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: golem-ui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-ui
+        app.kubernetes.io/part-of: golem
+    spec:
+      serviceAccountName: golem-ui
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ui
+          image: golem
+          command: ["python", "-m", "golem.ui"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: golem-ui-env
+            - secretRef:
+                name: golem-ui
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # The stylesheet is the one route that needs neither a session nor the database.
+          readinessProbe:
+            httpGet:
+              path: /static/golem.css
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  namespace: golem-system
+spec:
+  selector:
+    app.kubernetes.io/name: golem-ui
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

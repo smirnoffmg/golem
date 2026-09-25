@@ -7,6 +7,8 @@ CREATE ROLE golem_tasks LOGIN PASSWORD 'dev-only-golem-tasks' CONNECTION LIMIT 4
 CREATE ROLE golem_runs  LOGIN PASSWORD 'dev-only-golem-runs'  CONNECTION LIMIT 20;
 CREATE ROLE golem_edge  LOGIN PASSWORD 'dev-only-golem-edge'  CONNECTION LIMIT 10;
 CREATE ROLE golem_mcp   LOGIN PASSWORD 'dev-only-golem-mcp'   CONNECTION LIMIT 10;
+-- The web UI's sessions: tokens encrypted by the UI, readable by no other service (ADR 0011).
+CREATE ROLE golem_ui    LOGIN PASSWORD 'dev-only-golem-ui'    CONNECTION LIMIT 10;
 -- Owns the audit log but is not any service's identity, so no running service holds
 -- UPDATE, DELETE or TRUNCATE on it.
 CREATE ROLE golem_audit_owner NOLOGIN;
@@ -15,14 +17,17 @@ ALTER ROLE golem_tasks SET statement_timeout = '5s';
 ALTER ROLE golem_runs  SET statement_timeout = '5s';
 ALTER ROLE golem_edge  SET statement_timeout = '2s';
 ALTER ROLE golem_mcp   SET statement_timeout = '2s';
+ALTER ROLE golem_ui    SET statement_timeout = '5s';
 
 CREATE DATABASE golem_tasks OWNER golem_tasks;
 CREATE DATABASE golem_runs  OWNER golem_runs;
 CREATE DATABASE golem_audit OWNER golem_audit_owner;
+CREATE DATABASE golem_ui    OWNER golem_ui;
 
 REVOKE CONNECT, TEMPORARY ON DATABASE golem_tasks FROM PUBLIC;
 REVOKE CONNECT, TEMPORARY ON DATABASE golem_runs  FROM PUBLIC;
 REVOKE CONNECT, TEMPORARY ON DATABASE golem_audit FROM PUBLIC;
+REVOKE CONNECT, TEMPORARY ON DATABASE golem_ui    FROM PUBLIC;
 
 GRANT CONNECT ON DATABASE golem_audit TO golem_edge, golem_mcp;
 

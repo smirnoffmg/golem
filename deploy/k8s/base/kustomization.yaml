@@ -13,6 +13,7 @@ resources:
   - jira-adapter.yaml
   - mattermost-adapter.yaml
   - mcp-servers.yaml
+  - ui.yaml
   - network-policies-system.yaml
   - network-policies-jobs.yaml
 

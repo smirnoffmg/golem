@@ -134,3 +134,39 @@ async def test_push_tokens_are_stored_encrypted(engine: AsyncEngine) -> None:
         rows = (await conn.execute(text("SELECT * FROM push_notification_configs"))).all()
     assert rows
     assert all("secret-push-token" not in str(row) for row in rows)
+
+
+async def test_list_tasks_in_golem_tasks_shows_only_the_callers_tasks(engine: AsyncEngine) -> None:
+    async def list_as(client: httpx.AsyncClient, principal: str) -> list[str]:
+        body = (
+            await client.post(
+                "/a2a",
+                headers={"A2A-Version": "1.0", "X-Golem-Principal": principal},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "ListTasks",
+                    "params": {"tenant": "reviewer"},
+                },
+            )
+        ).json()
+        return [task["id"] for task in body["result"]["tasks"]]
+
+    async with service(engine, FakeOrchestrator()) as client:
+        task = (
+            await rpc(
+                client,
+                "SendMessage",
+                {
+                    "tenant": "reviewer",
+                    "message": {
+                        "role": "ROLE_USER",
+                        "messageId": "m-list",
+                        "parts": [{"text": "go"}],
+                    },
+                },
+            )
+        )["task"]
+
+        assert task["id"] in await list_as(client, "user:alice")
+        assert task["id"] not in await list_as(client, "user:mallory")

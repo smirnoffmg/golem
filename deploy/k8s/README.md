@@ -23,7 +23,7 @@ and checks RBAC and network policies with real traffic.
 
 | Namespace | Holds | Pod Security |
 | --- | --- | --- |
-| `golem-system` (`golem.dev/zone: system`) | `edge` (2 replicas), `tasks`, `reconciler`, `jira-adapter`, `mattermost-adapter`, `mcp-tracker-read`, `mcp-wiki-read` | `restricted` |
+| `golem-system` (`golem.dev/zone: system`) | `edge` (2 replicas), `tasks`, `reconciler`, `jira-adapter`, `mattermost-adapter`, `mcp-tracker-read`, `mcp-wiki-read`, `ui` (2 replicas) | `restricted` |
 | `golem-jobs` (`golem.dev/zone: jobs`) | runs only: the Jobs the task service launches, their token Secrets, the MCP registry, a `ResourceQuota` | `restricted` |
 
 Every process listens on 8000 and its Service exposes 8000, except the reconciler, which has
@@ -39,8 +39,8 @@ per kind of caller (ADR 0009):
 `GOLEM_PORT`, `GOLEM_INTERNAL_READ_PORT` and `GOLEM_INTERNAL_WRITE_PORT` move them; the
 Deployment's container ports, the Service and the `tasks` policy must move with them. Probes:
 `tasks` uses `GET /internal/run-keys` on `internal-read`, since the `a2a` port answers only to
-the edge; the edge, the adapters and the MCP servers have no cheap unauthenticated route, so their
-probes are TCP.
+the edge; the UI's readiness probe gets its stylesheet; the edge, the adapters and the MCP servers
+have no cheap unauthenticated route, so their probes are TCP.
 
 ## Image
 
@@ -76,6 +76,7 @@ Without the operator, create the same Secrets with the same keys some other way.
 | golem-system | `golem-reconciler` | `GOLEM_RUNS_DSN`, `GOLEM_GITLAB_TOKEN` (merge requests) | reconciler |
 | golem-system | `golem-jira-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_JIRA_TOKEN`, `GOLEM_JIRA_WEBHOOK_SECRET`, `GOLEM_PUSH_TOKEN_SECRET` | Jira adapter |
 | golem-system | `golem-mattermost-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_MATTERMOST_BOT_TOKEN` (the bot account's access token), `GOLEM_MATTERMOST_COMMAND_TOKEN` (the slash command's token), `GOLEM_PUSH_TOKEN_SECRET` (its own, not the Jira adapter's) | Mattermost adapter |
+| golem-system | `golem-ui` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_UI_DSN` (role `golem_ui`, database `golem_ui`), `GOLEM_UI_SESSION_KEY` (a Fernet key: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`; rotating it signs everyone out) | web UI |
 | golem-system | `golem-mcp-tracker-read`, `golem-mcp-wiki-read` | `GOLEM_MCP_UPSTREAM_TOKEN` (Jira, Confluence), `GOLEM_AUDIT_DSN` (role `golem_mcp`) | MCP servers |
 | golem-jobs | `golem-run-secrets` (`GOLEM_JOB_SECRET`) | `GOLEM_MODEL_GATEWAY_URL`, `GOLEM_MODEL`, `GOLEM_MODEL_KEY`, optional `GOLEM_MODEL_TIMEOUT_SECONDS` (per call, default 120), `GOLEM_GIT_TOKEN` (branch-only), `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | every run's Job |
 
@@ -101,18 +102,19 @@ overlay.
 
 | Placeholder | Where | Meaning |
 | --- | --- | --- |
-| `192.0.2.10/32:5432` | policies `edge`, `tasks`, `reconciler`, `mcp` | Postgres. For an in-cluster Postgres, replace the `ipBlock` with a `namespaceSelector` and `podSelector`. |
+| `192.0.2.10/32:5432` | policies `edge`, `tasks`, `reconciler`, `mcp`, `ui` | Postgres. For an in-cluster Postgres, replace the `ipBlock` with a `namespaceSelector` and `podSelector`. |
 | `192.0.2.1/32:443,6443` | policies `tasks`, `reconciler` | The Kubernetes API server (see below). |
-| `198.51.100.10/32:443` | policies `edge`, `jira-adapter`, `mattermost-adapter` | The identity provider: JWKS for the edge, client credentials for the adapter. |
+| `198.51.100.10/32:443` | policies `edge`, `jira-adapter`, `mattermost-adapter`, `ui` | The identity provider: JWKS for the edge, client credentials for the adapters, sign-in and refresh for the UI. |
 | `198.51.100.20/32:443` | policies `jira-adapter`, `mcp` | Jira and Confluence. |
 | `198.51.100.30/32:443` | policy `reconciler`; `:443,22` in `golem-run-egress` | GitLab: merge requests, and the runs' clone and push. |
 | `203.0.113.10/32:4000` | `golem-run-egress` | The model gateway. |
 | `203.0.113.20/32:443` | `golem-run-egress` | The trace store's OTLP endpoint. |
 | `203.0.113.30/32`, ingress `:8000`, egress `:443` | policy `mattermost-adapter` | The Mattermost server: it sends slash commands and serves the REST API the adapter posts to. If commands reach the adapter through the ingress controller, admit the controller's namespace instead and restrict the source to Mattermost at the ingress; route `/mattermost/command` to Service `mattermost-adapter`. |
-| `golem.dev/ingress-controller: "true"` | policies `edge`, `jira-adapter` | Label your ingress controller's namespace with it, or patch the selector. The base has no Ingress objects: route the public host to Service `edge` and the Jira webhook path to `jira-adapter`. |
+| `golem.dev/ingress-controller: "true"` | policies `edge`, `jira-adapter`, `ui` | Label your ingress controller's namespace with it, or patch the selector. The base has no Ingress objects: route the public host to Service `edge`, the Jira webhook path to `jira-adapter`, and the UI's host (TLS terminated at the ingress) to Service `ui`. |
 | `https://idp.example.com/...`, `golem-edge` | `golem-edge-env`, `golem-jira-adapter-env`, `golem-mattermost-adapter-env` | Issuer, JWKS, discovery and token URLs; the edge's audience; the adapters' client ids (also in the call registry as `service:golem-jira-adapter` and `service:golem-mattermost-adapter`). |
 | `https://mattermost.example.com`, `replace-with-team-id`, `discovery` | `golem-mattermost-adapter-env` | The Mattermost URL; the team ids (and optionally channel ids, `GOLEM_MATTERMOST_CHANNELS`) where `/golem` is enabled; the agents it may start. |
 | `https://golem.example.com` | `golem-edge-env`, `golem-tasks-env` | `GOLEM_PUBLIC_BASE_URL`: the edge's public address. |
+| `https://golem-ui.example.com`, `golem-ui`, `discovery` | `golem-ui-env` | The UI's public address and its redirect URL (both registered at the identity provider, with the address + `/` as the post-logout redirect), its client id, and the agents it offers (each needs `user:*` in the call registry). |
 | `https://jira.example.com`, `https://confluence.example.com`, `data-center`, empty `*_USER` | adapter and MCP ConfigMaps | Atlassian hosts; for Cloud set `GOLEM_MCP_JIRA_DEPLOYMENT: cloud` and the account email in `GOLEM_JIRA_USER` / `GOLEM_MCP_UPSTREAM_USER`. |
 | `https://gitlab.example.com`, `golem-config` | reconciler, `golem-config` | GitLab URL; the call registry, catalogs, agent tool grants, GitLab projects, Jira labels. |
 | `GOLEM_CATALOGS_DIR: /app/examples` | `golem-edge-env` | Agent cards come from the example catalogs baked into the image; mount your catalogs instead. |

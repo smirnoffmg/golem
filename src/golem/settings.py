@@ -9,9 +9,11 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.fernet import Fernet
 
 from golem.edge.policy import Registry
 from golem.orchestrator.admission import Limits
@@ -487,3 +489,76 @@ def _names(env: Mapping[str, str], name: str, *, required: bool = True) -> froze
     if required and not names:
         raise SettingsError(f"{name} must list at least one name, separated by commas")
     return names
+
+
+@dataclass(frozen=True)
+class UiSettings:
+    issuer: str
+    discovery_url: str
+    client_id: str
+    client_secret: str = field(repr=False)
+    redirect_url: str
+    edge_url: str
+    dsn: str = field(repr=False)
+    session_key: str = field(repr=False)
+    agents: tuple[str, ...]
+    public_base_url: str
+    port: int
+
+
+UI_CALLBACK_PATH = "/callback"
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def ui_settings(env: Env) -> UiSettings:
+    v = _values(
+        env,
+        "GOLEM_OIDC_ISSUER",
+        "GOLEM_OIDC_DISCOVERY_URL",
+        "GOLEM_OIDC_CLIENT_ID",
+        "GOLEM_OIDC_CLIENT_SECRET",
+        "GOLEM_OIDC_REDIRECT_URL",
+        "GOLEM_EDGE_URL",
+        "GOLEM_UI_DSN",
+        "GOLEM_UI_SESSION_KEY",
+        "GOLEM_UI_AGENTS",
+        "GOLEM_PUBLIC_BASE_URL",
+    )
+    public_base_url = _base_url(v, "GOLEM_PUBLIC_BASE_URL")
+    public = urlsplit(public_base_url)
+    # The session cookie is Secure with the __Host- prefix, which browsers accept over plain
+    # HTTP only on localhost.
+    if public.scheme != "https" and not (
+        public.scheme == "http" and public.hostname in LOCAL_HOSTS
+    ):
+        raise SettingsError(
+            "GOLEM_PUBLIC_BASE_URL must be https (plain http only on localhost):"
+            f" {public_base_url!r}"
+        )
+    if v["GOLEM_OIDC_REDIRECT_URL"] != f"{public_base_url}{UI_CALLBACK_PATH}":
+        raise SettingsError(
+            f"GOLEM_OIDC_REDIRECT_URL must be GOLEM_PUBLIC_BASE_URL + {UI_CALLBACK_PATH!r},"
+            f" got {v['GOLEM_OIDC_REDIRECT_URL']!r}"
+        )
+    try:
+        Fernet(v["GOLEM_UI_SESSION_KEY"])
+    except ValueError as error:
+        raise SettingsError(
+            "GOLEM_UI_SESSION_KEY must be a Fernet key (32 url-safe base64-encoded bytes)"
+        ) from error
+    agents = tuple(a.strip() for a in v["GOLEM_UI_AGENTS"].split(",") if a.strip())
+    if not agents:
+        raise SettingsError("GOLEM_UI_AGENTS must list at least one name, separated by commas")
+    return UiSettings(
+        issuer=v["GOLEM_OIDC_ISSUER"],
+        discovery_url=v["GOLEM_OIDC_DISCOVERY_URL"],
+        client_id=v["GOLEM_OIDC_CLIENT_ID"],
+        client_secret=v["GOLEM_OIDC_CLIENT_SECRET"],
+        redirect_url=v["GOLEM_OIDC_REDIRECT_URL"],
+        edge_url=_base_url(v, "GOLEM_EDGE_URL"),
+        dsn=v["GOLEM_UI_DSN"],
+        session_key=v["GOLEM_UI_SESSION_KEY"],
+        agents=tuple(dict.fromkeys(agents)),
+        public_base_url=public_base_url,
+        port=_port(env),
+    )

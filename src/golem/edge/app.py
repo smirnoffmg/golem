@@ -22,7 +22,8 @@ from golem.edge.policy import Call, ChainLimits, Deny, Registry, evaluate
 RPC_PATH = "/a2a"
 PRINCIPAL_HEADER = "X-Golem-Principal"
 EDGE_TOKEN_HEADER = "X-Golem-Edge-Token"
-FORWARDED_METHODS = frozenset({"SendMessage", "GetTask", "CancelTask"})
+# ListTasks is scoped to the caller by the task store (the owner is the edge principal).
+FORWARDED_METHODS = frozenset({"SendMessage", "GetTask", "ListTasks", "CancelTask"})
 AUDIT_CONNECT_TIMEOUT_SECONDS = 2
 
 PARSE_ERROR = -32700

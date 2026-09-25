@@ -65,6 +65,10 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-mattermost-adapter
+        # The web UI, calling with each signed-in user's own token (ADR 0011).
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-ui
       ports:
         - protocol: TCP
           port: 8000
@@ -346,3 +350,47 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+---
+# Browsers through the ingress controller; out to the edge, the identity provider (discovery,
+# token endpoint, keys) and Postgres (golem_ui). ADR 0011.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ui
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: golem-ui
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Placeholder: the namespace of the ingress controller, labelled by the operator.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              golem.dev/ingress-controller: "true"
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-edge
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Placeholder: the identity provider.
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.10/32
+      ports:
+        - protocol: TCP
+          port: 443
+    # Placeholder: Postgres (golem_ui).
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 5432

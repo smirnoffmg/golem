@@ -25,6 +25,7 @@ One Postgres cluster, several databases, exactly one owner each.
 | `golem_tasks` | task service (`golem_tasks`) | none |
 | `golem_runs` | orchestrator (`golem_runs`) | none |
 | `golem_audit` | `golem_audit_owner`, a `NOLOGIN` role no service uses | `golem_edge`, `golem_mcp`: `INSERT` only |
+| `golem_ui` | web UI (`golem_ui`): sessions, tokens encrypted by the UI (ADR 0011) | none |
 | `temporal`, `temporal_visibility` | Temporal | none (target only) |
 
 - `CONNECT` is revoked from `PUBLIC` on every database; a role can reach only the database it

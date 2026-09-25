@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 import yaml
+from cryptography.fernet import Fernet
 
 from golem.mcp.settings import mcp_settings
 from golem.orchestrator.jobs import APP_LABEL, APP_NAME
@@ -31,6 +32,7 @@ from golem.settings import (
     parse_registry,
     reconciler_settings,
     task_service_settings,
+    ui_settings,
 )
 
 K8S = Path(__file__).parent.parent / "deploy" / "k8s"
@@ -48,6 +50,7 @@ SETTINGS: dict[str, Callable[[Mapping[str, str]], object]] = {
     "mattermost-adapter": mattermost_adapter_settings,
     "mcp-tracker-read": mcp_settings,
     "mcp-wiki-read": mcp_settings,
+    "ui": ui_settings,
 }
 FILE_PARSERS: dict[str, Callable[[str], object]] = {
     "GOLEM_CALL_REGISTRY_FILE": parse_registry,
@@ -71,6 +74,12 @@ TASK_SERVICE_PORTS = {
 }
 IDP_PLACEHOLDER = "198.51.100.10/32"
 MATTERMOST_PLACEHOLDER = "203.0.113.30/32"
+POSTGRES_PLACEHOLDER = "192.0.2.10/32"
+# Secret values whose format the settings parser checks.
+PLACEHOLDER_SECRETS = {"GOLEM_UI_SESSION_KEY": Fernet.generate_key().decode()}
+INGRESS_CONTROLLER = {
+    "namespaceSelector": {"matchLabels": {"golem.dev/ingress-controller": "true"}}
+}
 SERVICE_URL = re.compile(r"^http://([a-z0-9-]+)\.([a-z0-9-]+)\.svc:(\d+)(/.*)?$")
 
 
@@ -126,7 +135,7 @@ def env_of(deployment: dict, objects: list[dict], secrets: Mapping) -> dict[str,
             env |= find(objects, "ConfigMap", source["configMapRef"]["name"], namespace)["data"]
         else:
             keys = secrets[(namespace, source["secretRef"]["name"])]
-            env |= {key: f"placeholder-{key.lower()}" for key in keys}
+            env |= {key: PLACEHOLDER_SECRETS.get(key, f"placeholder-{key.lower()}") for key in keys}
     env |= {e["name"]: e["value"] for e in container(deployment).get("env", []) if "value" in e}
     return env
 
@@ -522,3 +531,58 @@ def test_the_mattermost_adapter_reaches_the_edge_the_idp_and_mattermost_only() -
     assert blocks == {IDP_PLACEHOLDER, MATTERMOST_PLACEHOLDER}
     edge = find(policies(), "NetworkPolicy", "edge", SYSTEM)
     assert "golem-mattermost-adapter" in ports_by_peer(edge["spec"]["ingress"], "from")
+
+
+# --- Web UI -------------------------------------------------------------------------------------
+
+
+def test_the_ui_runs_its_own_module() -> None:
+    deployment = find(render(BASE), "Deployment", "ui", SYSTEM)
+
+    assert container(deployment)["command"] == ["python", "-m", "golem.ui"]
+
+
+def test_the_call_registry_lets_users_start_every_agent_the_ui_offers() -> None:
+    objects = render(EXTERNAL_SECRETS)
+    env = env_of(find(objects, "Deployment", "ui", SYSTEM), objects, secret_keys(objects))
+    registry = parse_registry(
+        find(objects, "ConfigMap", "golem-config", SYSTEM)["data"]["call-registry.yaml"]
+    )
+
+    agents = ui_settings(env).agents
+    assert agents
+    for agent in agents:
+        assert "user:*" in registry.allowed_callers[agent], agent
+
+
+def test_the_ui_is_reached_through_the_ingress_controller_only() -> None:
+    policy = find(policies(), "NetworkPolicy", "ui", SYSTEM)
+
+    assert policy["spec"]["ingress"] == [
+        {"from": [INGRESS_CONTROLLER], "ports": [{"protocol": "TCP", "port": 8000}]}
+    ]
+
+
+def test_the_ui_reaches_the_edge_the_idp_and_postgres_only() -> None:
+    policy = find(policies(), "NetworkPolicy", "ui", SYSTEM)
+    egress = policy["spec"]["egress"]
+
+    assert ports_by_peer(egress, "to") == {"golem-edge": {8000}}
+    blocks = {
+        (peer["ipBlock"]["cidr"], port["port"])
+        for rule in egress
+        for peer in rule["to"]
+        if "ipBlock" in peer
+        for port in rule["ports"]
+    }
+    assert blocks == {(IDP_PLACEHOLDER, 443), (POSTGRES_PLACEHOLDER, 5432)}
+    edge = find(policies(), "NetworkPolicy", "edge", SYSTEM)
+    assert "golem-ui" in ports_by_peer(edge["spec"]["ingress"], "from")
+
+
+def test_the_ui_calls_the_edge_at_its_service() -> None:
+    objects = render(EXTERNAL_SECRETS)
+    env = env_of(find(objects, "Deployment", "ui", SYSTEM), objects, secret_keys(objects))
+
+    match = SERVICE_URL.fullmatch(env["GOLEM_EDGE_URL"])
+    assert match and (match[1], match[2], int(match[3])) == ("edge", SYSTEM, 8000)

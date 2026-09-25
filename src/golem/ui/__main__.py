@@ -1,0 +1,59 @@
+"""The web UI process: ``python -m golem.ui``."""
+
+import asyncio
+import logging
+import os
+import sys
+
+import httpx
+import psycopg
+import uvicorn
+from starlette.types import ASGIApp
+
+from golem.settings import SettingsError, UiSettings, ui_settings
+from golem.ui.app import create_ui_app
+from golem.ui.oidc import OidcClient
+from golem.ui.store import SessionStore, apply_schema
+
+OUTBOUND_TIMEOUT_SECONDS = 10
+# Below the golem_ui role's statement_timeout: a refresh holds its session row meanwhile.
+IDP_TIMEOUT_SECONDS = 4
+
+
+def build_app(settings: UiSettings) -> ASGIApp:
+    return create_ui_app(
+        oidc=OidcClient(
+            http=httpx.AsyncClient(timeout=IDP_TIMEOUT_SECONDS),
+            keys_http=httpx.Client(timeout=IDP_TIMEOUT_SECONDS),
+            issuer=settings.issuer,
+            discovery_url=settings.discovery_url,
+            client_id=settings.client_id,
+            client_secret=settings.client_secret,
+            redirect_url=settings.redirect_url,
+        ),
+        store=SessionStore(settings.dsn, settings.session_key),
+        edge=httpx.AsyncClient(base_url=settings.edge_url, timeout=OUTBOUND_TIMEOUT_SECONDS),
+        agents=settings.agents,
+        public_base_url=settings.public_base_url,
+    )
+
+
+async def prepare(dsn: str) -> None:
+    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
+        await apply_schema(conn)
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    try:
+        settings = ui_settings(os.environ)
+    except SettingsError as error:
+        sys.exit(f"golem ui: {error}")
+    asyncio.run(prepare(settings.dsn))
+    # Behind the ingress controller the client address is the controller's; the UI does not
+    # use it, so no proxy headers are trusted.
+    uvicorn.run(build_app(settings), host="0.0.0.0", port=settings.port, proxy_headers=False)
+
+
+if __name__ == "__main__":
+    main()

@@ -2,8 +2,8 @@
 
 The intended architecture of Golem in C4 notation: context, containers, and components of the
 four containers that matter most. There is no code level on purpose. Nothing here is deployed;
-the run lifecycle and the Jira and Mattermost channel adapters are implemented (see the
-README), and evaluation runs in its pilot form in the catalog's CI job; the GitLab adapter, UI
+the run lifecycle, the Jira and Mattermost channel adapters and the web UI are implemented (see
+the README), and evaluation runs in its pilot form in the catalog's CI job; the GitLab adapter
 and the orchestrator's evaluation workflow are not.
 
 **Pilot and target on the same diagrams.** Pale elements and dashed relationships are the
@@ -113,6 +113,7 @@ token never leaves the server.
 | `golem_runs` | orchestrator | none | cost, chain and quota accounting |
 | `temporal`, `temporal_visibility` | Temporal | none | target only |
 | `golem_audit` | a dedicated owner role that no service uses | A2A edge and MCP servers, `INSERT` only | `UPDATE`, `DELETE`, `TRUNCATE` are held by no service role |
+| `golem_ui` | web UI | none | sessions; access, refresh and ID tokens encrypted with the UI's key |
 
 **Protection from other parties' failures and overload** sits in four places, because every
 incoming task spawns a Job in the team namespace:
@@ -143,6 +144,18 @@ claim the edge cannot verify. A terminal push becomes one post in the channel me
 user: the task service tells each task its outcome at most once, so the adapter keeps no
 state and does no lookup.
 
+**The UI is a backend-for-frontend that calls the edge as the user**
+([ADR 0011](adr/0011-web-ui.md)). The user signs in with the OpenID Connect authorization code
+flow and PKCE S256, the UI a confidential client; `state`, `nonce` and the verifier are single
+use, expire in ten minutes and are bound to the browser by a `__Host-` cookie. Access, refresh
+and ID tokens stay in `golem_ui`, encrypted with the UI's key; the browser holds only a random
+session id in `__Host-golem-session` (`Secure`, `HttpOnly`, `SameSite=Lax`). Every A2A call
+carries the signed-in user's own access token, so the edge, the audit log, admission and the
+task store see `user:<name>`, not the UI; unlike the adapters, the UI has no identity of its
+own at the edge. Pages are server-rendered with autoescape, no inline script and a strict CSP;
+every `POST` carries the session's CSRF token. The edge forwards `ListTasks`, which the task
+store answers with the caller's own tasks only.
+
 ```plantuml
 @startuml
 !include <C4/C4_Container>
@@ -158,7 +171,7 @@ System_Ext(ext_agents, "Agents of other platforms", "A2A", $tags="target")
 System_Ext(ci, "Agent catalog GitLab CI", "evaluation job is an A2A client; Pipelines must succeed")
 
 System_Boundary(platform, "Golem (orchestrator namespace)") {
-  Container(ui, "UI", "web, Keycloak login; A2A client", "agents and their cards, task submission, runs, decision queue")
+  Container(ui, "UI", "Python, server-rendered; backend-for-frontend; OIDC login", "agents and their cards, task submission, my tasks, cancel; decision queue (target); tokens stay server-side")
   Container(adapters, "Channel adapters", "Python; A2A clients", "Jira and GitLab webhooks, Mattermost bot: event to A2A task; accepted merge request to task continuation; push to comment or message")
   Container(edge, "A2A edge", "Python; stateless; 2+ replicas", "the only door; Agent Card; authentication, token exchange; chain policy; per-caller rate limit; audit; outbound calls; fails closed")
   Container(tasks, "Task service", "Python, a2a-sdk, A2A 1.0", "task executor; task store; push notifications; resume after a human answer")
@@ -169,6 +182,7 @@ System_Boundary(platform, "Golem (orchestrator namespace)") {
     ContainerDb(db_runs, "golem_runs", "database; owner: orchestrator", "run records: initiator, chain, version, attempts, cost; quotas")
     ContainerDb(db_temporal, "temporal, temporal_visibility", "two databases; owner: Temporal", "workflow history and search", $tags="target")
     ContainerDb(audit, "golem_audit", "database; INSERT only", "time, account, request, target, operation, result, source, chain")
+    ContainerDb(db_ui, "golem_ui", "database; owner: UI", "sessions; tokens encrypted by the UI")
   }
   Container(mcp, "Platform MCP servers", "Python, MCP SDK; one per tool group; Jira and Confluence read only; GitLab read", "accept run tokens only; grant from token claims; revoked when the run ends; own secrets from Vault; every decision audited")
 }
@@ -190,7 +204,9 @@ Rel(gate, gitlab, "merge request review; accept")
 Rel(author, gitlab, "merge request to an agent catalog")
 Rel(gitlab, ci, "pipeline on catalog merge request")
 
-Rel(ui, edge, "SendMessage, GetTask, CancelTask", "A2A")
+Rel(ui, edge, "SendMessage, GetTask, ListTasks, CancelTask with the user's own token", "A2A")
+Rel(ui, db_ui, "sessions")
+Rel(ui, keycloak, "sign-in, token refresh", "OIDC, PKCE")
 Rel(adapters, edge, "task on behalf of the initiator", "A2A")
 Rel(ci, edge, "task: evaluate catalog version; waits for the verdict", "A2A")
 Rel(tasks, adapters, "state change", "push")
