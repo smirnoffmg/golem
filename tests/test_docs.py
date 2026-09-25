@@ -342,6 +342,11 @@ def test_the_generated_secrets_and_the_example_overlay_satisfy_each_parser(
 
 def test_the_generated_keys_are_what_the_processes_accept(generated: Path) -> None:
     parse_signing_key((generated / "run-token-key.pem").read_text(), "golem-1")
+    parse_signing_key(
+        (generated / "card-signing-key.pem").read_text(),
+        "golem-cards-1",
+        variable="GOLEM_CARD_SIGNING_KEY_FILE",
+    )
     tasks = env_file(generated / "golem-tasks.env")
     Fernet(tasks["GOLEM_PUSH_CONFIG_KEY"])
     assert env_file(generated / "golem-edge.env")["GOLEM_EDGE_TOKEN"] == tasks["GOLEM_EDGE_TOKEN"]

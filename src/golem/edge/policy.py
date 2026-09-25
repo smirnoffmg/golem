@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 
@@ -64,6 +64,24 @@ def evaluate(call: Call, registry: Registry, limits: ChainLimits) -> Allow | Den
             f"{call.caller!r} may not call agent {call.callee!r}",
         )
     return Allow()
+
+
+def callable_agents(
+    caller: str,
+    chain: tuple[str, ...],
+    agents: Iterable[str],
+    registry: Registry,
+    limits: ChainLimits,
+) -> tuple[str, ...]:
+    """The ``agents`` a call by ``caller`` with ``chain`` would be allowed to reach: the
+    directory's view of the same rules, so it never shows what a call would be refused."""
+    return tuple(
+        agent
+        for agent in agents
+        if isinstance(
+            evaluate(Call(caller=caller, callee=agent, chain=chain), registry, limits), Allow
+        )
+    )
 
 
 def _chain_matches_caller(call: Call) -> bool:

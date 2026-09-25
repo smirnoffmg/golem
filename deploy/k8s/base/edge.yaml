@@ -19,6 +19,9 @@ data:
   # The example catalogs baked into the image; an environment mounts its own.
   GOLEM_CATALOGS_DIR: /app/examples
   GOLEM_PUBLIC_BASE_URL: https://golem.example.com
+  # Signs the public agent cards; its own key, rotated apart from the run token key (ADR 0014).
+  GOLEM_CARD_SIGNING_KEY_FILE: /var/run/golem/card-signing/key.pem
+  GOLEM_CARD_SIGNING_KID: golem-cards-1
   # Placeholder: the addresses of the ingress controller's pods (ADR 0012). Rate limits key
   # on the client address, which behind the controller is only in X-Forwarded-For.
   GOLEM_TRUSTED_PROXIES: 192.0.2.128/25
@@ -72,8 +75,8 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
-          # TCP: the edge has no health route, and every HTTP route depends on a token or an
-          # agent name.
+          # TCP: the edge has no health route, and every HTTP route depends on a token, an
+          # agent name or a per-address rate limit the kubelet's probes would share.
           readinessProbe:
             tcpSocket:
               port: http
@@ -96,6 +99,9 @@ spec:
             - name: config
               mountPath: /etc/golem
               readOnly: true
+            - name: card-signing-key
+              mountPath: /var/run/golem/card-signing
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
@@ -105,6 +111,11 @@ spec:
             items:
               - key: call-registry.yaml
                 path: call-registry.yaml
+        - name: card-signing-key
+          secret:
+            secretName: golem-card-signing-key
+            # Group-readable through fsGroup; the container user is not the file's owner.
+            defaultMode: 0440
 ---
 apiVersion: v1
 kind: Service

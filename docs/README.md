@@ -7,6 +7,7 @@
 | [Getting started](guide/getting-started.md) | a first result from the web UI: sign in, give an agent a goal, open its merge request |
 | [Reviewing proposals](guide/reviewing-proposals.md) | gate owners: accept, reject, or retry an agent's merge request |
 | [Channels](guide/channels.md) | starting runs from Jira labels and Mattermost's `/golem` |
+| [Discovering agents](guide/discovering-agents.md) | callers of other platforms: list the agents, verify a card, call one |
 | [Writing an agent](guide/writing-an-agent.md) | agent authors: the catalog, roles, rules, the golden set and the CI gate |
 
 ## For people who run Golem

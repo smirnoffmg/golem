@@ -219,6 +219,8 @@ kubectl -n golem-system logs deploy/<process> --previous | tail -20
 | running, never Ready, probes time out | the CNI does not admit the kubelet's probes under the default deny (kube-router does; others may not) | allow the nodes' addresses to the probe ports in your overlay (environment-specific) |
 | `tasks` exits with `golem task service: GOLEM_RUN_TOKEN_KEY_FILE must hold an unencrypted EC P-256 private key` | the `golem-run-token-key` Secret holds another kind of key | generate it as in [install.md](install.md#6-generate-the-secrets) |
 | pod `ContainerCreating`, event `secret "golem-run-token-key" not found` | the Secret is missing | create it |
+| `edge` exits with `golem edge: GOLEM_CARD_SIGNING_KEY_FILE must hold an unencrypted EC P-256 private key` | the `golem-card-signing-key` Secret holds another kind of key | generate it as in [install.md](install.md#6-generate-the-secrets) |
+| pod `ContainerCreating`, event `secret "golem-card-signing-key" not found` | the Secret is missing (added with the directory of agents) | create it as in [install.md, step 8](install.md#8-apply) |
 
 ## Sign-in to the UI fails
 

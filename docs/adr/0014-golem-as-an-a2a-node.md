@@ -144,3 +144,64 @@ Golem's; it needs the partners' agreement and the security partner's.
   (`golem.run_status`).
 - **No cascade on cancel.** Cancelling a run stops it delegating but does not cancel the
   children it already started; that is left for the step that waits for children (Temporal).
+
+### Step 2 as built
+
+- **Signed cards** (`golem.edge.card_signing`). The edge signs every public card at start
+  with the a2a-sdk's own helpers (`a2a.utils.signing`), so what it signs is what an SDK client
+  checks. Per the A2A 1.0 specification: the payload is the card without `signatures` ("The
+  `signatures` field itself **MUST** be excluded from the content being signed", 8.4.1) and
+  without default values, canonicalized with RFC 8785 (8.4.1); the signature is a JWS (RFC
+  7515) whose protected header carries `alg` `ES256`, `typ` `JOSE`, `kid` and `jku` (8.4.2:
+  "The protected header **MUST** include" `alg`, `typ` "**SHOULD** be set to "JOSE"", `kid`;
+  "**MAY** include" `jku`), kept as `protected` and `signature` in `AgentCardSignature`, the
+  payload detached. Signing replaces any signature a card had.
+- **A key of its own, not next to the run-token keys.** The card key is
+  `GOLEM_CARD_SIGNING_KEY_FILE` with kid `GOLEM_CARD_SIGNING_KID`, held by the edge alone, not
+  the orchestrator's run-token key the Decision above suggested: the run-token key cannot
+  overlap in rotation and breaks runs in flight when rotated, the card key touches no run; and
+  the task service's `internal-read` port is not reachable from outside, so the public key
+  could not be published there anyway. The edge publishes it at
+  `GET /.well-known/golem-card-keys.json` (the `jku` of each signature), one key, cacheable.
+- **Verification** is a pure function, `verify_card(card_json, jwks)`: it parses the card as
+  the SDK's client does, takes keys only from the given key set (never from `jku`: 8.4.3 allows
+  keys "from a trusted key store"), accepts only ES256 and passes when one signature verifies
+  (8.4.3: "Multiple signatures **MAY** be present to support key rotation").
+- **Two limits of the canonical form.** The SDK drops every empty value before canonicalizing,
+  so the card's security requirement (`oidc` with an empty scope list) is outside the signed
+  bytes; its security scheme and the identity provider's URL are inside. And fields A2A 1.0
+  does not define are dropped when the card is parsed, so they are never signed or checked.
+  Both are the reference implementation's behaviour, kept so partners using an SDK agree with
+  the edge on the bytes.
+- **`GET /agents`** answers `{"agents": [{"name", "description", "card_url", "skills"}]}`.
+  Without an `Authorization` header: every published card, cacheable by anyone
+  (`public, max-age=60`). With one: the token is verified exactly as for `/a2a` (IdP or call
+  token, the failure limit per address, revocation of a stopped run's call token), then the
+  list is
+  narrowed by `golem.edge.policy.callable_agents`, which is `evaluate` for each published
+  agent, so the directory never shows what a call would be refused: registry entry, cycle
+  (an agent never sees itself or its chain), depth. `Cache-Control: private, max-age=60`;
+  both answers `Vary: Authorization`. A header with a bad token is 401, never the public list.
+- **Rate limits.** An authenticated listing takes a token from the caller's `/a2a` bucket
+  (`GOLEM_RATE_CALLER`), so listing cannot be used to go around it. Anonymous listings and key
+  set fetches take one from a new per-address bucket, `GOLEM_RATE_DIRECTORY` (120/min, burst
+  60), amending ADR 0012's table. Cards stay unlimited, as before: the UI fetches every card
+  for every user from its own pod address, which a per-address limit would make one client.
+- **Audited when authenticated, never anonymous.** An authenticated listing is the registry's
+  answer to "whom may I call" for that caller, an agent's reconnaissance before delegating
+  among them, so it is recorded like a call: `operation` `ListAgents`, `target_system`
+  `directory`, the agents shown in `request`, the subject as the account and the chain, before
+  the answer; an audit log that cannot be written refuses the listing (503), as for calls.
+  Rows are bounded by the caller's rate limit and a refusal streak writes one row (ADR 0012).
+  An anonymous listing shows only what every card already shows, has no principal to record,
+  and a row per request would grow the insert-only log at the rate of a flood, the
+  "garbage-data creation" ASVS 2.4.1 names (ADR 0012), so it is not audited.
+- **Every edge response** now carries `X-Content-Type-Options: nosniff`, a
+  `Content-Security-Policy` of `default-src 'none'; frame-ancestors 'none'`,
+  `Referrer-Policy: no-referrer`, `Strict-Transport-Security` when the public base URL is
+  HTTPS, and `Cache-Control: no-store` unless the route set its own. Cards and the key set
+  are `public, max-age=300` with an `ETag` and answer `If-None-Match` with 304 (8.6.1:
+  "**SHOULD** include a `Cache-Control` response header with a `max-age` directive",
+  "**SHOULD** include an `ETag`").
+- **Not done:** a partner verifying a card with their own client; publishing the previous card
+  key next to the current one for a rotation overlap; a time in the signature.

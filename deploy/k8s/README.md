@@ -85,6 +85,7 @@ Without the operator, create the same Secrets with the same keys some other way.
 | golem-system | `golem-edge` | `GOLEM_AUDIT_DSN` (role `golem_edge`), `GOLEM_EDGE_TOKEN` | edge |
 | golem-system | `golem-tasks` | `GOLEM_RUNS_DSN` (role `golem_runs`), `GOLEM_TASKS_DB_URL` (`postgresql+asyncpg://golem_tasks:...`), `GOLEM_PUSH_CONFIG_KEY`, `GOLEM_EDGE_TOKEN` | task service |
 | golem-system | `golem-run-token-key` | `key.pem`: unencrypted EC P-256 private key, the run token signing key (kid `GOLEM_RUN_TOKEN_KID`) | task service, mounted as a file |
+| golem-system | `golem-card-signing-key` | `key.pem`: another unencrypted EC P-256 private key, never the run token key's, that signs the agent cards (kid `GOLEM_CARD_SIGNING_KID`; public key at `/.well-known/golem-card-keys.json`) | edge, mounted as a file |
 | golem-system | `golem-reconciler` | `GOLEM_RUNS_DSN`, `GOLEM_GITLAB_TOKEN` (merge requests) | reconciler |
 | golem-system | `golem-jira-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_JIRA_TOKEN`, `GOLEM_JIRA_WEBHOOK_SECRET`, `GOLEM_PUSH_TOKEN_SECRET` | Jira adapter |
 | golem-system | `golem-mattermost-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_MATTERMOST_BOT_TOKEN` (the bot account's access token), `GOLEM_MATTERMOST_COMMAND_TOKEN` (the slash command's token), `GOLEM_PUSH_TOKEN_SECRET` (its own, not the Jira adapter's) | Mattermost adapter |
@@ -99,7 +100,8 @@ only together with it. Any long random string will do, for example
 Secrets and restart both Deployments.
 
 The run Secret also carries the two non-secret model settings, because a Job's environment
-comes only from Secrets. A key pair for the run tokens:
+comes only from Secrets. A key pair for the run tokens, and the same command again for the card signing key (a key of
+its own, so the two rotate apart):
 
 ```sh
 python -c "from golem.run_token import SigningKey; print(SigningKey.generate('golem-1').private_pem)"

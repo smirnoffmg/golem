@@ -21,14 +21,22 @@ from golem.edge.auth import (
     authenticate_any,
     authenticate_call,
 )
+from golem.edge.card_signing import KEYS_PATH, card_keys, sign_card
 from golem.edge.cards import build_public_card
 from golem.edge.policy import ChainLimits
 from golem.jwks import SigningKeys, fetch_jwks, key_id_of
 from golem.metrics import Metrics, process_registry
 from golem.ratelimit import Limiter
 from golem.run_status import RunStatuses
+from golem.run_token import SigningKey
 from golem.serving import serve_all, with_metrics
-from golem.settings import EdgeSettings, SettingsError, edge_settings, parse_registry
+from golem.settings import (
+    EdgeSettings,
+    SettingsError,
+    edge_settings,
+    parse_registry,
+    parse_signing_key,
+)
 from golem.tasks.app import RUN_KEYS_PATH
 
 JWKS_TIMEOUT_SECONDS = 2
@@ -60,14 +68,13 @@ def call_authenticator(keys: SigningKeys) -> Callable[[str], Principal | AuthFai
 
 
 def load_public_cards(
-    catalogs_dir: Path, *, base_url: str, oidc_discovery_url: str
+    catalogs_dir: Path, *, base_url: str, oidc_discovery_url: str, signing_key: SigningKey
 ) -> dict[str, AgentCard]:
     cards = {}
     for path in sorted(catalogs_dir.glob(f"*/{CATALOG_FILE}")):
         catalog = load_catalog(path)
-        cards[catalog.name] = build_public_card(
-            catalog, base_url=base_url, oidc_discovery_url=oidc_discovery_url
-        )
+        card = build_public_card(catalog, base_url=base_url, oidc_discovery_url=oidc_discovery_url)
+        cards[catalog.name] = sign_card(card, signing_key, jku=f"{base_url}{KEYS_PATH}")
     return cards
 
 
@@ -80,6 +87,11 @@ def build_app(
         partial(fetch_jwks, jwks_client, f"{settings.task_service_read_url}{RUN_KEYS_PATH}")
     )
     golem_keys.refresh()
+    card_key = parse_signing_key(
+        settings.card_signing_key_file.read_text(),
+        settings.card_signing_kid,
+        variable="GOLEM_CARD_SIGNING_KEY_FILE",
+    )
     return create_edge_app(
         authenticate=partial(
             authenticate_any,
@@ -97,9 +109,13 @@ def build_app(
             settings.catalogs_dir,
             base_url=settings.public_base_url,
             oidc_discovery_url=settings.oidc_discovery_url,
+            signing_key=card_key,
         ),
+        card_keys=card_keys([card_key]),
+        public_base_url=settings.public_base_url,
         callers=Limiter(settings.caller_rate),
         auth_failures=Limiter(settings.auth_failure_rate),
+        directory=Limiter(settings.directory_rate),
         trusted_proxies=settings.trusted_proxies,
         metrics=metrics,
         run_statuses=RunStatuses(
@@ -119,7 +135,10 @@ def main() -> None:
         sys.exit(f"golem edge: {error}")
     registry = process_registry()
     with httpx.Client(timeout=JWKS_TIMEOUT_SECONDS) as jwks_client:
-        app = build_app(settings, jwks_client, Metrics("edge", registry=registry))
+        try:
+            app = build_app(settings, jwks_client, Metrics("edge", registry=registry))
+        except (SettingsError, OSError) as error:
+            sys.exit(f"golem edge: {error}")
         # The client address comes from golem.ratelimit with GOLEM_TRUSTED_PROXIES, not uvicorn.
         servers = with_metrics(
             app,

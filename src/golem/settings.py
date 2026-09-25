@@ -17,7 +17,7 @@ from cryptography.fernet import Fernet
 
 from golem.adapters.jira import WEBHOOK_RATE
 from golem.adapters.mattermost import COMMAND_RATE
-from golem.edge.app import AUTH_FAILURE_RATE, CALLER_RATE
+from golem.edge.app import AUTH_FAILURE_RATE, CALLER_RATE, DIRECTORY_RATE
 from golem.edge.policy import Registry
 from golem.metrics import DEFAULT_METRICS_PORT
 from golem.orchestrator.admission import Limits
@@ -61,6 +61,9 @@ class EdgeSettings:
     catalogs_dir: Path
     public_base_url: str
     port: int
+    # Signs the public agent cards (ADR 0014); its own key, not the run tokens'.
+    card_signing_key_file: Path
+    card_signing_kid: str
     # Sent with every forwarded request; the task service trusts the principal header only
     # together with it.
     edge_token: str = field(repr=False)
@@ -70,6 +73,7 @@ class EdgeSettings:
     run_status_ttl_seconds: float = 10.0
     caller_rate: Rate = CALLER_RATE
     auth_failure_rate: Rate = AUTH_FAILURE_RATE
+    directory_rate: Rate = DIRECTORY_RATE
     trusted_proxies: tuple[Network, ...] = ()
     metrics_port: int = DEFAULT_METRICS_PORT
 
@@ -127,6 +131,8 @@ def edge_settings(env: Env) -> EdgeSettings:
         "GOLEM_PUBLIC_BASE_URL",
         "GOLEM_EDGE_TOKEN",
         "GOLEM_TASK_SERVICE_READ_URL",
+        "GOLEM_CARD_SIGNING_KEY_FILE",
+        "GOLEM_CARD_SIGNING_KID",
     )
     if v["GOLEM_OIDC_ISSUER"] == GOLEM_ISSUER:
         raise SettingsError(
@@ -146,11 +152,14 @@ def edge_settings(env: Env) -> EdgeSettings:
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
         edge_token=v["GOLEM_EDGE_TOKEN"],
+        card_signing_key_file=Path(v["GOLEM_CARD_SIGNING_KEY_FILE"]),
+        card_signing_kid=v["GOLEM_CARD_SIGNING_KID"],
         task_service_read_url=_base_url(v, "GOLEM_TASK_SERVICE_READ_URL"),
         run_status_ttl_seconds=_non_negative_seconds(env, "GOLEM_RUN_STATUS_TTL_SECONDS", "10"),
         metrics_port=metrics_port_setting(env, _port(env)),
         caller_rate=rate_setting(env, "GOLEM_RATE_CALLER", CALLER_RATE),
         auth_failure_rate=rate_setting(env, "GOLEM_RATE_AUTH_FAILURES", AUTH_FAILURE_RATE),
+        directory_rate=rate_setting(env, "GOLEM_RATE_DIRECTORY", DIRECTORY_RATE),
         trusted_proxies=trusted_proxies_setting(env),
     )
 
@@ -330,12 +339,12 @@ def parse_agent_tools(text: str) -> dict[str, tuple[str, ...]]:
     return grants
 
 
-def parse_signing_key(pem: str, kid: str) -> SigningKey:
+def parse_signing_key(pem: str, kid: str, variable: str = "GOLEM_RUN_TOKEN_KEY_FILE") -> SigningKey:
     try:
         return SigningKey.from_pem(pem, kid)
     except (ValueError, TypeError, UnsupportedAlgorithm) as error:
         raise SettingsError(
-            f"GOLEM_RUN_TOKEN_KEY_FILE must hold an unencrypted EC P-256 private key: {error}"
+            f"{variable} must hold an unencrypted EC P-256 private key: {error}"
         ) from error
 
 

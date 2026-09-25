@@ -1,9 +1,11 @@
 import asyncio
+import hashlib
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import psycopg
@@ -11,19 +13,22 @@ from a2a.server.request_handlers.response_helpers import agent_card_to_dict
 from a2a.types.a2a_pb2 import AgentCard
 from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH, VERSION_HEADER
 from starlette.applications import Starlette
+from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from golem.edge.audit import audit_entry, record, source_ip_of
+from golem.edge.audit import AuditEntry, audit_entry, directory_entry, record, source_ip_of
 from golem.edge.auth import AuthFailure, Principal
-from golem.edge.policy import Call, ChainLimits, Deny, Registry, evaluate
+from golem.edge.card_signing import KEYS_PATH
+from golem.edge.policy import Call, ChainLimits, Deny, Registry, callable_agents, evaluate
 from golem.metrics import Instrumented, Metrics
 from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
 from golem.run_status import RUNNING, RunStatuses, StatusUnavailable
 
 RPC_PATH = "/a2a"
+DIRECTORY_PATH = "/agents"
 PRINCIPAL_HEADER = "X-Golem-Principal"
 EDGE_TOKEN_HEADER = "X-Golem-Edge-Token"
 # A delegated call's chain and root run, for the child run's admission and its task (ADR 0014).
@@ -49,12 +54,23 @@ AUDIT_UNAVAILABLE = INTERNAL_ERROR
 # ADR 0012: per authenticated caller, and per client address for failed authentications.
 CALLER_RATE = Rate(per_minute=60, burst=20)
 AUTH_FAILURE_RATE = Rate(per_minute=30, burst=10)
+# Anonymous reads of the directory and the card keys, per client address (ADR 0014).
+DIRECTORY_RATE = Rate(per_minute=120, burst=60)
 RATE_LIMITED_REASON = "rate_limited"
 RUN_NOT_ACTIVE = "run_not_active"
 # An address that is not an IP (a test client, a Unix socket) shares one bucket.
 UNKNOWN_ADDRESS = "unknown"
 
 RpcId = str | int | None
+
+# A2A 1.0, 8.6.1: card endpoints "SHOULD include a Cache-Control response header with a
+# max-age directive" and "an ETag". The directory changes as rarely, but only with a restart.
+CARD_MAX_AGE_SECONDS = 300
+DIRECTORY_MAX_AGE_SECONDS = 60
+EMPTY_KEY_SET: Mapping[str, Any] = {"keys": []}
+# JSON only, never rendered: nothing may load, frame or be sniffed from an edge response.
+CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 'none'"
+HSTS = "max-age=31536000; includeSubDomains"
 
 
 @dataclass(frozen=True)
@@ -234,6 +250,97 @@ def unauthenticated(failure: AuthFailure | None) -> JSONResponse:
     return response
 
 
+def card_url(base_url: str, name: str) -> str:
+    return f"{base_url}/agents/{name}{AGENT_CARD_WELL_KNOWN_PATH}"
+
+
+def directory_of(
+    cards: Mapping[str, AgentCard], names: Iterable[str], base_url: str
+) -> dict[str, Any]:
+    return {
+        "agents": [
+            {
+                "name": name,
+                "description": cards[name].description,
+                "card_url": card_url(base_url, name),
+                "skills": [skill.id for skill in cards[name].skills],
+            }
+            for name in names
+        ]
+    }
+
+
+def entity_tag(body: bytes) -> str:
+    return f'"{hashlib.sha256(body).hexdigest()[:32]}"'
+
+
+def matches(if_none_match: str | None, tag: str) -> bool:
+    if if_none_match is None:
+        return False
+    tags = {t.strip().removeprefix("W/") for t in if_none_match.split(",")}
+    return tag in tags or "*" in tags
+
+
+def public_json(request: Request, body: bytes, max_age: int) -> Response:
+    """The same bytes for everyone: cacheable anywhere, revalidated by its entity tag."""
+    tag = entity_tag(body)
+    headers = {"ETag": tag, "Cache-Control": f"public, max-age={max_age}"}
+    if matches(request.headers.get("if-none-match"), tag):
+        return Response(status_code=304, headers=headers)
+    return Response(body, media_type="application/json", headers=headers)
+
+
+def json_bytes(content: Any) -> bytes:
+    return JSONResponse(content).body
+
+
+def plain_error(message: str, status_code: int, **headers: str) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status_code, headers=headers)
+
+
+def plain_too_many(decision: Decision) -> JSONResponse:
+    return plain_error(
+        f"rate limited: retry after {decision.retry_after} s",
+        429,
+        **{"Retry-After": str(decision.retry_after)},
+    )
+
+
+def plain_unauthenticated(failure: AuthFailure | None) -> JSONResponse:
+    challenge = 'Bearer error="invalid_token"' if failure else 'Bearer realm="golem"'
+    return plain_error(
+        failure.reason if failure else "bearer token required",
+        401,
+        **{"WWW-Authenticate": challenge},
+    )
+
+
+def edge_headers(app: ASGIApp, *, hsts: bool) -> ASGIApp:
+    """ASVS 5.0, 3.4 on every response, refusals included; a response that set no cache
+    policy of its own is never stored, since most carry a caller's tasks or refusals."""
+
+    async def wrapped(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Content-Type-Options"] = "nosniff"
+                headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+                headers["Referrer-Policy"] = "no-referrer"
+                if "cache-control" not in headers:
+                    headers["Cache-Control"] = "no-store"
+                if hsts:
+                    headers["Strict-Transport-Security"] = HSTS
+            await send(message)
+
+        await app(scope, receive, send_with_headers)
+
+    return wrapped
+
+
 def create_edge_app(
     *,
     authenticate: Callable[[str], Principal | AuthFailure],
@@ -243,15 +350,24 @@ def create_edge_app(
     forward: httpx.AsyncClient,
     edge_token: str,
     cards: Mapping[str, AgentCard],
+    card_keys: Mapping[str, Any] = EMPTY_KEY_SET,
+    public_base_url: str = "",
     callers: Limiter | None = None,
     auth_failures: Limiter | None = None,
+    directory: Limiter | None = None,
     trusted_proxies: tuple[Network, ...] = (),
     metrics: Metrics | None = None,
     run_statuses: RunStatuses | None = None,
 ) -> ASGIApp:
+    """``cards`` are served as given, so they arrive signed (``golem.edge.card_signing``), and
+    ``card_keys`` is the JWKS that verifies them."""
     callers = Limiter(CALLER_RATE) if callers is None else callers
     auth_failures = Limiter(AUTH_FAILURE_RATE) if auth_failures is None else auth_failures
+    directory = Limiter(DIRECTORY_RATE) if directory is None else directory
     metrics = Metrics("edge") if metrics is None else metrics
+    card_bodies = {name: json_bytes(agent_card_to_dict(card)) for name, card in cards.items()}
+    key_set_body = json_bytes(dict(card_keys))
+    published = tuple(sorted(cards))
 
     async def audited(address: str | None, principal: Principal, call: RpcCall | Rejected) -> bool:
         refusal = call.refusal if isinstance(call, Rejected) else None
@@ -262,6 +378,9 @@ def create_edge_app(
             refusal=refusal.message if refusal else None,
             source_ip=source_ip_of(address),
         )
+        return await written(entry)
+
+    async def written(entry: AuditEntry) -> bool:
         try:
             async with await psycopg.AsyncConnection.connect(
                 audit_dsn, autocommit=True, connect_timeout=AUDIT_CONNECT_TIMEOUT_SECONDS
@@ -272,25 +391,36 @@ def create_edge_app(
             return False
         return True
 
-    async def a2a(request: Request) -> Response:
-        address = request_address(request, trusted_proxies)
-        address_key = address or UNKNOWN_ADDRESS
+    async def verified(
+        request: Request, address_key: str
+    ) -> Principal | AuthFailure | Decision | None:
+        """The caller, a failure (None: no bearer token), or the address's refusal."""
         # An address that keeps failing is refused before its tokens cost a verification.
         admitted = auth_failures.admits(address_key)
         if not admitted.allowed:
             metrics.rate_limit_refused("auth_failures")
-            return too_many(None, admitted)
+            return admitted
         token = bearer_token(request.headers.get("Authorization"))
         if token is None:
             auth_failures.take(address_key)
             metrics.authentication_failed()
-            return unauthenticated(None)
+            return None
         # Verification may refetch the identity provider's keys; that must not stall the loop.
         principal = await asyncio.to_thread(authenticate, token)
         if isinstance(principal, AuthFailure):
             auth_failures.take(address_key)
             metrics.authentication_failed()
-            return unauthenticated(principal)
+        return principal
+
+    async def a2a(request: Request) -> Response:
+        address = request_address(request, trusted_proxies)
+        outcome = await verified(request, address or UNKNOWN_ADDRESS)
+        if isinstance(outcome, Decision):
+            return too_many(None, outcome)
+        if not isinstance(outcome, Principal):
+            return unauthenticated(outcome)
+        principal = outcome
+        address_key = address or UNKNOWN_ADDRESS
         body = await request.body()
         call = parse_call(body)
         decision = callers.take(principal.name)
@@ -338,18 +468,91 @@ def create_edge_app(
         )
 
     async def agent_card(request: Request) -> Response:
-        card = cards.get(request.path_params["name"])
-        if card is None:
-            return JSONResponse({"error": "unknown agent"}, status_code=404)
-        return JSONResponse(agent_card_to_dict(card))
+        # Not limited per address: the UI fetches every card for every user from its own.
+        body = card_bodies.get(request.path_params["name"])
+        if body is None:
+            return plain_error("unknown agent", 404)
+        return public_json(request, body, CARD_MAX_AGE_SECONDS)
+
+    def anonymous_refusal(request: Request) -> Response | None:
+        admitted = directory.take(request_address(request, trusted_proxies) or UNKNOWN_ADDRESS)
+        if admitted.allowed:
+            return None
+        metrics.rate_limit_refused("directory")
+        return plain_too_many(admitted)
+
+    async def key_set(request: Request) -> Response:
+        return anonymous_refusal(request) or public_json(
+            request, key_set_body, CARD_MAX_AGE_SECONDS
+        )
+
+    async def agents(request: Request) -> Response:
+        if "authorization" not in request.headers:
+            return anonymous_refusal(request) or listing(published, public=True)
+        address = request_address(request, trusted_proxies)
+        outcome = await verified(request, address or UNKNOWN_ADDRESS)
+        if isinstance(outcome, Decision):
+            return plain_too_many(outcome)
+        if not isinstance(outcome, Principal):
+            return plain_unauthenticated(outcome)
+        principal = outcome
+        source_ip = source_ip_of(address)
+        decision = callers.take(principal.name)
+        if not decision.allowed:
+            metrics.rate_limit_refused("caller")
+            if decision.first_refusal:
+                await written(
+                    directory_entry(
+                        principal=principal,
+                        listed=(),
+                        refusal=RATE_LIMITED_REASON,
+                        source_ip=source_ip,
+                    )
+                )
+            return plain_too_many(decision)
+        revoked = await revocation_refusal(principal, run_statuses)
+        if revoked is not None:
+            if revoked.status_code == 401:
+                auth_failures.take(address or UNKNOWN_ADDRESS)
+                metrics.authentication_failed()
+            await written(
+                directory_entry(
+                    principal=principal, listed=(), refusal=revoked.message, source_ip=source_ip
+                )
+            )
+            response = plain_error(revoked.message, revoked.status_code)
+            if revoked.status_code == 401:
+                response.headers["WWW-Authenticate"] = 'Bearer error="invalid_token"'
+            return response
+        names = callable_agents(principal.name, principal.chain, published, registry, limits)
+        entry = directory_entry(
+            principal=principal, listed=names, refusal=None, source_ip=source_ip
+        )
+        if not await written(entry):
+            return plain_error("audit log unavailable", 503)
+        return listing(names, public=False)
+
+    def listing(names: tuple[str, ...], *, public: bool) -> Response:
+        # One URL, two answers: a cache must key on Authorization and never share a caller's.
+        scope = "public" if public else "private"
+        return JSONResponse(
+            directory_of(cards, names, public_base_url),
+            headers={
+                "Cache-Control": f"{scope}, max-age={DIRECTORY_MAX_AGE_SECONDS}",
+                "Vary": "Authorization",
+            },
+        )
 
     app = Starlette(
         routes=[
             Route(RPC_PATH, a2a, methods=["POST"]),
+            Route(DIRECTORY_PATH, agents, methods=["GET"]),
             Route(f"/agents/{{name}}{AGENT_CARD_WELL_KNOWN_PATH}", agent_card, methods=["GET"]),
+            Route(KEYS_PATH, key_set, methods=["GET"]),
         ]
     )
-    return Instrumented(app, routes=app.routes, metrics=metrics)
+    headed = edge_headers(app, hsts=urlsplit(public_base_url).scheme == "https")
+    return Instrumented(headed, routes=app.routes, metrics=metrics)
 
 
 def _rpc_id(value: Any) -> RpcId:

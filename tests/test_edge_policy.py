@@ -7,6 +7,7 @@ from golem.edge.policy import (
     Deny,
     DenyReason,
     Registry,
+    callable_agents,
     evaluate,
 )
 
@@ -158,3 +159,45 @@ def test_callee_registered_with_no_callers_denies_everyone():
     call = Call(caller="user:alice", callee="discovery", chain=())
 
     assert reason(evaluate(call, registry(discovery=set()), LIMITS)) is DenyReason.NOT_ALLOWED
+
+
+# --- The directory: what a caller may call, by the same rules ----------------------------------
+
+DIRECTORY = registry(
+    discovery={"user:alice", "agent:reviewer"},
+    reviewer={"user:*", "agent:discovery"},
+    evaluator={"service:gitlab-ci"},
+)
+PUBLISHED = ("discovery", "evaluator", "ghost", "reviewer")
+
+
+def test_a_user_sees_the_agents_the_registry_lets_them_call():
+    assert callable_agents("user:alice", (), PUBLISHED, DIRECTORY, LIMITS) == (
+        "discovery",
+        "reviewer",
+    )
+    assert callable_agents("user:bob", (), PUBLISHED, DIRECTORY, LIMITS) == ("reviewer",)
+
+
+def test_a_published_agent_missing_from_the_registry_is_callable_by_nobody():
+    assert "ghost" not in callable_agents("user:alice", (), PUBLISHED, DIRECTORY, LIMITS)
+
+
+def test_an_agent_never_sees_itself_or_an_agent_already_in_its_chain():
+    assert callable_agents("agent:discovery", ("discovery",), PUBLISHED, DIRECTORY, LIMITS) == (
+        "reviewer",
+    )
+    assert (
+        callable_agents("agent:discovery", ("reviewer", "discovery"), PUBLISHED, DIRECTORY, LIMITS)
+        == ()
+    )
+
+
+def test_an_agent_at_the_depth_limit_sees_nothing():
+    chain = ("a", "b", "reviewer")
+
+    assert callable_agents("agent:reviewer", chain, PUBLISHED, DIRECTORY, LIMITS) == ()
+
+
+def test_a_malformed_chain_sees_nothing():
+    assert callable_agents("user:alice", ("x",), PUBLISHED, DIRECTORY, LIMITS) == ()

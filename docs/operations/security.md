@@ -13,6 +13,7 @@ between parties that do not trust each other's claims.
 | --- | --- | --- | --- |
 | People, services, agents → Golem | the edge checks every token (issuer, audience, signature, expiry), the call registry, the chain policy (depth, cycles), a rate limit per caller; it audits the decision before forwarding and refuses what it cannot check | calls by anyone the identity provider did not vouch for, to agents they may not call; floods | [0002](../adr/0002-edge-and-task-service-split.md), [0012](../adr/0012-rate-limits.md) |
 | Run → another agent | the run's call token (ES256, audience `golem-a2a`, the subject, the acting agent, the chain, the root run, the run's deadline), checked by the edge against the orchestrator's keys and refused once its run is no longer running (status cached `GOLEM_RUN_STATUS_TTL_SECONDS`, 10 s; unknown status refused); the call registry must name `agent:<name>`, the chain may not grow past `GOLEM_MAX_CHAIN_DEPTH` or repeat an agent; the child runs as the subject under the root's budget; the agent may only start a task | a leaked call token outliving its run; a run acting as its own principal, reading or cancelling the subject's tasks, fanning out without bound, or calling agents nobody allowed it to | [0014](../adr/0014-golem-as-an-a2a-node.md) |
+| Golem → callers of other platforms | every public agent card carries an A2A 1.0 signature (ES256, JWS over the card's RFC 8785 canonical form) by the card key, published at `GET /.well-known/golem-card-keys.json`; `GET /agents` lists all published agents anonymously and, to an authenticated caller, only the ones the call registry and the chain rules let it call, audited | a card altered by whoever relays or caches it; a caller learning more of the registry than its own slice | [0014](../adr/0014-golem-as-an-a2a-node.md) |
 | Browser → UI | authorization code with PKCE S256, `state`/`nonce` bound to the browser, tokens only on the server (encrypted in `golem_ui`), `__Host-` cookie, CSRF token on every `POST`, strict CSP | token theft by scripts, login CSRF, session fixation, clickjacking | [0011](../adr/0011-web-ui.md) |
 | Edge → task service | NetworkPolicy admits only the edge to port 8000, and every request must carry `GOLEM_EDGE_TOKEN`; the principal, chain and root-run headers are trusted only then, and the edge builds them from nothing, so a client's own never pass | a pod in the namespace acting as any user; a client claiming a chain or another chain's budget | [0009](../adr/0009-deployment-on-kubernetes.md), [0014](../adr/0014-golem-as-an-a2a-node.md) |
 | MCP servers, edge, reconciler → task service | one listener per kind of caller: MCP servers read run keys and status (8001), the edge reads the run keys too (8001, for call tokens), the reconciler only notifies (8002), and the outcome is read from `golem_runs` | a compromised MCP server starting runs or forging outcomes | [0009](../adr/0009-deployment-on-kubernetes.md) |
@@ -48,6 +49,7 @@ the edge then decides every call:
 | Secret | Held by | Leaked, it allows | Rotation below |
 | --- | --- | --- | --- |
 | run token signing key | task service | minting run tokens with any tool group for any running run, and call tokens for any subject and chain the call registry admits, until rotated | [yes](#run-token-signing-key) |
+| card signing key | edge | signing cards that verify as this platform's: a card pointing callers at another address or identity provider, until rotated | [yes](#rotate-the-card-signing-key) |
 | `GOLEM_EDGE_TOKEN` | edge, task service | with a network policy gap too, starting runs as any principal | [yes](#edge-token) |
 | `GOLEM_UI_SESSION_KEY` | UI | with a copy of `golem_ui`, users' access and refresh tokens | [yes](#fernet-keys) |
 | `GOLEM_PUSH_CONFIG_KEY` | task service | with a copy of `golem_tasks`, the adapters' push tokens | [yes](#fernet-keys) |
@@ -122,6 +124,63 @@ with tools and check that the MCP servers allowed it (`result` = `allow` in `aud
 
 Serving the previous key next to the current one, as [ADR 0007](../adr/0007-run-tokens.md)
 describes, would make this rotation safe with runs in flight; it is not built.
+
+### Rotate the card signing key
+
+The edge signs every public agent card at start with `golem-card-signing-key` and publishes
+the public key at `GET /.well-known/golem-card-keys.json`. It is its own key, not the run
+token key: rotating it touches no run and no token, so it can be done at any time.
+
+1. Generate a key and replace the Secret (with the External Secrets Operator, change the
+   remote key `golem/card-signing-key` instead and wait for the refresh):
+
+```sh
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out golem-secrets/card-signing-key.pem
+kubectl -n golem-system create secret generic golem-card-signing-key \
+  --from-file=key.pem=golem-secrets/card-signing-key.pem --dry-run=client -o yaml | kubectl apply -f -
+```
+
+2. Give it a new key id: set `GOLEM_CARD_SIGNING_KID` in `golem-edge-env` in your overlay (for
+   example `golem-cards-2`) and apply the overlay.
+3. Restart the edge:
+
+```sh
+kubectl -n golem-system rollout restart deployment/edge
+kubectl -n golem-system rollout status deployment/edge --timeout=5m
+```
+
+4. Check: `curl -s https://golem.internal/.well-known/golem-card-keys.json` shows one key with
+   the new `kid`, and a card fetched from `/agents/<name>/.well-known/agent-card.json`
+   verifies against it ([discovering-agents.md](../guide/discovering-agents.md#verify-a-card)).
+
+**No overlap.** The edge publishes only the current key, and both the cards and the key set
+are cacheable for five minutes. A partner that cached the old key set sees cards with an
+unknown `kid` until it refetches; a partner that fetches the key set again on an unknown
+`kid` (as the guide tells it to) is not affected. A partner that pinned the key out of band
+needs the new one before the restart. Publishing the old key next to the new one for an
+overlap is not built. After a leak, rotate at once: a card signed with the leaked key verifies
+wherever the old key set is still cached or pinned.
+
+**What a signature proves, and what it does not.** A card that verifies against a key set the
+caller trusts was issued by whoever holds that card key, this platform, and is unchanged since
+in every field A2A 1.0 defines. That matters once a card travels through someone else: a
+partner's registry, a cache, a copy in a configuration file. Fetched directly from the edge
+over HTTPS, with the key set from the same host, it proves no more than TLS already did; the
+key set is worth pinning, or fetching over a channel the partner already trusts. It does
+**not** prove:
+
+- that the card is current: the signature has no time in it, so an old card verifies until
+  its key is rotated; fetch cards from the edge, not from an old copy;
+- that the caller may call the agent: the call registry decides at every call, and
+  `GET /agents` with a token shows the caller's own slice;
+- that the agent does what the card says, or that the security requirement is covered: the
+  SDK's canonical form (the one A2A clients compute) drops empty values, and the card's
+  `securityRequirements` entry (`oidc` with no scopes) is empty, so it is outside the signed
+  bytes; the security scheme it names, with the identity provider's URL, is inside;
+- anything about fields A2A 1.0 does not define: a verifier parses the card as A2A 1.0 and
+  drops them before checking, so they are neither signed nor to be trusted;
+- anything if the verifier took keys from the `jku` in a signature's header: any card can
+  name any key set.
 
 ### Edge token
 
@@ -216,6 +275,9 @@ Known gaps, each recorded where it was decided:
   tokens: the edge asks whether the delegating run is still running, cached 10 s, so a
   canceled or finished run can start children for at most that long. Cancelling a run does not
   cancel the children it already started; cancel each child task too.
+- **Agent card signatures** ([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)) carry no time
+  and no rotation overlap (above); the empty security requirement of a card is not in the
+  signed bytes. No partner has verified a card with their own client yet.
 - **Audit immutability** rests on grants ([ADR 0003](../adr/0003-one-postgres-cluster-per-owner-databases.md));
   a database administrator can change the log. Ship it to a central log store if that is not
   acceptable. There is no retention job.
@@ -237,4 +299,5 @@ The run-marked blocks of the rotation sections were executed on the k3s cluster 
 check (0), the run token key rotation with a new key id (the JWKS then held one key,
 `golem-2`, and the next run's tool loading was audited `allow` by the MCP server), the edge
 token rotation (an A2A call through the edge answered afterwards), and the UI key rotation (the
-UI rolled out Ready). The GitLab, Jira, Mattermost and identity provider steps were not.
+UI rolled out Ready). The GitLab, Jira, Mattermost and identity provider steps were not, nor
+the card signing key rotation, which is covered by the edge's tests only.

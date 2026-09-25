@@ -29,8 +29,8 @@ Conventions that hold for every process:
 
 ### Edge: `python -m golem.edge`
 
-The only door: agent cards, token checks, the call registry, rate limits, audit, forwarding to
-the task service ([ADR 0002](../adr/0002-edge-and-task-service-split.md)).
+The only door: signed agent cards and the directory of agents, token checks, the call
+registry, rate limits, audit, forwarding to the task service ([ADR 0002](../adr/0002-edge-and-task-service-split.md)).
 
 <!-- settings: edge -->
 | Setting | Required or default | Meaning |
@@ -46,12 +46,15 @@ the task service ([ADR 0002](../adr/0002-edge-and-task-service-split.md)).
 | `GOLEM_CATALOGS_DIR` | required | a directory of `<agent>/agent.yaml` the agent cards are built from ([cards](#agent-cards)) |
 | `GOLEM_PUBLIC_BASE_URL` | required | the edge's public address, written into the agent cards |
 | `GOLEM_EDGE_TOKEN` | required | shared secret sent with every forwarded request |
+| `GOLEM_CARD_SIGNING_KEY_FILE` | required | the key that signs every agent card: an unencrypted EC P-256 private key in PEM, its own, never the run token key ([signed cards](#agent-cards)) |
+| `GOLEM_CARD_SIGNING_KID` | required | the card key's id, in each signature's header and in `GET /.well-known/golem-card-keys.json`; a new key gets a new id |
 | `GOLEM_TASK_SERVICE_READ_URL` | required | the task service's `internal-read` listener (`http://tasks.golem-system.svc:8001`): the orchestrator's public keys, which verify the call tokens of delegating runs (fetched like the provider's keys), and run statuses, which revoke them ([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)) |
 | `GOLEM_RUN_STATUS_TTL_SECONDS` | `10` | how long the edge caches a delegating run's status; a canceled or finished run's call token stops working within it |
-| `GOLEM_PORT` | `8000` | A2A and agent cards |
+| `GOLEM_PORT` | `8000` | A2A, agent cards, the directory and the card keys |
 | `GOLEM_METRICS_PORT` | `9090` | metrics |
-| `GOLEM_RATE_CALLER_PER_MINUTE`, `GOLEM_RATE_CALLER_BURST` | `60`, `20` | per authenticated caller, every `/a2a` call |
+| `GOLEM_RATE_CALLER_PER_MINUTE`, `GOLEM_RATE_CALLER_BURST` | `60`, `20` | per authenticated caller, every `/a2a` call and every authenticated `GET /agents`, from one bucket |
 | `GOLEM_RATE_AUTH_FAILURES_PER_MINUTE`, `GOLEM_RATE_AUTH_FAILURES_BURST` | `30`, `10` | per client address, failed authentications |
+| `GOLEM_RATE_DIRECTORY_PER_MINUTE`, `GOLEM_RATE_DIRECTORY_BURST` | `120`, `60` | per client address, anonymous `GET /agents` and `GET /.well-known/golem-card-keys.json` |
 | `GOLEM_TRUSTED_PROXIES` | none | see above |
 
 ### Task service: `python -m golem.tasks`
@@ -243,6 +246,7 @@ process only when its pod restarts.
 | golem-system | `golem-edge` | `GOLEM_AUDIT_DSN` (role `golem_edge`), `GOLEM_EDGE_TOKEN` | edge |
 | golem-system | `golem-tasks` | `GOLEM_RUNS_DSN`, `GOLEM_TASKS_DB_URL`, `GOLEM_PUSH_CONFIG_KEY`, `GOLEM_EDGE_TOKEN` | task service |
 | golem-system | `golem-run-token-key` | `key.pem`, mounted at `/var/run/golem/run-token/` | task service |
+| golem-system | `golem-card-signing-key` | `key.pem`, mounted at `/var/run/golem/card-signing/` | edge |
 | golem-system | `golem-reconciler` | `GOLEM_RUNS_DSN`, `GOLEM_GITLAB_TOKEN` | reconciler |
 | golem-system | `golem-jira-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_JIRA_TOKEN`, `GOLEM_JIRA_WEBHOOK_SECRET`, `GOLEM_PUSH_TOKEN_SECRET` | Jira adapter |
 | golem-system | `golem-mattermost-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_MATTERMOST_BOT_TOKEN`, `GOLEM_MATTERMOST_COMMAND_TOKEN`, `GOLEM_PUSH_TOKEN_SECRET` | Mattermost adapter |
@@ -377,6 +381,14 @@ patches:
 
 An agent without a card is still callable if the registry allows it; the UI shows it as
 unavailable.
+
+Every card is signed at start with the card key (`GOLEM_CARD_SIGNING_KEY_FILE`, kid
+`GOLEM_CARD_SIGNING_KID`) as A2A 1.0 specifies (a JWS over the card's RFC 8785 canonical form),
+and the edge publishes the public key at `GET /.well-known/golem-card-keys.json`. The edge also
+lists the cards at `GET /agents`: every published agent to an anonymous caller, only those the
+call registry lets them call to an authenticated one. How a caller uses both:
+[discovering-agents.md](../guide/discovering-agents.md); rotating the key:
+[security.md](security.md#rotate-the-card-signing-key).
 
 ## Ports, probes and Services
 

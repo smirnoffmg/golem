@@ -199,6 +199,7 @@ Golem's own secrets are random values. Generate them next to the database passwo
 umask 077
 mkdir -p golem-secrets
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out golem-secrets/run-token-key.pem
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out golem-secrets/card-signing-key.pem
 openssl rand -hex 32 > golem-secrets/edge-token
 openssl rand -base64 32 | tr '+/' '-_' > golem-secrets/push-config-key
 openssl rand -base64 32 | tr '+/' '-_' > golem-secrets/ui-session-key
@@ -210,6 +211,7 @@ openssl rand -hex 32 > golem-secrets/mattermost-push-token-secret
 | File | Is | Used as |
 | --- | --- | --- |
 | `run-token-key.pem` | an unencrypted EC P-256 private key (PKCS#8) | the run token signing key ([ADR 0007](../adr/0007-run-tokens.md)) |
+| `card-signing-key.pem` | another one, never the same file | the agent card signing key of the edge ([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)) |
 | `edge-token` | 32 random bytes, hex | `GOLEM_EDGE_TOKEN`, shared by the edge and the task service |
 | `push-config-key`, `ui-session-key` | Fernet keys: 32 random bytes, URL-safe base64 | `GOLEM_PUSH_CONFIG_KEY`, `GOLEM_UI_SESSION_KEY` |
 | `jira-webhook-secret` | 32 random bytes, hex | `GOLEM_JIRA_WEBHOOK_SECRET`; also the secret of the Jira webhook |
@@ -219,7 +221,7 @@ The same values can come from Python where `openssl` is missing, for example the
 `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
 for a Fernet key and
 `python -c "from golem.run_token import SigningKey; print(SigningKey.generate('golem-1').private_pem)"`
-for the signing key.
+for either signing key.
 
 Then write one environment file per Secret. Set the values that come from other systems first:
 
@@ -353,7 +355,8 @@ kubectl label namespace monitoring golem.dev/monitoring=true
 ```
 
 The base has no Ingress objects: routes and TLS depend on your controller. Route
-`https://golem.internal` to Service `edge` port 8000 (A2A and agent cards), the Jira webhook
+`https://golem.internal` to Service `edge` port 8000 (A2A, agent cards, `/agents` and
+`/.well-known/golem-card-keys.json`), the Jira webhook
 path `/jira/webhook` to `jira-adapter` port 8000, and `https://golem-ui.internal` to `ui` port
 8000. Never route `/a2a/push` of an adapter from outside: only the task service may call it.
 
@@ -370,6 +373,8 @@ for name in golem-edge golem-tasks golem-reconciler golem-jira-adapter golem-mat
 done
 kubectl -n golem-system create secret generic golem-run-token-key \
   --from-file=key.pem=golem-secrets/run-token-key.pem
+kubectl -n golem-system create secret generic golem-card-signing-key \
+  --from-file=key.pem=golem-secrets/card-signing-key.pem
 kubectl -n golem-jobs create secret generic golem-run-secrets \
   --from-env-file=golem-secrets/golem-run-secrets.env
 kubectl apply -k deploy/k8s/overlays/prod
@@ -592,3 +597,7 @@ changes only the `Evidence` section of `hypotheses/H-2.md`. What a gate owner do
   had no ingress. Outputs above are from that run.
 - Not executed: `sonobuoy`, `docker push`, the identity provider, GitLab, gateway and trace
   store set-up and their checks, the namespace labels and the Ingress routes.
+- Added after that run: the card signing key (its line in step 6, its Secret in step 8). Step
+  6's line runs in `tests/test_docs.py`, which also checks that the edge's parser accepts the
+  key; the Secret and its mount are checked by rendering the manifests
+  (`tests/test_k8s_render.py`), not on the cluster.

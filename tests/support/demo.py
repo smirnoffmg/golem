@@ -33,6 +33,7 @@ from testcontainers.community.postgres import PostgresContainer
 
 from golem.edge.__main__ import authenticator, load_public_cards
 from golem.edge.app import create_edge_app
+from golem.edge.card_signing import card_keys
 from golem.edge.policy import ChainLimits, Registry
 from golem.jwks import SigningKeys, fetch_jwks
 from golem.orchestrator import runs
@@ -299,6 +300,7 @@ def running(databases: Databases, ui_port: int = 0) -> Iterator[Demo]:
     try:
         edge_keys = SigningKeys(partial(fetch_jwks, httpx.Client(timeout=5), idp.jwks_url))
         edge_keys.refresh()
+        card_key = SigningKey.generate("demo-cards")
         edge = create_edge_app(
             authenticate=authenticator(edge_keys, issuer=idp.issuer, audience=EDGE_AUDIENCE),
             registry=Registry(allowed_callers={AGENT: frozenset({"user:*"})}),
@@ -307,8 +309,13 @@ def running(databases: Databases, ui_port: int = 0) -> Iterator[Demo]:
             forward=httpx.AsyncClient(base_url=tasks_url, timeout=10),
             edge_token=EDGE_TOKEN,
             cards=load_public_cards(
-                EXAMPLES, base_url=edge_url, oidc_discovery_url=idp.discovery_url
+                EXAMPLES,
+                base_url=edge_url,
+                oidc_discovery_url=idp.discovery_url,
+                signing_key=card_key,
             ),
+            card_keys=card_keys([card_key]),
+            public_base_url=edge_url,
             callers=Limiter(DEMO_CALLER_RATE),
         )
         served.append(serve((edge, edge_socket)))

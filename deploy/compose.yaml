@@ -31,7 +31,14 @@ services:
 
   edge:
     <<: *app
-    command: ["python", "-m", "golem.edge"]
+    # A throwaway card signing key per start, like the task service's run token key.
+    command:
+      - sh
+      - -c
+      - >-
+        python -c "from golem.run_token import SigningKey;
+        print(SigningKey.generate('dev-cards').private_pem)" > /tmp/card-signing-key.pem
+        && exec python -m golem.edge
     environment:
       GOLEM_OIDC_ISSUER: http://idp.invalid/realms/golem
       GOLEM_OIDC_AUDIENCE: golem-edge
@@ -45,6 +52,8 @@ services:
       GOLEM_EDGE_TOKEN: &edge-token dev-only-edge-token
       GOLEM_CATALOGS_DIR: /app/examples
       GOLEM_PUBLIC_BASE_URL: http://127.0.0.1:${GOLEM_EDGE_PORT:-8480}
+      GOLEM_CARD_SIGNING_KEY_FILE: /tmp/card-signing-key.pem
+      GOLEM_CARD_SIGNING_KID: dev-cards
     configs:
       - source: registry
         target: /etc/golem/registry.yaml

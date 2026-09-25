@@ -26,7 +26,7 @@ is the catalog, and the figure is stopped by the platform, not by the model.
 
 | Container | State | Responsibility |
 | --- | --- | --- |
-| A2A edge | none | the only door: agent cards, authentication, token exchange, chain policy, per-caller rate limit, audit, outbound calls |
+| A2A edge | none | the only door: signed agent cards, the directory of agents, authentication, token exchange, chain policy, per-caller rate limit, audit, outbound calls |
 | Task service | `golem_tasks` | A2A task lifecycle: executor, store, push notifications, resume after a human answer |
 | Orchestrator | `golem_runs` | run admission and quotas; run, process and evaluation workflows; Jobs; merge requests |
 | Runtime Job | none (ephemeral) | one image for every agent: loads the catalog, runs the lead and roles, writes a branch, emits traces |
@@ -68,6 +68,7 @@ src/golem/
   settings.py              process settings parsed from the environment
   edge/policy.py           chain policy: allowed calls, depth, cycles, budget
   edge/cards.py            A2A Agent Cards generated from the catalog
+  edge/card_signing.py     A2A 1.0 card signatures: sign, publish the key, verify
   edge/auth.py, audit.py, app.py  the A2A edge: JWT check, audit row, forwarding; fails closed
   tasks/                   A2A task service: tasks in golem_tasks; three listeners (A2A for the
                            edge, run keys and status for MCP servers, run outcomes for the reconciler)

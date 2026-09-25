@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 import psycopg
 import pytest
-from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface
+from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 from starlette.types import ASGIApp, Receive, Scope, Send
 from test_tasks_service import FakeOrchestrator, make_card
 
@@ -17,10 +17,12 @@ from golem.edge.app import (
     create_edge_app,
 )
 from golem.edge.auth import AuthFailure, Principal
+from golem.edge.card_signing import CardVerified, card_keys, sign_card, verify_card
 from golem.edge.policy import ChainLimits, Registry
 from golem.metrics import Metrics
 from golem.ratelimit import Limiter, Rate, parse_networks
 from golem.run_status import RunStatuses
+from golem.run_token import SigningKey
 from golem.tasks.app import create_listeners
 
 EDGE_TOKEN = "edge-shared-secret"
@@ -56,23 +58,47 @@ REGISTRY = Registry(
 )
 
 
-def discovery_card() -> AgentCard:
+PUBLIC_BASE_URL = "https://golem.example.test"
+CARD_KEY = SigningKey.generate("cards-1")
+CARD_KEYS_URL = f"{PUBLIC_BASE_URL}/.well-known/golem-card-keys.json"
+
+
+DESCRIPTIONS = {"discovery": "Turns an epic into product decisions."}
+
+
+def agent_card(name: str, *skills: str) -> AgentCard:
     return AgentCard(
-        name="discovery",
-        description="Turns an epic into product decisions.",
+        name=name,
+        description=DESCRIPTIONS.get(name, f"The {name} agent."),
         version="0.1.0",
         supported_interfaces=[
             AgentInterface(
-                url="https://golem.example.test/a2a",
+                url=f"{PUBLIC_BASE_URL}/a2a",
                 protocol_binding="JSONRPC",
-                tenant="discovery",
+                tenant=name,
                 protocol_version="1.0",
             )
         ],
         capabilities=AgentCapabilities(streaming=False),
         default_input_modes=["text/plain"],
         default_output_modes=["text/plain"],
+        skills=[AgentSkill(id=skill, name=skill, description=skill) for skill in skills],
     )
+
+
+def discovery_card() -> AgentCard:
+    return agent_card("discovery", "research")
+
+
+# What the edge serves: every published card, signed with the card key.
+CARDS = {
+    name: sign_card(agent_card(name, *skills), CARD_KEY, jku=CARD_KEYS_URL)
+    for name, skills in (
+        ("discovery", ("research",)),
+        ("evaluator", ("evaluate",)),
+        ("reviewer", ("review", "summarize")),
+    )
+}
 
 
 def authenticate(token: str) -> Principal | AuthFailure:
@@ -128,18 +154,22 @@ def tasks() -> TaskService:
     return TaskService()
 
 
-def edge_client(tasks: TaskService, audit_dsn: str, **rate_limits: Any) -> httpx.AsyncClient:
+def edge_client(
+    tasks: TaskService, audit_dsn: str, registry: Registry = REGISTRY, **rate_limits: Any
+) -> httpx.AsyncClient:
     forward = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=tasks.app()), base_url="http://tasks"
     )
     edge = create_edge_app(
         authenticate=authenticate,
-        registry=REGISTRY,
+        registry=registry,
         limits=ChainLimits(max_depth=3),
         audit_dsn=audit_dsn,
         forward=forward,
         edge_token=EDGE_TOKEN,
-        cards={"discovery": discovery_card()},
+        cards=CARDS,
+        card_keys=card_keys([CARD_KEY]),
+        public_base_url=PUBLIC_BASE_URL,
         **({"run_statuses": tasks.statuses()} | rate_limits),
     )
     return httpx.AsyncClient(
@@ -938,3 +968,217 @@ async def test_people_and_services_are_never_asked_about(
     await call(edge, send_message(), token="ci-token")
 
     assert tasks.orchestrator.asked == []
+
+
+# --- Signed cards and the directory (ADR 0014, step 2) -------------------------------------------
+
+# A registry where alice may call discovery only, and the discovery agent may call itself and
+# reviewer: only the chain rules keep an agent from seeing itself.
+DIRECTORY_REGISTRY = Registry(
+    allowed_callers={
+        "discovery": frozenset({"user:alice", "agent:discovery"}),
+        "reviewer": frozenset({"user:bob", "agent:discovery"}),
+        "evaluator": frozenset({"service:gitlab-ci"}),
+    }
+)
+
+
+async def get(
+    client: httpx.AsyncClient, path: str, token: str | None = None, **headers: str
+) -> httpx.Response:
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    return await client.get(path, headers=headers)
+
+
+def listed(response: httpx.Response) -> list[str]:
+    assert response.status_code == 200, response.text
+    return [agent["name"] for agent in response.json()["agents"]]
+
+
+def assert_security_headers(response: httpx.Response) -> None:
+    assert response.headers["x-content-type-options"] == "nosniff"
+    csp = response.headers["content-security-policy"]
+    assert csp == "default-src 'none'; frame-ancestors 'none'"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert "max-age=" in response.headers["strict-transport-security"]
+
+
+async def test_a_served_card_verifies_against_the_served_card_keys(
+    edge: httpx.AsyncClient,
+) -> None:
+    card = await edge.get("/agents/discovery/.well-known/agent-card.json")
+    keys = await edge.get("/.well-known/golem-card-keys.json")
+
+    assert keys.status_code == 200
+    assert verify_card(card.json(), keys.json()) == CardVerified(kid="cards-1")
+    assert [key["kid"] for key in keys.json()["keys"]] == ["cards-1"]
+    assert all("d" not in key for key in keys.json()["keys"])
+
+
+@pytest.mark.parametrize(
+    "path", ["/agents/discovery/.well-known/agent-card.json", "/.well-known/golem-card-keys.json"]
+)
+async def test_cards_and_card_keys_are_public_and_cacheable_with_an_etag(
+    edge: httpx.AsyncClient, path: str
+) -> None:
+    first = await edge.get(path)
+    again = await edge.get(path, headers={"If-None-Match": first.headers["etag"]})
+
+    assert first.headers["cache-control"] == "public, max-age=300"
+    assert_security_headers(first)
+    assert again.status_code == 304
+    assert again.content == b""
+    assert again.headers["etag"] == first.headers["etag"]
+
+
+async def test_the_anonymous_directory_lists_every_published_agent(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    async with edge_client(tasks, audit_dsn, registry=DIRECTORY_REGISTRY) as client:
+        response = await get(client, "/agents")
+
+    assert response.json() == {
+        "agents": [
+            {
+                "name": name,
+                "description": DESCRIPTIONS.get(name, f"The {name} agent."),
+                "card_url": f"{PUBLIC_BASE_URL}/agents/{name}/.well-known/agent-card.json",
+                "skills": skills,
+            }
+            for name, skills in (
+                ("discovery", ["research"]),
+                ("evaluator", ["evaluate"]),
+                ("reviewer", ["review", "summarize"]),
+            )
+        ]
+    }
+    assert response.headers["cache-control"] == "public, max-age=60"
+    assert response.headers["vary"] == "Authorization"
+    assert_security_headers(response)
+    assert await audit_rows(audit_admin_dsn) == []
+
+
+async def test_an_authenticated_caller_sees_only_what_it_may_call_and_the_listing_is_audited(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    async with edge_client(tasks, audit_dsn, registry=DIRECTORY_REGISTRY) as client:
+        alice = await get(client, "/agents", "alice-token")
+        ci = await get(client, "/agents", "ci-token")
+
+    assert listed(alice) == ["discovery"]
+    assert listed(ci) == []
+    assert alice.headers["cache-control"] == "private, max-age=60"
+    assert alice.headers["vary"] == "Authorization"
+    assert_security_headers(alice)
+    assert await audit_rows(audit_admin_dsn) == [
+        ("user:alice", "directory", "ListAgents", "allow", "10.0.0.7"),
+        ("service:ci", "directory", "ListAgents", "allow", "10.0.0.7"),
+    ]
+
+
+async def test_an_agent_never_sees_itself_in_the_directory(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    async with edge_client(tasks, audit_dsn, registry=DIRECTORY_REGISTRY) as client:
+        response = await get(client, "/agents", "discovery-for-alice")
+
+    assert listed(response) == ["reviewer"]
+    assert await audit_rows(audit_admin_dsn) == [
+        ("user:alice", "directory", "ListAgents", "allow", "10.0.0.7")
+    ]
+
+
+async def test_a_bad_token_on_the_directory_is_401_never_the_public_list(
+    edge: httpx.AsyncClient, audit_admin_dsn: str
+) -> None:
+    forged = await get(edge, "/agents", "forged")
+    no_bearer = await get(edge, "/agents", Authorization="Basic YWxpY2U6c2VjcmV0")
+
+    for response in (forged, no_bearer):
+        assert response.status_code == 401
+        assert "agents" not in response.json()
+        assert response.headers["www-authenticate"].startswith("Bearer")
+        assert response.headers["cache-control"] == "no-store"
+    assert await audit_rows(audit_admin_dsn) == []
+
+
+async def test_the_anonymous_directory_is_limited_per_address(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    directory = Limiter(Rate(per_minute=60, burst=2), clock=Clock())
+
+    async with edge_client(tasks, audit_dsn, directory=directory) as client:
+        allowed = [await get(client, "/agents") for _ in range(2)]
+        refused = await get(client, "/agents")
+        keys = await get(client, "/.well-known/golem-card-keys.json")
+        alice = await get(client, "/agents", "alice-token")
+
+    assert [r.status_code for r in allowed] == [200, 200]
+    assert refused.status_code == keys.status_code == 429
+    assert int(refused.headers["retry-after"]) >= 1
+    assert_security_headers(refused)
+    # An authenticated caller is limited as a principal, not by the address it shares.
+    assert alice.status_code == 200
+    assert await audit_rows(audit_admin_dsn) == [
+        ("user:alice", "directory", "ListAgents", "allow", "10.0.0.7")
+    ]
+
+
+async def test_an_authenticated_directory_caller_shares_its_rate_and_is_audited_once_per_streak(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    callers = Limiter(Rate(per_minute=60, burst=2), clock=Clock())
+
+    async with edge_client(tasks, audit_dsn, callers=callers) as client:
+        await call(client, send_message())
+        listing = await get(client, "/agents", "alice-token")
+        refused = [await get(client, "/agents", "alice-token") for _ in range(3)]
+        a2a = await call(client, send_message())
+
+    assert listing.status_code == 200
+    assert all(r.status_code == 429 for r in refused)
+    assert rate_limited(a2a)
+    assert [(row[2], row[3]) for row in await audit_rows(audit_admin_dsn)] == [
+        ("SendMessage", "allow"),
+        ("ListAgents", "allow"),
+        ("ListAgents", "deny: rate_limited"),
+    ]
+
+
+async def test_an_unreachable_audit_log_refuses_an_authenticated_listing_only(
+    tasks: TaskService,
+) -> None:
+    async with edge_client(tasks, UNREACHABLE_DSN) as client:
+        anonymous = await get(client, "/agents")
+        alice = await get(client, "/agents", "alice-token")
+
+    assert anonymous.status_code == 200
+    assert alice.status_code == 503
+    assert "agents" not in alice.json()
+
+
+async def test_a_revoked_call_token_gets_no_directory(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    tasks.orchestrator.statuses["run-a"] = "canceled"
+
+    async with edge_client(tasks, audit_dsn) as client:
+        response = await get(client, "/agents", "discovery-for-alice")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+    [row] = await audit_rows(audit_admin_dsn)
+    assert row[1:4] == ("directory", "ListAgents", "deny: run_not_active: the run is canceled")
+
+
+async def test_every_edge_response_carries_the_security_headers(edge: httpx.AsyncClient) -> None:
+    responses = [
+        await call(edge, send_message(), token=None),
+        await edge.get("/agents/ghost/.well-known/agent-card.json"),
+        await edge.get("/nowhere"),
+    ]
+
+    for response in responses:
+        assert_security_headers(response)
+        assert response.headers["cache-control"] == "no-store"

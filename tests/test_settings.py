@@ -42,6 +42,8 @@ EDGE_ENV = {
     "GOLEM_PUBLIC_BASE_URL": "https://golem.example.test",
     "GOLEM_EDGE_TOKEN": "edge-shared-secret",
     "GOLEM_TASK_SERVICE_READ_URL": "http://tasks:8001",
+    "GOLEM_CARD_SIGNING_KEY_FILE": "/var/run/golem/card-signing/key.pem",
+    "GOLEM_CARD_SIGNING_KID": "golem-cards-1",
 }
 
 TASKS_ENV = {
@@ -90,6 +92,14 @@ def test_edge_settings_are_parsed_from_the_environment() -> None:
     assert settings.port == 8000
     assert settings.task_service_read_url == "http://tasks:8001"
     assert settings.run_status_ttl_seconds == 10
+    assert settings.card_signing_key_file == Path("/var/run/golem/card-signing/key.pem")
+    assert settings.card_signing_kid == "golem-cards-1"
+
+
+@pytest.mark.parametrize("name", ["GOLEM_CARD_SIGNING_KEY_FILE", "GOLEM_CARD_SIGNING_KID"])
+def test_the_card_signing_key_is_required(name: str) -> None:
+    with pytest.raises(SettingsError, match=name):
+        edge_settings({k: v for k, v in EDGE_ENV.items() if k != name})
 
 
 def test_the_edge_run_status_ttl_can_be_set() -> None:
@@ -386,6 +396,10 @@ def rsa_pem() -> str:
 def test_a_bad_signing_key_names_its_variable(pem: str) -> None:
     with pytest.raises(SettingsError, match="GOLEM_RUN_TOKEN_KEY_FILE"):
         parse_signing_key(rsa_pem() if pem == "rsa" else pem, "run-2026-09")
+    with pytest.raises(SettingsError, match="GOLEM_CARD_SIGNING_KEY_FILE"):
+        parse_signing_key(
+            rsa_pem() if pem == "rsa" else pem, "cards-1", variable="GOLEM_CARD_SIGNING_KEY_FILE"
+        )
 
 
 def test_agent_tools_map_each_agent_to_its_granted_groups() -> None:
@@ -414,13 +428,17 @@ def test_edge_rate_limits_have_defaults_and_can_be_set() -> None:
             "GOLEM_RATE_CALLER_BURST": "40",
             "GOLEM_RATE_AUTH_FAILURES_PER_MINUTE": "6",
             "GOLEM_RATE_AUTH_FAILURES_BURST": "3",
+            "GOLEM_RATE_DIRECTORY_PER_MINUTE": "30",
+            "GOLEM_RATE_DIRECTORY_BURST": "5",
             "GOLEM_TRUSTED_PROXIES": "10.0.0.0/8, fd00::/8",
         }
     )
 
     assert defaults.caller_rate == Rate(per_minute=60, burst=20)
     assert defaults.auth_failure_rate == Rate(per_minute=30, burst=10)
+    assert defaults.directory_rate == Rate(per_minute=120, burst=60)
     assert defaults.trusted_proxies == ()
+    assert tuned.directory_rate == Rate(per_minute=30, burst=5)
     assert tuned.caller_rate == Rate(per_minute=120, burst=40)
     assert tuned.auth_failure_rate == Rate(per_minute=6, burst=3)
     assert tuned.trusted_proxies == parse_networks("10.0.0.0/8,fd00::/8")

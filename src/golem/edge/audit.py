@@ -50,6 +50,31 @@ def audit_entry(
     )
 
 
+DIRECTORY = "directory"
+LIST_AGENTS = "ListAgents"
+
+
+def directory_entry(
+    *,
+    principal: Principal,
+    listed: tuple[str, ...],
+    refusal: str | None,
+    source_ip: str | None,
+) -> AuditEntry:
+    """An authenticated listing: which agents the caller was shown, which is the registry's
+    answer to "whom may I call", worth the same record as a call."""
+    return AuditEntry(
+        account=principal.on_behalf_of,
+        request=f"{LIST_AGENTS} agents={','.join(listed)}",
+        target_system=DIRECTORY,
+        operation=LIST_AGENTS,
+        result="allow" if refusal is None else f"deny: {refusal}",
+        source=SOURCE,
+        source_ip=source_ip,
+        chain=principal.chain,
+    )
+
+
 def source_ip_of(host: str | None) -> str | None:
     if host is None:
         return None

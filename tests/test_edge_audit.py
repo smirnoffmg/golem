@@ -3,7 +3,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from golem.edge.audit import AuditEntry, audit_entry, record, source_ip_of
+from golem.edge.audit import AuditEntry, audit_entry, directory_entry, record, source_ip_of
 from golem.edge.auth import Principal
 
 ALICE = Principal(name="user:alice", chain=())
@@ -42,6 +42,34 @@ def test_refused_call_entry_carries_the_reason_and_chain() -> None:
     assert entry.result == "deny: unknown_agent: agent 'ghost' is not registered"
     assert entry.chain == ("root", "planner")
     assert entry.source_ip is None
+
+
+def test_a_directory_listing_entry_names_what_the_caller_was_shown() -> None:
+    entry = directory_entry(
+        principal=Principal(
+            name="agent:discovery", chain=("discovery",), subject="user:alice", run_id="run-a"
+        ),
+        listed=("evaluator", "reviewer"),
+        refusal=None,
+        source_ip="10.0.0.7",
+    )
+
+    assert entry == AuditEntry(
+        account="user:alice",
+        request="ListAgents agents=evaluator,reviewer",
+        target_system="directory",
+        operation="ListAgents",
+        result="allow",
+        source="a2a-edge",
+        source_ip="10.0.0.7",
+        chain=("discovery",),
+    )
+
+
+def test_a_refused_directory_listing_entry_carries_the_reason() -> None:
+    entry = directory_entry(principal=ALICE, listed=(), refusal="rate_limited", source_ip=None)
+
+    assert (entry.request, entry.result) == ("ListAgents agents=", "deny: rate_limited")
 
 
 @pytest.mark.parametrize(
