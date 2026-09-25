@@ -29,11 +29,13 @@ from golem.adapters.common import (
     PushUpdate,
     push_token,
     push_update,
+    rate_limited,
     send_message_request,
     start_task,
     state_word,
     subject_of_push_token,
 )
+from golem.ratelimit import Limiter, Network, Rate
 
 WEBHOOK_PATH = "/jira/webhook"
 SIGNATURE_HEADER = "X-Hub-Signature"
@@ -41,6 +43,8 @@ SIGNATURE_METHOD = "sha256"
 ISSUE_UPDATED = "jira:issue_updated"
 LABELS_FIELD = "labels"
 COMMENTS_PAGE_SIZE = 100
+# Jira sends every update of every issue the webhook covers, from a few addresses (ADR 0012).
+WEBHOOK_RATE = Rate(per_minute=300, burst=100)
 
 log = logging.getLogger("golem.adapters.jira")
 
@@ -143,8 +147,11 @@ def create_jira_adapter_app(
     edge: httpx.AsyncClient,
     service_token: Callable[[], Awaitable[str]],
     jira: httpx.AsyncClient,
+    inbound: Limiter | None = None,
+    trusted_proxies: tuple[Network, ...] = (),
 ) -> Starlette:
     push_url = f"{public_base_url}{PUSH_PATH}"
+    inbound = Limiter(WEBHOOK_RATE) if inbound is None else inbound
 
     async def start(added: LabelAdded, agent: str) -> str | None:
         message = message_id(added.issue_key, added.label, added.event)
@@ -158,6 +165,9 @@ def create_jira_adapter_app(
         return await start_task(edge, service_token, request, what=f"{agent} for {added.issue_key}")
 
     async def webhook(request: Request) -> Response:
+        refused = rate_limited(inbound, request, trusted_proxies)
+        if refused is not None:
+            return refused
         body = await request.body()
         if not signature_valid(webhook_secret, body, request.headers.get(SIGNATURE_HEADER)):
             return Response(status_code=401)

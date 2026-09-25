@@ -18,7 +18,15 @@
     {% endfor %}
   </tbody>
 </table>
+{% elif paged %}
+<p>No older tasks.</p>
 {% else %}
 <p>No tasks yet. <a href="/tasks/new">Start one.</a></p>
+{% endif %}
+{% if paged or next_page %}
+<p class="pages">
+  {% if paged %}<a href="/tasks">Newest tasks</a>{% endif %}
+  {% if next_page %}<a rel="next" href="/tasks?page={{ next_page | urlencode }}">Older tasks</a>{% endif %}
+</p>
 {% endif %}
 {% endblock %}

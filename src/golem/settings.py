@@ -15,12 +15,17 @@ import yaml
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.fernet import Fernet
 
+from golem.adapters.jira import WEBHOOK_RATE
+from golem.adapters.mattermost import COMMAND_RATE
+from golem.edge.app import AUTH_FAILURE_RATE, CALLER_RATE
 from golem.edge.policy import Registry
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef
 from golem.orchestrator.merge_requests import GitLabProject
 from golem.orchestrator.service import JobTemplate
+from golem.ratelimit import Network, Rate, parse_networks
 from golem.run_token import SigningKey
+from golem.ui.app import LOGIN_RATE, START_RATE
 
 DEFAULT_PORT = "8000"
 DEFAULT_INTERNAL_READ_PORT = "8001"
@@ -56,6 +61,9 @@ class EdgeSettings:
     # Sent with every forwarded request; the task service trusts the principal header only
     # together with it.
     edge_token: str = field(repr=False)
+    caller_rate: Rate = CALLER_RATE
+    auth_failure_rate: Rate = AUTH_FAILURE_RATE
+    trusted_proxies: tuple[Network, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,7 +129,31 @@ def edge_settings(env: Env) -> EdgeSettings:
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
         edge_token=v["GOLEM_EDGE_TOKEN"],
+        caller_rate=rate_setting(env, "GOLEM_RATE_CALLER", CALLER_RATE),
+        auth_failure_rate=rate_setting(env, "GOLEM_RATE_AUTH_FAILURES", AUTH_FAILURE_RATE),
+        trusted_proxies=trusted_proxies_setting(env),
     )
+
+
+def rate_setting(env: Env, name: str, default: Rate) -> Rate:
+    """``<name>_PER_MINUTE`` and ``<name>_BURST``, each defaulting to ``default``'s (ADR 0012)."""
+    per_minute, burst = f"{name}_PER_MINUTE", f"{name}_BURST"
+    values = {
+        per_minute: env.get(per_minute, "").strip() or str(default.per_minute),
+        burst: env.get(burst, "").strip() or str(default.burst),
+    }
+    return Rate(per_minute=_positive_int(values, per_minute), burst=_positive_int(values, burst))
+
+
+def trusted_proxies_setting(env: Env) -> tuple[Network, ...]:
+    """``GOLEM_TRUSTED_PROXIES``: the CIDRs whose ``X-Forwarded-For`` is believed; none by
+    default, so a client's own header never picks its rate limit key."""
+    try:
+        return parse_networks(env.get("GOLEM_TRUSTED_PROXIES", ""))
+    except ValueError as error:
+        raise SettingsError(
+            f"GOLEM_TRUSTED_PROXIES must be comma-separated CIDRs without host bits: {error}"
+        ) from error
 
 
 def _push_prefixes(env: Env) -> tuple[str, ...]:
@@ -392,6 +424,8 @@ class AdapterSettings:
     labels_file: Path
     public_base_url: str
     port: int
+    webhook_rate: Rate = WEBHOOK_RATE
+    trusted_proxies: tuple[Network, ...] = ()
 
 
 def adapter_settings(env: Env) -> AdapterSettings:
@@ -421,6 +455,8 @@ def adapter_settings(env: Env) -> AdapterSettings:
         labels_file=Path(v["GOLEM_JIRA_LABELS_FILE"]),
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
+        webhook_rate=rate_setting(env, "GOLEM_RATE_WEBHOOK", WEBHOOK_RATE),
+        trusted_proxies=trusted_proxies_setting(env),
     )
 
 
@@ -450,6 +486,8 @@ class MattermostAdapterSettings:
     channels: frozenset[str]
     public_base_url: str
     port: int
+    command_rate: Rate = COMMAND_RATE
+    trusted_proxies: tuple[Network, ...] = ()
 
 
 def mattermost_adapter_settings(env: Env) -> MattermostAdapterSettings:
@@ -481,6 +519,8 @@ def mattermost_adapter_settings(env: Env) -> MattermostAdapterSettings:
         channels=_names(env, "GOLEM_MATTERMOST_CHANNELS", required=False),
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
+        command_rate=rate_setting(env, "GOLEM_RATE_COMMAND", COMMAND_RATE),
+        trusted_proxies=trusted_proxies_setting(env),
     )
 
 
@@ -504,6 +544,9 @@ class UiSettings:
     agents: tuple[str, ...]
     public_base_url: str
     port: int
+    login_rate: Rate = LOGIN_RATE
+    start_rate: Rate = START_RATE
+    trusted_proxies: tuple[Network, ...] = ()
 
 
 UI_CALLBACK_PATH = "/callback"
@@ -561,4 +604,7 @@ def ui_settings(env: Env) -> UiSettings:
         agents=tuple(dict.fromkeys(agents)),
         public_base_url=public_base_url,
         port=_port(env),
+        login_rate=rate_setting(env, "GOLEM_RATE_LOGIN", LOGIN_RATE),
+        start_rate=rate_setting(env, "GOLEM_RATE_START", START_RATE),
+        trusted_proxies=trusted_proxies_setting(env),
     )

@@ -50,6 +50,7 @@ from golem.edge.policy import ChainLimits, Registry
 from golem.jwks import SigningKeys, fetch_jwks
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.service import PostgresOrchestrator
+from golem.ratelimit import Limiter, Rate, parse_networks
 from golem.settings import SettingsError, ui_settings
 from golem.tasks.app import create_listeners
 from golem.tasks.ports import Orchestrator
@@ -249,7 +250,9 @@ class Stack:
         return httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url=PUBLIC_URL)
 
 
-def build_stack(audit_dsn: str, ui_dsn: str, orchestrator: Orchestrator) -> Stack:
+def build_stack(
+    audit_dsn: str, ui_dsn: str, orchestrator: Orchestrator, **ui_options: Any
+) -> Stack:
     clock = Clock()
     idp = FakeIdP(clock)
     idp_sync = httpx.Client(transport=httpx.MockTransport(idp.handle))
@@ -282,6 +285,7 @@ def build_stack(audit_dsn: str, ui_dsn: str, orchestrator: Orchestrator) -> Stac
         edge=httpx.AsyncClient(transport=httpx.ASGITransport(app=edge), base_url="http://edge"),
         agents=AGENTS,
         public_base_url=PUBLIC_URL,
+        **ui_options,
     )
     return Stack(app, idp, clock, orchestrator, ui_dsn)
 
@@ -1009,3 +1013,122 @@ async def test_the_ui_role_owns_its_database_and_nobody_else_reaches_it(
 ) -> None:
     with pytest.raises(psycopg.OperationalError):
         await psycopg.AsyncConnection.connect(ui_dsn_of(postgres, "golem_edge"))
+
+
+# --- Rate limits and paging (ADR 0012) -----------------------------------------------------------
+
+
+async def login_rows(dsn: str) -> int:
+    async with await psycopg.AsyncConnection.connect(dsn) as conn:
+        cursor = await conn.execute("SELECT count(*) FROM logins")
+        row = await cursor.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+def behind(stack: Stack, peer: str) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=stack.app, client=(peer, 40000)), base_url=PUBLIC_URL
+    )
+
+
+async def test_login_is_limited_per_client_address(
+    audit_dsn: str, audit_admin_dsn: str, ui_db: str
+) -> None:
+    logins = Limiter(Rate(per_minute=60, burst=2), clock=Clock())
+    stack = build_stack(audit_dsn, ui_db, FakeOrchestrator(), logins=logins)
+
+    async with behind(stack, "203.0.113.5") as flood, behind(stack, "203.0.113.6") as other:
+        started = [await flood.get("/login") for _ in range(2)]
+        refused = await flood.get("/login")
+        spoofed = await flood.get("/login", headers={"X-Forwarded-For": "198.51.100.1"})
+        elsewhere = await other.get("/login")
+
+    assert [r.status_code for r in started] == [303, 303]
+    assert refused.status_code == 429 and spoofed.status_code == 429
+    assert int(refused.headers["retry-after"]) >= 1
+    assert refused.headers["content-security-policy"].startswith("default-src 'self'")
+    assert elsewhere.status_code == 303
+    assert await login_rows(ui_db) == 3
+
+
+async def test_behind_a_trusted_proxy_login_is_limited_per_forwarded_client(
+    audit_dsn: str, audit_admin_dsn: str, ui_db: str
+) -> None:
+    logins = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
+    stack = build_stack(
+        audit_dsn,
+        ui_db,
+        FakeOrchestrator(),
+        logins=logins,
+        trusted_proxies=parse_networks("10.0.0.0/8"),
+    )
+
+    async with behind(stack, "10.0.0.9") as ingress:
+        first = await ingress.get("/login", headers={"X-Forwarded-For": "203.0.113.5"})
+        again = await ingress.get("/login", headers={"X-Forwarded-For": "203.0.113.5"})
+        other = await ingress.get("/login", headers={"X-Forwarded-For": "203.0.113.6"})
+
+    assert (first.status_code, again.status_code, other.status_code) == (303, 429, 303)
+
+
+async def test_starting_tasks_is_limited_per_session(
+    audit_dsn: str, audit_admin_dsn: str, ui_db: str
+) -> None:
+    starts = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
+    stack = build_stack(audit_dsn, ui_db, FakeOrchestrator(), starts=starts)
+
+    async with stack.browser() as alice, stack.browser() as bob:
+        await login(stack, alice, "alice")
+        await login(stack, bob, "bob")
+        first = await start_task(alice, goal="one")
+        second = await start_task(alice, goal="two")
+        bobs = await start_task(bob, goal="three")
+
+    assert first.status_code == 303
+    assert second.status_code == 429 and int(second.headers["retry-after"]) >= 1
+    assert bobs.status_code == 303
+    assert sorted(run.goal for run in stack.orchestrator.started) == ["one", "three"]
+
+
+def next_page(page: str) -> str | None:
+    match = re.search(r'<a rel="next" href="([^"]*)"', page)
+    return match[1].replace("&amp;", "&") if match else None
+
+
+async def test_my_tasks_follows_the_next_page_token(
+    audit_dsn: str, audit_admin_dsn: str, ui_db: str
+) -> None:
+    stack = build_stack(audit_dsn, ui_db, FakeOrchestrator(), page_size=2)
+
+    async with stack.browser() as browser:
+        await login(stack, browser)
+        for goal in ("goal one", "goal two", "goal three"):
+            assert (await start_task(browser, goal=goal)).status_code == 303
+        first = (await browser.get("/tasks")).text
+        link = next_page(first)
+        assert link is not None and link.startswith("/tasks?page=")
+        second_response = await browser.get(link)
+        second = second_response.text
+
+    assert second_response.status_code == 200
+    shown = [
+        goal
+        for goal in ("goal one", "goal two", "goal three")
+        for page in (first, second)
+        if goal in page
+    ]
+    assert sorted(shown) == ["goal one", "goal three", "goal two"]
+    assert sum(first.count(g) for g in ("goal one", "goal two", "goal three")) == 2
+    assert next_page(second) is None
+
+
+@pytest.mark.parametrize("token", ["not a token", "x" * 300, "<script>"])
+async def test_a_malformed_page_token_is_refused(
+    stack: Stack, browser: httpx.AsyncClient, token: str
+) -> None:
+    await login(stack, browser)
+
+    response = await browser.get("/tasks", params={"page": token})
+
+    assert response.status_code == 400

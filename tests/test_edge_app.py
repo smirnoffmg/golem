@@ -9,9 +9,16 @@ from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface
 from starlette.types import ASGIApp, Receive, Scope, Send
 from test_tasks_service import FakeOrchestrator, make_card
 
-from golem.edge.app import AUDIT_UNAVAILABLE, CALL_DENIED, UNAUTHENTICATED, create_edge_app
+from golem.edge.app import (
+    AUDIT_UNAVAILABLE,
+    CALL_DENIED,
+    RATE_LIMITED,
+    UNAUTHENTICATED,
+    create_edge_app,
+)
 from golem.edge.auth import AuthFailure, Principal
 from golem.edge.policy import ChainLimits, Registry
+from golem.ratelimit import Limiter, Rate, parse_networks
 from golem.tasks.app import create_listeners
 
 EDGE_TOKEN = "edge-shared-secret"
@@ -78,7 +85,7 @@ def tasks() -> TaskService:
     return TaskService()
 
 
-def edge_client(tasks: TaskService, audit_dsn: str) -> httpx.AsyncClient:
+def edge_client(tasks: TaskService, audit_dsn: str, **rate_limits: Any) -> httpx.AsyncClient:
     forward = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=tasks.app()), base_url="http://tasks"
     )
@@ -90,6 +97,7 @@ def edge_client(tasks: TaskService, audit_dsn: str) -> httpx.AsyncClient:
         forward=forward,
         edge_token=EDGE_TOKEN,
         cards={"discovery": discovery_card()},
+        **rate_limits,
     )
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=edge, client=("10.0.0.7", 51234)),
@@ -473,3 +481,161 @@ async def test_unknown_card_is_404(edge: httpx.AsyncClient) -> None:
     response = await edge.get("/agents/ghost/.well-known/agent-card.json")
 
     assert response.status_code == 404
+
+
+# --- Rate limits (ADR 0012) ----------------------------------------------------------------------
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def rate_limited(response: httpx.Response) -> bool:
+    return (
+        response.status_code == 429
+        and int(response.headers["retry-after"]) >= 1
+        and error_of(response)["code"] == RATE_LIMITED
+    )
+
+
+async def test_a_caller_over_its_rate_gets_429_and_one_audit_row_per_refusal_streak(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    clock = Clock()
+    callers = Limiter(Rate(per_minute=60, burst=2), clock=clock)
+
+    async with edge_client(tasks, audit_dsn, callers=callers) as client:
+        allowed = [await call(client, send_message()) for _ in range(2)]
+        refused = [await call(client, send_message()) for _ in range(3)]
+        clock.now += 1
+        again = await call(client, send_message())
+        refused_again = await call(client, send_message())
+
+    assert all(r.status_code == 200 for r in allowed)
+    assert all(rate_limited(r) for r in refused)
+    assert refused[0].json()["id"] == 7
+    assert refused[0].headers["retry-after"] == "1"
+    assert again.status_code == 200
+    assert rate_limited(refused_again)
+    assert len(tasks.received) == 3
+    results = [row[3] for row in await audit_rows(audit_admin_dsn)]
+    assert results == ["allow", "allow", "deny: rate_limited", "allow", "deny: rate_limited"]
+
+
+async def test_one_callers_rate_does_not_limit_another(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    callers = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
+
+    async with edge_client(tasks, audit_dsn, callers=callers) as client:
+        await call(client, send_message())
+        alice = await call(client, send_message())
+        bob = await call(client, send_message(), token="bob-token")
+
+    assert rate_limited(alice)
+    assert bob.status_code == 200
+
+
+async def test_failed_authentications_are_limited_per_address_before_verifying(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    verified: list[str] = []
+
+    def counting(token: str) -> Principal | AuthFailure:
+        verified.append(token)
+        return authenticate(token)
+
+    failures = Limiter(Rate(per_minute=60, burst=2), clock=Clock())
+    edge = create_edge_app(
+        authenticate=counting,
+        registry=REGISTRY,
+        limits=ChainLimits(max_depth=3),
+        audit_dsn=audit_dsn,
+        forward=httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=tasks.app()), base_url="http://tasks"
+        ),
+        edge_token=EDGE_TOKEN,
+        cards={},
+        auth_failures=failures,
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=edge, client=("203.0.113.5", 4000)),
+        base_url="http://edge",
+    ) as client:
+        for _ in range(3):
+            assert (await call(client, send_message())).status_code == 200
+        unauthenticated = [await call(client, send_message(), token="bad") for _ in range(2)]
+        flooded = await call(client, send_message(), token="bad")
+        even_valid = await call(client, send_message())
+        no_token = await call(client, send_message(), token=None)
+
+    assert [r.status_code for r in unauthenticated] == [401, 401]
+    assert rate_limited(flooded) and rate_limited(even_valid) and rate_limited(no_token)
+    assert flooded.json()["id"] is None
+    # Three successful calls cost nothing; the refused ones never reached verification.
+    assert verified == ["alice-token"] * 3 + ["bad"] * 2
+    assert [row[3] for row in await audit_rows(audit_admin_dsn)] == ["allow"] * 3
+
+
+def proxied_edge(tasks: TaskService, audit_dsn: str, **rate_limits: Any) -> httpx.AsyncClient:
+    edge = create_edge_app(
+        authenticate=authenticate,
+        registry=REGISTRY,
+        limits=ChainLimits(max_depth=3),
+        audit_dsn=audit_dsn,
+        forward=httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=tasks.app()), base_url="http://tasks"
+        ),
+        edge_token=EDGE_TOKEN,
+        cards={},
+        trusted_proxies=parse_networks("10.0.0.0/8"),
+        **rate_limits,
+    )
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=edge, client=("10.0.0.7", 51234)),
+        base_url="http://edge",
+    )
+
+
+async def test_behind_a_trusted_proxy_the_forwarded_client_is_limited_and_audited(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    failures = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
+
+    async with proxied_edge(tasks, audit_dsn, auth_failures=failures) as client:
+        first = {"X-Forwarded-For": "203.0.113.5"}
+        second = {"X-Forwarded-For": "203.0.113.6"}
+        await call(client, send_message(), token="bad", extra_headers=first)
+        limited = await call(client, send_message(), token="bad", extra_headers=first)
+        other = await call(client, send_message(), token="bad", extra_headers=second)
+        allowed = await call(
+            client, send_message(), extra_headers={"X-Forwarded-For": "2001:db8::7"}
+        )
+
+    assert rate_limited(limited)
+    assert other.status_code == 401
+    assert allowed.status_code == 200
+    [row] = await audit_rows(audit_admin_dsn)
+    assert row[4] == "2001:db8::7"
+
+
+async def test_a_forwarded_for_from_an_untrusted_peer_does_not_escape_the_limit(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    failures = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
+
+    async with edge_client(tasks, audit_dsn, auth_failures=failures) as client:
+        await call(
+            client, send_message(), token="bad", extra_headers={"X-Forwarded-For": "1.1.1.1"}
+        )
+        spoofed = await call(
+            client, send_message(), token="bad", extra_headers={"X-Forwarded-For": "2.2.2.2"}
+        )
+        allowed = await call(client, send_message(), extra_headers={"X-Forwarded-For": "2.2.2.2"})
+
+    assert rate_limited(spoofed)
+    assert rate_limited(allowed)

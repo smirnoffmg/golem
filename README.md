@@ -79,6 +79,7 @@ src/golem/
                            Jinja2 pages, A2A calls to the edge with the user's own token
   mcp/                     platform MCP servers: run token gate, audit, read-only Jira and Confluence tools
   jwks.py                  signing keys from a JWKS URL, shared by the edge and the MCP servers
+  ratelimit.py             token bucket rate limits per key, and the client address behind proxies
 deploy/
   compose.yaml             local Postgres, edge, task service and reconciler
   k8s/                     kustomize manifests: namespaces, RBAC, workloads, network policies
@@ -281,6 +282,19 @@ Settings: `GOLEM_OIDC_ISSUER`, `GOLEM_OIDC_DISCOVERY_URL`, `GOLEM_OIDC_CLIENT_ID
 `GOLEM_UI_SESSION_KEY` (`python -c "from cryptography.fernet import Fernet;
 print(Fernet.generate_key().decode())"`), `GOLEM_UI_AGENTS`, `GOLEM_PUBLIC_BASE_URL` (https, or
 http on localhost), `GOLEM_PORT`.
+
+## Rate limits
+
+Every public entry point has a token bucket rate limit ([ADR 0012](docs/adr/0012-rate-limits.md)):
+the edge per authenticated caller (60/min, burst 20) and per client address for failed
+authentications, the MCP servers per address for failed authentications, the UI's `/login`
+per address and starting tasks per session, the Jira webhook and the Mattermost command per
+address before their secrets are checked. A refusal is 429 with `Retry-After`; a refused
+authenticated call is audited once per streak as `deny: rate_limited`. The buckets live in
+each replica, so a limit multiplies by the replicas; the admission quotas stay the hard limit
+on runs. Behind an ingress controller, set `GOLEM_TRUSTED_PROXIES` to its addresses so the
+client address is read from `X-Forwarded-For`. Settings and defaults:
+[deploy/k8s/README.md](deploy/k8s/README.md#rate-limits-and-trusted-proxies).
 
 ## Evaluation of a catalog change
 

@@ -18,6 +18,7 @@ from golem.edge.auth import AuthFailure, Principal, authenticate
 from golem.edge.cards import build_public_card
 from golem.edge.policy import ChainLimits
 from golem.jwks import SigningKeys, fetch_jwks, key_id_of
+from golem.ratelimit import Limiter
 from golem.settings import EdgeSettings, SettingsError, edge_settings, parse_registry
 
 JWKS_TIMEOUT_SECONDS = 2
@@ -66,6 +67,9 @@ def build_app(settings: EdgeSettings, jwks_client: httpx.Client) -> Starlette:
             base_url=settings.public_base_url,
             oidc_discovery_url=settings.oidc_discovery_url,
         ),
+        callers=Limiter(settings.caller_rate),
+        auth_failures=Limiter(settings.auth_failure_rate),
+        trusted_proxies=settings.trusted_proxies,
     )
 
 
@@ -76,7 +80,13 @@ def main() -> None:
     except SettingsError as error:
         sys.exit(f"golem edge: {error}")
     with httpx.Client(timeout=JWKS_TIMEOUT_SECONDS) as jwks_client:
-        uvicorn.run(build_app(settings, jwks_client), host="0.0.0.0", port=settings.port)
+        # The client address comes from golem.ratelimit with GOLEM_TRUSTED_PROXIES, not uvicorn.
+        uvicorn.run(
+            build_app(settings, jwks_client),
+            host="0.0.0.0",
+            port=settings.port,
+            proxy_headers=False,
+        )
 
 
 if __name__ == "__main__":

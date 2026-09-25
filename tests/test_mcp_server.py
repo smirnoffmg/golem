@@ -32,6 +32,7 @@ from golem.mcp.server import create_mcp_app
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.runs import RunCreated, StartRequest, cancel_run_of_task, start_run
 from golem.orchestrator.service import PostgresOrchestrator
+from golem.ratelimit import Limiter, Rate
 from golem.run_token import RunClaims, SigningKey, issue
 from golem.runtime.tools import (
     McpToolbox,
@@ -136,7 +137,7 @@ def tasks_url(runs_db: str) -> Iterator[str]:
         yield url
 
 
-def mcp_app(tasks_url: str, audit_dsn: str, jira: Jira) -> ASGIApp:
+def mcp_app(tasks_url: str, audit_dsn: str, jira: Jira, **gate_options: Any) -> ASGIApp:
     keys = SigningKeys(
         partial(fetch_jwks, httpx.Client(timeout=2), f"{tasks_url}/internal/run-keys")
     )
@@ -148,6 +149,7 @@ def mcp_app(tasks_url: str, audit_dsn: str, jira: Jira) -> ASGIApp:
         # No caching here, so a cancel is seen on the next call; the TTL is tested on its own.
         statuses=RunStatuses(httpx.AsyncClient(base_url=tasks_url, timeout=2), ttl_seconds=0),
         audit_dsn=audit_dsn,
+        **gate_options,
     )
     upstream = httpx.AsyncClient(
         transport=httpx.MockTransport(jira),
@@ -476,3 +478,32 @@ async def test_without_run_status_every_call_is_refused(
     assert "run status unavailable" in response.text
     [row] = await audit_rows(audit_admin_dsn)
     assert row["result"].startswith("deny: run status unavailable")
+
+
+# Rate limits (ADR 0012)
+
+
+class FrozenClock:
+    def __call__(self) -> float:
+        return 0.0
+
+
+async def test_failed_authentications_are_limited_per_address_and_audited_once(
+    tasks_url: str, runs_db: str, mcp_audit_dsn: str, audit_admin_dsn: str, jira: Jira
+) -> None:
+    run = await started_run(runs_db)
+    failures = Limiter(Rate(per_minute=60, burst=2), clock=FrozenClock())
+    app = mcp_app(tasks_url, mcp_audit_dsn, jira, auth_failures=failures)
+
+    with serve(app) as url:
+        allowed = [await mcp_post(f"{url}/mcp", LIST_TOOLS, token_for(run)) for _ in range(3)]
+        refused = [await mcp_post(f"{url}/mcp", LIST_TOOLS, token=None) for _ in range(2)]
+        flooded = [await mcp_post(f"{url}/mcp", LIST_TOOLS, token="forged") for _ in range(3)]
+
+    assert [r.status_code for r in allowed] == [200] * 3
+    assert [r.status_code for r in refused] == [401, 401]
+    assert [r.status_code for r in flooded] == [429] * 3
+    assert all(int(r.headers["retry-after"]) >= 1 for r in flooded)
+    assert flooded[0].json()["error"] == "rate_limited"
+    results = [row["result"] for row in await audit_rows(audit_admin_dsn)]
+    assert results == ["allow"] * 3 + ["deny: bearer token required"] * 2 + ["deny: rate_limited"]

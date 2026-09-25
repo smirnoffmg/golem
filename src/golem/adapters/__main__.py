@@ -14,6 +14,7 @@ from starlette.applications import Starlette
 from golem.adapters.common import ClientCredentials
 from golem.adapters.jira import create_jira_adapter_app, jira_authorization
 from golem.adapters.mattermost import create_mattermost_adapter_app
+from golem.ratelimit import Limiter
 from golem.settings import (
     AdapterSettings,
     MattermostAdapterSettings,
@@ -67,6 +68,8 @@ def build_app(settings: AdapterSettings) -> Starlette:
             },
             timeout=OUTBOUND_TIMEOUT_SECONDS,
         ),
+        inbound=Limiter(settings.webhook_rate),
+        trusted_proxies=settings.trusted_proxies,
     )
 
 
@@ -93,6 +96,8 @@ def build_mattermost_app(settings: MattermostAdapterSettings) -> Starlette:
             },
             timeout=OUTBOUND_TIMEOUT_SECONDS,
         ),
+        inbound=Limiter(settings.command_rate),
+        trusted_proxies=settings.trusted_proxies,
     )
 
 
@@ -108,7 +113,8 @@ def main() -> None:
             app, port = build_app(jira), jira.port
     except SettingsError as error:
         sys.exit(f"golem adapter: {error}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # The client address comes from golem.ratelimit with GOLEM_TRUSTED_PROXIES, not uvicorn.
+    uvicorn.run(app, host="0.0.0.0", port=port, proxy_headers=False)
 
 
 if __name__ == "__main__":

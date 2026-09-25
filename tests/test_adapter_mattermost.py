@@ -37,6 +37,7 @@ from golem.edge.__main__ import authenticator
 from golem.edge.app import create_edge_app
 from golem.edge.policy import ChainLimits, Registry
 from golem.jwks import SigningKeys, fetch_jwks
+from golem.ratelimit import Limiter, Rate
 from golem.settings import SettingsError, mattermost_adapter_settings
 from golem.tasks.app import PushDelivery, create_listeners
 
@@ -162,6 +163,7 @@ def adapter_app(
     mattermost: FakeMattermost,
     channels: frozenset[str] = frozenset(),
     start_timeout_seconds: float = 5.0,
+    **options: Any,
 ) -> Any:
     return create_mattermost_adapter_app(
         command_token=COMMAND_TOKEN.encode(),
@@ -174,6 +176,7 @@ def adapter_app(
         service_token=credentials(idp).token,
         mattermost=bot_client(mattermost),
         start_timeout_seconds=start_timeout_seconds,
+        **options,
     )
 
 
@@ -687,6 +690,21 @@ def test_the_process_builds_the_mattermost_adapter_from_settings() -> None:
     assert {route.path for route in app.routes} == {"/mattermost/command", "/a2a/push"}
 
 
+async def test_the_process_limits_commands_as_its_settings_say() -> None:
+    settings = mattermost_adapter_settings(
+        MATTERMOST_ENV | {"GOLEM_RATE_COMMAND_PER_MINUTE": "1", "GOLEM_RATE_COMMAND_BURST": "1"}
+    )
+    app = build_mattermost_app(settings)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url=PUBLIC_URL
+    ) as client:
+        first = await command(client, headers=command_headers("guessed"))
+        second = await command(client, headers=command_headers("guessed"))
+
+    assert (first.status_code, second.status_code) == (401, 429)
+
+
 # End to end: adapter -> real edge -> real task service -> push -> adapter -> post
 
 
@@ -834,3 +852,26 @@ async def test_the_outcome_reaches_the_channel_once_however_often_it_is_reported
     assert post["message"].startswith("@alan ")
     assert "completed" in post["message"] and "merge_requests/3" in post["message"]
     assert len(platform.mattermost.requests) == 1
+
+
+class FrozenClock:
+    def __call__(self) -> float:
+        return 0.0
+
+
+async def test_commands_are_limited_per_address_before_the_token_check() -> None:
+    edge, idp, mattermost = FakeEdge(), IdP(client_id="mattermost-adapter"), FakeMattermost()
+    inbound = Limiter(Rate(per_minute=60, burst=2), clock=FrozenClock())
+    app = adapter_app(edge=fake_edge_client(edge), idp=idp, mattermost=mattermost, inbound=inbound)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("203.0.113.5", 4000)), base_url=PUBLIC_URL
+    ) as client:
+        guessed = [await command(client, headers=command_headers("guessed")) for _ in range(2)]
+        flooded = await command(client, headers=command_headers("guessed"))
+        valid_but_late = await command(client)
+
+    assert [r.status_code for r in guessed] == [401, 401]
+    assert flooded.status_code == 429 and int(flooded.headers["retry-after"]) >= 1
+    assert valid_but_late.status_code == 429
+    assert edge.calls == []

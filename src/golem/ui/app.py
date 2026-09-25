@@ -21,6 +21,7 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
 from golem.ui.edge import TASK_NOT_FOUND, EdgeError, EdgeUnauthorized, agent_card, rpc
 from golem.ui.oidc import (
     OidcClient,
@@ -49,6 +50,12 @@ HSTS = "max-age=31536000; includeSubDomains"
 MAX_FORM_BYTES = 16 * 1024
 MAX_GOAL_CHARS = 4000
 LIST_PAGE_SIZE = 50
+# a2a-sdk's page token is the base64 of a task id; anything else never came from the edge.
+PAGE_TOKEN = re.compile(r"^[A-Za-z0-9+/=_-]{1,256}$")
+# ADR 0012: /login writes a row per request, POST /tasks starts a run.
+LOGIN_RATE = Rate(per_minute=30, burst=10)
+START_RATE = Rate(per_minute=10, burst=5)
+UNKNOWN_ADDRESS = "unknown"
 NONCE = re.compile(r"^[A-Za-z0-9_-]{22,64}$")
 FORM = "application/x-www-form-urlencoded"
 
@@ -118,9 +125,15 @@ def create_ui_app(
     edge: httpx.AsyncClient,
     agents: tuple[str, ...],
     public_base_url: str,
+    page_size: int = LIST_PAGE_SIZE,
+    logins: Limiter | None = None,
+    starts: Limiter | None = None,
+    trusted_proxies: tuple[Network, ...] = (),
 ) -> ASGIApp:
     if not agents:
         raise ValueError("the UI needs at least one agent")
+    logins = Limiter(LOGIN_RATE) if logins is None else logins
+    starts = Limiter(START_RATE) if starts is None else starts
     templates = Environment(loader=PackageLoader("golem.ui", "templates"), autoescape=True)
     stylesheet = files("golem.ui").joinpath("static/golem.css").read_bytes()
 
@@ -129,6 +142,11 @@ def create_ui_app(
 
     def error(status_code: int, message: str, session: Session | None = None) -> HTMLResponse:
         return render("error.html", status_code, message=message, session=session)
+
+    def too_many(decision: Decision, session: Session | None = None) -> Response:
+        response = error(429, f"Too many requests. Try again in {decision.retry_after} s.", session)
+        response.headers["Retry-After"] = str(decision.retry_after)
+        return response
 
     def to_login(request: Request) -> Response:
         response = RedirectResponse("/login", status_code=303)
@@ -179,6 +197,12 @@ def create_ui_app(
         return render("home.html", session=None)
 
     async def login(request: Request) -> Response:
+        # Every sign-in started stores a transaction; anonymous GETs must not fill the table.
+        peer = request.client.host if request.client else None
+        address = client_address(peer, request.headers.getlist("x-forwarded-for"), trusted_proxies)
+        decision = logins.take(address or UNKNOWN_ADDRESS)
+        if not decision.allowed:
+            return too_many(decision)
         try:
             discovery = await oidc.discovery()
         except OidcError:
@@ -268,6 +292,9 @@ def create_ui_app(
         )
 
     async def start(request: Request, session: Session) -> Response:
+        decision = starts.take(session.id)
+        if not decision.allowed:
+            return too_many(decision, session)
         form = await form_of(request) or {}
         if not csrf_ok(session, form):
             return error(403, "The form expired. Reload the page and try again.", session)
@@ -302,20 +329,30 @@ def create_ui_app(
         return RedirectResponse(f"/tasks/{agent}/{task['id']}", status_code=303)
 
     async def task_list(request: Request, session: Session) -> Response:
+        page = request.query_params.get("page")
+        if page is not None and not PAGE_TOKEN.fullmatch(page):
+            return error(400, "This page of tasks does not exist.", session)
+        # The task service lists the caller's own tasks whatever the tenant; the tenant is
+        # there for the edge's call registry.
+        params: dict[str, Any] = {"tenant": agents[0], "pageSize": page_size}
+        if page is not None:
+            params["pageToken"] = page
         try:
-            # The task service lists the caller's own tasks whatever the tenant; the tenant is
-            # there for the edge's call registry.
-            result = await rpc(
-                edge,
-                session.access_token,
-                "ListTasks",
-                {"tenant": agents[0], "pageSize": LIST_PAGE_SIZE},
-            )
+            result = await rpc(edge, session.access_token, "ListTasks", params)
         except EdgeError as failure:
             return error(502, f"Tasks could not be listed: {failure}", session)
         tasks = result.get("tasks") if isinstance(result.get("tasks"), list) else []
         views = [view for view in (task_view(t, agents) for t in tasks) if view is not None]
-        return render("tasks.html", session=session, tasks=views)
+        next_page = result.get("nextPageToken")
+        return render(
+            "tasks.html",
+            session=session,
+            tasks=views,
+            paged=page is not None,
+            next_page=next_page
+            if isinstance(next_page, str) and PAGE_TOKEN.fullmatch(next_page)
+            else None,
+        )
 
     async def task_detail(request: Request, session: Session) -> Response:
         agent, task_id = request.path_params["agent"], request.path_params["task_id"]

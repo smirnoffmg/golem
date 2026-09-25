@@ -18,6 +18,7 @@ from starlette.routing import Route
 from golem.edge.audit import audit_entry, record, source_ip_of
 from golem.edge.auth import AuthFailure, Principal
 from golem.edge.policy import Call, ChainLimits, Deny, Registry, evaluate
+from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
 
 RPC_PATH = "/a2a"
 PRINCIPAL_HEADER = "X-Golem-Principal"
@@ -34,7 +35,14 @@ INTERNAL_ERROR = -32603
 # Implementation-defined server errors, outside the -32001..-32009 range A2A reserves.
 UNAUTHENTICATED = -32040
 CALL_DENIED = -32041
+RATE_LIMITED = -32042
 AUDIT_UNAVAILABLE = INTERNAL_ERROR
+# ADR 0012: per authenticated caller, and per client address for failed authentications.
+CALLER_RATE = Rate(per_minute=60, burst=20)
+AUTH_FAILURE_RATE = Rate(per_minute=30, burst=10)
+RATE_LIMITED_REASON = "rate_limited"
+# An address that is not an IP (a test client, a Unix socket) shares one bucket.
+UNKNOWN_ADDRESS = "unknown"
 
 RpcId = str | int | None
 
@@ -141,6 +149,21 @@ def rpc_error(rpc_id: RpcId, refusal: Refusal, status_code: int = 200) -> JSONRe
     return JSONResponse(body, status_code=status_code)
 
 
+def too_many(rpc_id: RpcId, decision: Decision) -> JSONResponse:
+    response = rpc_error(
+        rpc_id,
+        Refusal(RATE_LIMITED, f"rate limited: retry after {decision.retry_after} s"),
+        status_code=429,
+    )
+    response.headers["Retry-After"] = str(decision.retry_after)
+    return response
+
+
+def request_address(request: Request, trusted: tuple[Network, ...]) -> str | None:
+    peer = request.client.host if request.client else None
+    return client_address(peer, request.headers.getlist("x-forwarded-for"), trusted)
+
+
 def unauthenticated(failure: AuthFailure | None) -> JSONResponse:
     response = rpc_error(
         None,
@@ -162,15 +185,21 @@ def create_edge_app(
     forward: httpx.AsyncClient,
     edge_token: str,
     cards: Mapping[str, AgentCard],
+    callers: Limiter | None = None,
+    auth_failures: Limiter | None = None,
+    trusted_proxies: tuple[Network, ...] = (),
 ) -> Starlette:
-    async def audited(request: Request, principal: Principal, call: RpcCall | Rejected) -> bool:
+    callers = Limiter(CALLER_RATE) if callers is None else callers
+    auth_failures = Limiter(AUTH_FAILURE_RATE) if auth_failures is None else auth_failures
+
+    async def audited(address: str | None, principal: Principal, call: RpcCall | Rejected) -> bool:
         refusal = call.refusal if isinstance(call, Rejected) else None
         entry = audit_entry(
             principal=principal,
             callee=call.tenant,
             method=call.method,
             refusal=refusal.message if refusal else None,
-            source_ip=source_ip_of(request.client.host if request.client else None),
+            source_ip=source_ip_of(address),
         )
         try:
             async with await psycopg.AsyncConnection.connect(
@@ -182,20 +211,38 @@ def create_edge_app(
         return True
 
     async def a2a(request: Request) -> Response:
+        address = request_address(request, trusted_proxies)
+        address_key = address or UNKNOWN_ADDRESS
+        # An address that keeps failing is refused before its tokens cost a verification.
+        admitted = auth_failures.admits(address_key)
+        if not admitted.allowed:
+            return too_many(None, admitted)
         token = bearer_token(request.headers.get("Authorization"))
         if token is None:
+            auth_failures.take(address_key)
             return unauthenticated(None)
         # Verification may refetch the identity provider's keys; that must not stall the loop.
         principal = await asyncio.to_thread(authenticate, token)
         if isinstance(principal, AuthFailure):
+            auth_failures.take(address_key)
             return unauthenticated(principal)
         body = await request.body()
         call = parse_call(body)
+        decision = callers.take(principal.name)
+        if not decision.allowed:
+            # One row per streak of refusals: the first shows the caller hit the limit, the
+            # rest would only grow the insert-only log at the rate of the flood.
+            if decision.first_refusal:
+                refused = Refusal(RATE_LIMITED, RATE_LIMITED_REASON)
+                await audited(
+                    address, principal, Rejected(call.id, call.method, call.tenant, refused)
+                )
+            return too_many(call.id, decision)
         if isinstance(call, RpcCall):
             refusal = policy_refusal(principal, call, registry, limits)
             if refusal is not None:
                 call = Rejected(call.id, call.method, call.tenant, refusal)
-        if not await audited(request, principal, call):
+        if not await audited(address, principal, call):
             return rpc_error(call.id, Refusal(AUDIT_UNAVAILABLE, "audit log unavailable"))
         if isinstance(call, Rejected):
             return rpc_error(call.id, call.refusal)

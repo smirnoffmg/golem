@@ -35,7 +35,8 @@ attacks.
 Protection from others' failures and overload is layered, since every incoming task spawns a
 Job:
 
-- rate limit per caller at the edge;
+- rate limit per caller at the edge (built in [ADR 0012](0012-rate-limits.md), with limits at
+  the other public entry points too);
 - run admission in the orchestrator with Job quotas per caller and per root chain;
 - `ResourceQuota` on Job count, CPU and memory in the Jobs namespace;
 - timeouts and circuit breakers on outbound calls (*Release It!*, 1st ed., p. 43).

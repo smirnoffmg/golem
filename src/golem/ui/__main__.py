@@ -10,6 +10,7 @@ import psycopg
 import uvicorn
 from starlette.types import ASGIApp
 
+from golem.ratelimit import Limiter
 from golem.settings import SettingsError, UiSettings, ui_settings
 from golem.ui.app import create_ui_app
 from golem.ui.oidc import OidcClient
@@ -35,6 +36,9 @@ def build_app(settings: UiSettings) -> ASGIApp:
         edge=httpx.AsyncClient(base_url=settings.edge_url, timeout=OUTBOUND_TIMEOUT_SECONDS),
         agents=settings.agents,
         public_base_url=settings.public_base_url,
+        logins=Limiter(settings.login_rate),
+        starts=Limiter(settings.start_rate),
+        trusted_proxies=settings.trusted_proxies,
     )
 
 
@@ -50,8 +54,7 @@ def main() -> None:
     except SettingsError as error:
         sys.exit(f"golem ui: {error}")
     asyncio.run(prepare(settings.dsn))
-    # Behind the ingress controller the client address is the controller's; the UI does not
-    # use it, so no proxy headers are trusted.
+    # The client address comes from golem.ratelimit with GOLEM_TRUSTED_PROXIES, not uvicorn.
     uvicorn.run(build_app(settings), host="0.0.0.0", port=settings.port, proxy_headers=False)
 
 

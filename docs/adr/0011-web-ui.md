@@ -164,8 +164,12 @@ The Secret `golem-ui` holds the client secret, the DSN and the Fernet key.
   sessions at their next refresh, by design: a session the UI cannot refresh is not kept.
 - Holding the row lock while the token endpoint answers bounds a refresh by the role's
   `statement_timeout`; the UI's identity provider timeout (4 s) stays below it.
-- "My tasks" is one page of 50, newest first; older tasks need paging, not built. It lists
-  everything the user started over A2A, not only from the UI.
+- "My tasks" shows pages of 50, newest first, following `ListTasks`' `nextPageToken` with an
+  "Older tasks" link (`/tasks?page=<token>`; a token that is not 1 to 256 base64 characters is a
+  400). It lists everything the user started over A2A, not only from the UI.
+- `/login` stores a transaction per anonymous `GET`; since [ADR 0012](0012-rate-limits.md) it is
+  limited per client address (30/min, burst 10), and starting tasks per session (10/min, burst
+  5), which needs the ingress controller in `GOLEM_TRUSTED_PROXIES`.
 - The identity provider must register `GOLEM_OIDC_REDIRECT_URL` (the base URL + `/callback`)
   and the base URL + `/` as the post-logout redirect, require PKCE S256 for the client, and put
   the edge's audience into its access tokens.

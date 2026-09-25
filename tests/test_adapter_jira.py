@@ -37,6 +37,7 @@ from golem.edge.__main__ import authenticator
 from golem.edge.app import create_edge_app
 from golem.edge.policy import ChainLimits, Registry
 from golem.jwks import SigningKeys, fetch_jwks
+from golem.ratelimit import Limiter, Rate, parse_networks
 from golem.settings import SettingsError, adapter_settings, parse_label_agents
 
 WEBHOOK_SECRET = b"webhook-secret"
@@ -853,3 +854,57 @@ def test_process_builds_the_adapter_from_settings(tmp_path: Path) -> None:
     app = build_app(settings)
 
     assert {route.path for route in app.routes} == {"/jira/webhook", "/a2a/push"}
+
+
+# --- Rate limit (ADR 0012) -----------------------------------------------------------------------
+
+
+def limited_adapter(inbound: Any, peer: str, **options: Any) -> tuple[httpx.AsyncClient, FakeEdge]:
+    edge, idp, jira, clock = FakeEdge(), IdP(), FakeJira(), Clock()
+    app = create_jira_adapter_app(
+        labels=LABELS,
+        webhook_secret=WEBHOOK_SECRET,
+        push_secret=PUSH_SECRET,
+        public_base_url=PUBLIC_URL,
+        edge=httpx.AsyncClient(
+            transport=httpx.MockTransport(edge.handle), base_url="https://edge.example.test"
+        ),
+        service_token=credentials(idp, clock).token,
+        jira=httpx.AsyncClient(transport=httpx.MockTransport(jira.handle), base_url=JIRA_URL),
+        inbound=inbound,
+        **options,
+    )
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=(peer, 4000)), base_url=PUBLIC_URL
+    )
+    return client, edge
+
+
+async def test_the_webhook_is_limited_per_address_before_the_signature_check() -> None:
+    inbound = Limiter(Rate(per_minute=60, burst=2), clock=Clock())
+    client, edge = limited_adapter(inbound, "203.0.113.5")
+
+    async with client:
+        unsigned = [await client.post("/jira/webhook", json=issue_updated()) for _ in range(2)]
+        flooded = await client.post("/jira/webhook", json=issue_updated())
+        signed_but_late = await deliver(client, issue_updated())
+
+    assert [r.status_code for r in unsigned] == [401, 401]
+    assert flooded.status_code == 429 and int(flooded.headers["retry-after"]) >= 1
+    assert signed_but_late.status_code == 429
+    assert edge.calls == []
+
+
+async def test_behind_a_trusted_proxy_the_webhook_is_limited_per_forwarded_client() -> None:
+    inbound = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
+    client, _ = limited_adapter(inbound, "10.0.0.9", trusted_proxies=parse_networks("10.0.0.0/8"))
+
+    async with client:
+        first = {"X-Forwarded-For": "203.0.113.5"}
+        await client.post("/jira/webhook", json=issue_updated(), headers=first)
+        again = await client.post("/jira/webhook", json=issue_updated(), headers=first)
+        other = await client.post(
+            "/jira/webhook", json=issue_updated(), headers={"X-Forwarded-For": "203.0.113.6"}
+        )
+
+    assert (again.status_code, other.status_code) == (429, 401)

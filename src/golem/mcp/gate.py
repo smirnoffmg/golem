@@ -5,12 +5,16 @@ name the operation and its arguments, which only the JSON-RPC message carries: t
 bearer middleware decides on the token alone and answers without a hook for the audit. The
 order is fixed: token, grant, run status, message. A refusal and an allowed request are both
 audited, and a request whose row cannot be written is refused.
+
+An address whose requests keep failing authentication is refused with 429 before its token is
+verified or its request audited, except the first refusal of a streak (ADR 0012): a flood of
+forged tokens must not grow the insert-only log at the rate of the flood.
 """
 
 import asyncio
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from mcp.server.transport_security import DEFAULT_MAX_REQUEST_BODY_SIZE
@@ -23,6 +27,7 @@ from golem.edge.audit import source_ip_of
 from golem.mcp.audit import Operation, audit_entry, written
 from golem.mcp.auth import Refusal, RunStatuses, grant_refusal, status_refusal
 from golem.mcp.groups import Group
+from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
 from golem.run_token import RunClaims, RunTokenError
 
 REALM = "golem-mcp"
@@ -30,6 +35,13 @@ TOOLS_CALL = "tools/call"
 AUDIT_UNAVAILABLE = Refusal(503, "temporarily_unavailable", "audit log unavailable")
 TOO_LARGE = Refusal(413, "invalid_request", "request body too large")
 NOT_JSON_RPC = Refusal(400, "invalid_request", "the body is not one JSON-RPC message")
+RATE_LIMITED = Refusal(429, "rate_limited", "rate_limited")
+AUTH_FAILURE_RATE = Rate(per_minute=30, burst=10)
+UNKNOWN_ADDRESS = "unknown"
+
+
+def _auth_failure_limiter() -> Limiter:
+    return Limiter(AUTH_FAILURE_RATE)
 
 
 @dataclass(frozen=True)
@@ -39,6 +51,8 @@ class Gate:
     verify: Callable[[str], RunClaims | RunTokenError]
     statuses: RunStatuses
     audit_dsn: str
+    auth_failures: Limiter = field(default_factory=_auth_failure_limiter)
+    trusted_proxies: tuple[Network, ...] = ()
 
 
 class _TooLarge:
@@ -96,6 +110,15 @@ async def decide(
     return verified, refusal
 
 
+def too_many(decision: Decision) -> Response:
+    response = JSONResponse(
+        {"error": RATE_LIMITED.error, "error_description": "too many failed authentications"},
+        status_code=RATE_LIMITED.status_code,
+    )
+    response.headers["Retry-After"] = str(decision.retry_after)
+    return response
+
+
 def refusal_response(refusal: Refusal, group: Group) -> Response:
     response = JSONResponse(
         {"error": refusal.error or "unauthorized", "error_description": refusal.reason},
@@ -151,8 +174,30 @@ def gated(app: ASGIApp, gate: Gate) -> ASGIApp:
         if body is None:
             return
         operation = operation_of(scope["method"], body)
-        token = bearer_token(Headers(scope=scope).get("authorization"))
+        headers = Headers(scope=scope)
+        token = bearer_token(headers.get("authorization"))
+        address = client_address(
+            client_host(scope), headers.getlist("x-forwarded-for"), gate.trusted_proxies
+        )
+        address_key = address or UNKNOWN_ADDRESS
+        admitted = gate.auth_failures.admits(address_key)
+        if not admitted.allowed:
+            if admitted.first_refusal:
+                entry = audit_entry(
+                    group=gate.group,
+                    target_system=gate.target_system,
+                    operation=operation,
+                    token=token,
+                    claims=None,
+                    refusal=RATE_LIMITED,
+                    source_ip=source_ip_of(address),
+                )
+                await written(gate.audit_dsn, entry)
+            await too_many(admitted)(scope, receive, send)
+            return
         claims, refusal = await decide(gate, token, operation)
+        if refusal is not None and refusal.status_code == 401:
+            gate.auth_failures.take(address_key)
         entry = audit_entry(
             group=gate.group,
             target_system=gate.target_system,
@@ -160,7 +205,7 @@ def gated(app: ASGIApp, gate: Gate) -> ASGIApp:
             token=token,
             claims=claims,
             refusal=refusal,
-            source_ip=source_ip_of(client_host(scope)),
+            source_ip=source_ip_of(address),
         )
         if not await written(gate.audit_dsn, entry):
             refusal = AUDIT_UNAVAILABLE

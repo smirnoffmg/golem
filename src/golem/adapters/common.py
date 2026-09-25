@@ -14,6 +14,10 @@ from typing import Any
 
 import httpx
 from a2a.utils.constants import VERSION_HEADER
+from starlette.requests import Request
+from starlette.responses import Response
+
+from golem.ratelimit import Limiter, Network, client_address
 
 PUSH_PATH = "/a2a/push"
 EDGE_RPC_PATH = "/a2a"
@@ -29,6 +33,7 @@ TERMINAL_STATES = frozenset(
     }
 )
 TOKEN_REFRESH_MARGIN_SECONDS = 30.0
+UNKNOWN_ADDRESS = "unknown"
 
 log = logging.getLogger("golem.adapters")
 
@@ -84,6 +89,19 @@ class ClientCredentials:
             raise ServiceTokenUnavailable("token response has no access token")
         self._token, self._expires_at = token, requested_at + expires_in
         return token
+
+
+def rate_limited(
+    limiter: Limiter, request: Request, trusted_proxies: tuple[Network, ...]
+) -> Response | None:
+    """429 when the client's address is over its rate (ADR 0012), before any secret is checked,
+    so a flood of forged requests costs no HMAC and no log line past the limit."""
+    peer = request.client.host if request.client else None
+    address = client_address(peer, request.headers.getlist("x-forwarded-for"), trusted_proxies)
+    decision = limiter.take(address or UNKNOWN_ADDRESS)
+    if decision.allowed:
+        return None
+    return Response(status_code=429, headers={"Retry-After": str(decision.retry_after)})
 
 
 def push_token(secret: bytes, subject: str, message: str) -> str:

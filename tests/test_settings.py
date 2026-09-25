@@ -2,15 +2,23 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from test_adapter_jira import ADAPTER_ENV
+from test_adapter_mattermost import MATTERMOST_ENV
+from test_mcp_settings import TRACKER_ENV
+from test_ui import UI_ENV
 
 from golem.edge.policy import Registry
+from golem.mcp.settings import mcp_settings
 from golem.orchestrator.jobs import CatalogRef
 from golem.orchestrator.merge_requests import GitLabProject
+from golem.ratelimit import Rate, parse_networks
 from golem.run_token import SigningKey
 from golem.settings import (
     Kubernetes,
     SettingsError,
+    adapter_settings,
     edge_settings,
+    mattermost_adapter_settings,
     parse_agent_tools,
     parse_catalog_refs,
     parse_gitlab_projects,
@@ -18,6 +26,7 @@ from golem.settings import (
     parse_signing_key,
     reconciler_settings,
     task_service_settings,
+    ui_settings,
 )
 
 EDGE_ENV = {
@@ -351,3 +360,61 @@ def test_agent_tools_map_each_agent_to_its_granted_groups() -> None:
 def test_malformed_agent_tools_are_refused(text: str) -> None:
     with pytest.raises(SettingsError, match="agent tools"):
         parse_agent_tools(text)
+
+
+# --- Rate limits and trusted proxies (ADR 0012) --------------------------------------------------
+
+
+def test_edge_rate_limits_have_defaults_and_can_be_set() -> None:
+    defaults = edge_settings(EDGE_ENV)
+    tuned = edge_settings(
+        EDGE_ENV
+        | {
+            "GOLEM_RATE_CALLER_PER_MINUTE": "120",
+            "GOLEM_RATE_CALLER_BURST": "40",
+            "GOLEM_RATE_AUTH_FAILURES_PER_MINUTE": "6",
+            "GOLEM_RATE_AUTH_FAILURES_BURST": "3",
+            "GOLEM_TRUSTED_PROXIES": "10.0.0.0/8, fd00::/8",
+        }
+    )
+
+    assert defaults.caller_rate == Rate(per_minute=60, burst=20)
+    assert defaults.auth_failure_rate == Rate(per_minute=30, burst=10)
+    assert defaults.trusted_proxies == ()
+    assert tuned.caller_rate == Rate(per_minute=120, burst=40)
+    assert tuned.auth_failure_rate == Rate(per_minute=6, burst=3)
+    assert tuned.trusted_proxies == parse_networks("10.0.0.0/8,fd00::/8")
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("GOLEM_RATE_CALLER_PER_MINUTE", "0"),
+        ("GOLEM_RATE_CALLER_BURST", "many"),
+        ("GOLEM_RATE_AUTH_FAILURES_BURST", "-1"),
+        ("GOLEM_TRUSTED_PROXIES", "10.0.0.1/8"),
+        ("GOLEM_TRUSTED_PROXIES", "ingress.example.test"),
+    ],
+)
+def test_a_bad_rate_or_proxy_names_its_variable(name: str, value: str) -> None:
+    with pytest.raises(SettingsError, match=name):
+        edge_settings(EDGE_ENV | {name: value})
+
+
+def test_every_process_with_a_public_route_reads_its_limits() -> None:
+    proxies = {"GOLEM_TRUSTED_PROXIES": "10.0.0.0/8"}
+
+    ui = ui_settings(UI_ENV | proxies | {"GOLEM_RATE_LOGIN_BURST": "3"})
+    jira = adapter_settings(ADAPTER_ENV | proxies | {"GOLEM_RATE_WEBHOOK_PER_MINUTE": "600"})
+    mattermost = mattermost_adapter_settings(
+        MATTERMOST_ENV | proxies | {"GOLEM_RATE_COMMAND_BURST": "5"}
+    )
+    mcp = mcp_settings(TRACKER_ENV | proxies | {"GOLEM_RATE_AUTH_FAILURES_PER_MINUTE": "5"})
+
+    assert (ui.login_rate, ui.start_rate) == (Rate(30, 3), Rate(10, 5))
+    assert jira.webhook_rate == Rate(600, 100)
+    assert mattermost.command_rate == Rate(120, 5)
+    assert mcp.auth_failure_rate == Rate(5, 10)
+    networks = parse_networks("10.0.0.0/8")
+    assert ui.trusted_proxies == jira.trusted_proxies == networks
+    assert mattermost.trusted_proxies == mcp.trusted_proxies == networks

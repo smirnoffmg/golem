@@ -17,6 +17,9 @@ data:
   # Where the task service delivers pushes: in-cluster, and within its
   # GOLEM_PUSH_ALLOWED_PREFIXES.
   GOLEM_PUBLIC_BASE_URL: http://jira-adapter.golem-system.svc:8000
+  # Placeholder: the addresses of the ingress controller's pods (ADR 0012). Rate limits key
+  # on the client address, which behind the controller is only in X-Forwarded-For.
+  GOLEM_TRUSTED_PROXIES: 192.0.2.128/25
 ---
 apiVersion: apps/v1
 kind: Deployment

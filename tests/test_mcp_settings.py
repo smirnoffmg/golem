@@ -2,6 +2,7 @@ import pytest
 
 from golem.mcp.atlassian import JiraDeployment
 from golem.mcp.settings import McpSettings, mcp_settings
+from golem.ratelimit import Rate
 from golem.settings import SettingsError
 
 TRACKER_ENV = {
@@ -28,6 +29,8 @@ def test_settings_for_the_tracker_group() -> None:
         run_status_ttl_seconds=10.0,
         keys_refresh_seconds=60.0,
         port=8000,
+        auth_failure_rate=Rate(per_minute=30, burst=10),
+        trusted_proxies=(),
     )
     assert "service-pat" not in repr(settings)
     assert "password" not in repr(settings)

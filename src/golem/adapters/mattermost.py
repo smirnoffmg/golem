@@ -30,11 +30,13 @@ from golem.adapters.common import (
     PushUpdate,
     push_token,
     push_update,
+    rate_limited,
     send_message_request,
     start_task,
     state_word,
     subject_of_push_token,
 )
+from golem.ratelimit import Limiter, Network, Rate
 
 COMMAND_PATH = "/mattermost/command"
 POSTS_PATH = "/api/v4/posts"
@@ -49,6 +51,8 @@ REQUIRED_FIELDS = ("team_id", "channel_id", "user_id", "user_name", "trigger_id"
 # the token vouches for them, so anything outside the alphabet Mattermost uses is refused.
 ID = re.compile(r"[A-Za-z0-9]{1,64}")
 USER_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
+# Every user's command comes from the Mattermost server's address: the limit is the server's.
+COMMAND_RATE = Rate(per_minute=120, burst=60)
 
 log = logging.getLogger("golem.adapters.mattermost")
 
@@ -195,10 +199,13 @@ def create_mattermost_adapter_app(
     service_token: Callable[[], Awaitable[str]],
     mattermost: httpx.AsyncClient,
     start_timeout_seconds: float = START_TIMEOUT_SECONDS,
+    inbound: Limiter | None = None,
+    trusted_proxies: tuple[Network, ...] = (),
 ) -> Starlette:
     if not command_token:
         raise ValueError("the slash command token must not be empty")
     push_url = f"{public_base_url}{PUSH_PATH}"
+    inbound = Limiter(COMMAND_RATE) if inbound is None else inbound
 
     def allowed(command: SlashCommand) -> bool:
         return command.team_id in teams and (not channels or command.channel_id in channels)
@@ -217,6 +224,9 @@ def create_mattermost_adapter_app(
         return await start_task(edge, service_token, request, what=f"{agent} for {command.user_id}")
 
     async def slash(request: Request) -> Response:
+        refused = rate_limited(inbound, request, trusted_proxies)
+        if refused is not None:
+            return refused
         if not command_token_valid(command_token, request.headers.get("Authorization")):
             return Response(status_code=401)
         command = slash_command(await request.body())

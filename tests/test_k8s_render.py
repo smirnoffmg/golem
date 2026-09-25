@@ -586,3 +586,16 @@ def test_the_ui_calls_the_edge_at_its_service() -> None:
 
     match = SERVICE_URL.fullmatch(env["GOLEM_EDGE_URL"])
     assert match and (match[1], match[2], int(match[3])) == ("edge", SYSTEM, 8000)
+
+
+# --- Rate limits (ADR 0012) ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["edge", "ui", "jira-adapter"])
+def test_processes_behind_the_ingress_controller_name_it_as_a_trusted_proxy(name: str) -> None:
+    # Without it every client behind the ingress would share the controller's rate limit key.
+    objects = render(EXTERNAL_SECRETS)
+    env = env_of(find(objects, "Deployment", name, SYSTEM), objects, secret_keys(objects))
+
+    assert env.get("GOLEM_TRUSTED_PROXIES")
+    assert SETTINGS[name](env).trusted_proxies

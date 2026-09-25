@@ -118,11 +118,40 @@ overlay.
 | `https://jira.example.com`, `https://confluence.example.com`, `data-center`, empty `*_USER` | adapter and MCP ConfigMaps | Atlassian hosts; for Cloud set `GOLEM_MCP_JIRA_DEPLOYMENT: cloud` and the account email in `GOLEM_JIRA_USER` / `GOLEM_MCP_UPSTREAM_USER`. |
 | `https://gitlab.example.com`, `golem-config` | reconciler, `golem-config` | GitLab URL; the call registry, catalogs, agent tool grants, GitLab projects, Jira labels. |
 | `GOLEM_CATALOGS_DIR: /app/examples` | `golem-edge-env` | Agent cards come from the example catalogs baked into the image; mount your catalogs instead. |
+| `GOLEM_TRUSTED_PROXIES: 192.0.2.128/25` | `golem-edge-env`, `golem-ui-env`, `golem-jira-adapter-env` | The ingress controller's pod addresses, as CIDRs: only from them is `X-Forwarded-For` believed (see below). |
 | `ResourceQuota golem-runs`, resources, replicas | `namespaces.yaml`, Deployments | Sizing. |
 
 An `ipBlock` cannot name a host, and SaaS endpoints (Atlassian Cloud, a hosted model API)
 change addresses. For those, send the traffic through an egress proxy with a fixed address, or
 use a CNI with DNS-based policies, and put that address in the `ipBlock`.
+
+### Rate limits and trusted proxies
+
+Every public entry point has a token bucket rate limit ([ADR 0012](../../docs/adr/0012-rate-limits.md)).
+Each is set by `<NAME>_PER_MINUTE` and `<NAME>_BURST` in the process's ConfigMap; the base sets
+none, so the defaults apply:
+
+| Process | `<NAME>` | Key | Default |
+| --- | --- | --- | --- |
+| edge | `GOLEM_RATE_CALLER` | authenticated principal, every `/a2a` call | 60/min, burst 20 |
+| edge, MCP servers | `GOLEM_RATE_AUTH_FAILURES` | client address, failed authentications | 30/min, burst 10 |
+| ui | `GOLEM_RATE_LOGIN` | client address, `GET /login` | 30/min, burst 10 |
+| ui | `GOLEM_RATE_START` | session, `POST /tasks` | 10/min, burst 5 |
+| jira-adapter | `GOLEM_RATE_WEBHOOK` | client address, the webhook | 300/min, burst 100 |
+| mattermost-adapter | `GOLEM_RATE_COMMAND` | client address, the slash command | 120/min, burst 60 |
+
+The buckets are in each replica's memory, so the effective limit is the limit times the
+replicas (twice the table for `edge` and `ui`); the hard, shared limit on runs is the task
+service's admission quota. A refused request gets 429 with `Retry-After`.
+
+Behind the ingress controller the connection's peer is the controller, so the edge, the UI and
+the Jira adapter need `GOLEM_TRUSTED_PROXIES` to name the controller's pods: the client is then
+the right-most `X-Forwarded-For` address that is not a trusted proxy. The controller must put
+the address it received the request from into the header, by appending it or by replacing
+the header; either works, since only the right-most untrusted entry counts. List the controller's pods only, never the whole
+pod network: Jobs call the edge and the MCP servers directly and must not choose their own
+address with the header. If Mattermost's commands come through the ingress too, set the
+variable in `golem-mattermost-adapter-env` as well.
 
 ### Reaching the Kubernetes API server
 

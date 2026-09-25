@@ -17,6 +17,7 @@ from golem.mcp.gate import Gate
 from golem.mcp.groups import GROUPS
 from golem.mcp.server import create_mcp_app
 from golem.mcp.settings import McpSettings, mcp_settings
+from golem.ratelimit import Limiter
 from golem.settings import SettingsError
 from golem.tasks.app import RUN_KEYS_PATH
 
@@ -56,6 +57,8 @@ def build_app(settings: McpSettings, jwks_client: httpx.Client) -> ASGIApp:
             ttl_seconds=settings.run_status_ttl_seconds,
         ),
         audit_dsn=settings.audit_dsn,
+        auth_failures=Limiter(settings.auth_failure_rate),
+        trusted_proxies=settings.trusted_proxies,
     )
     return create_mcp_app(
         gate=gate, upstream=upstream_client(settings), jira_deployment=settings.jira_deployment
@@ -69,7 +72,13 @@ def main() -> None:
     except SettingsError as error:
         sys.exit(f"golem mcp: {error}")
     with httpx.Client(timeout=JWKS_TIMEOUT_SECONDS) as jwks_client:
-        uvicorn.run(build_app(settings, jwks_client), host="0.0.0.0", port=settings.port)
+        # The client address comes from golem.ratelimit with GOLEM_TRUSTED_PROXIES, not uvicorn.
+        uvicorn.run(
+            build_app(settings, jwks_client),
+            host="0.0.0.0",
+            port=settings.port,
+            proxy_headers=False,
+        )
 
 
 if __name__ == "__main__":

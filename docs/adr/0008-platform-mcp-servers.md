@@ -91,6 +91,10 @@ request before the SDK sees it.
   run without controls.
 - Failed authentication is logged as `unauthenticated` with the token's hash, not the claims it
   asserts: an unverified token's claims are the caller's words.
+- Every request audited made a flood of forged tokens a way to grow the insert-only log. Since
+  [ADR 0012](0012-rate-limits.md), failed authentications are limited per client address
+  (30/min, burst 10 by default); past the limit a request gets 429 before verification, and only
+  the first refusal of a streak is audited, as `deny: rate_limited`.
 - The SDK's `token_verifier`/`AuthSettings` hook is not used: it decides on the token alone and
   answers before any code could audit the request with its method and arguments.
 - Deployment manifests (Deployments, Services, NetworkPolicy, secrets) are a separate step.
