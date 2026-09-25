@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 import pytest
-from test_reconcile import Inbox, StatusBoard, connect, new_run, run_status
+from test_reconcile import Inbox, StatusBoard, connect, new_run, recorded, run_status
 
 from golem.orchestrator.jobs import JobStatus
 from golem.orchestrator.merge_requests import (
@@ -251,8 +251,9 @@ async def test_a_succeeded_run_notifies_its_task_with_the_merge_request_url(
 
     [mr] = gitlab.merge_requests
     [outcome] = inbox.received
-    assert outcome.status == "succeeded"
-    assert mr["web_url"] in outcome.detail
+    run = await recorded(runs_db, outcome.task_id)
+    assert run.status == "succeeded"
+    assert mr["web_url"] in run.detail
 
 
 async def test_an_idle_run_notifies_that_it_proposed_nothing(
@@ -265,7 +266,8 @@ async def test_an_idle_run_notifies_that_it_proposed_nothing(
     await reconcile(runs_db, board, inbox, merge_requests)
 
     [outcome] = inbox.received
-    assert outcome.detail == f"Run {run_id} succeeded and proposed no changes."
+    run = await recorded(runs_db, outcome.task_id)
+    assert run.detail == f"Run {run_id} succeeded and proposed no changes."
 
 
 async def test_a_gitlab_outage_holds_the_notification_until_the_merge_request_opens(
@@ -288,7 +290,7 @@ async def test_a_gitlab_outage_holds_the_notification_until_the_merge_request_op
 
     [mr] = gitlab.merge_requests
     [outcome] = inbox.received
-    assert mr["web_url"] in outcome.detail
+    assert mr["web_url"] in (await recorded(runs_db, outcome.task_id)).detail
 
 
 async def test_one_run_failing_to_propose_does_not_hold_back_the_others(
@@ -326,7 +328,7 @@ async def test_a_merge_request_opened_before_a_crash_is_not_opened_twice(
 
     assert len(gitlab.merge_requests) == 1
     [outcome] = inbox.received
-    assert gitlab.merge_requests[0]["web_url"] in outcome.detail
+    assert gitlab.merge_requests[0]["web_url"] in (await recorded(runs_db, outcome.task_id)).detail
 
 
 async def test_an_idle_run_keeps_the_reasons_from_its_report(
@@ -340,6 +342,6 @@ async def test_an_idle_run_keeps_the_reasons_from_its_report(
     await reconcile(runs_db, board, inbox, merge_requests)
 
     [outcome] = inbox.received
-    assert outcome.detail == (
+    assert (await recorded(runs_db, outcome.task_id)).detail == (
         f"Run {run_id} succeeded and proposed no changes: researcher: all pending."
     )

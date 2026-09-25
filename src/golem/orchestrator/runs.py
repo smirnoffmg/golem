@@ -9,6 +9,14 @@ from golem.orchestrator.admission import Limits, Load, Rejected, RunRequest, adm
 
 SCHEMA = Path(__file__).with_name("schema.sql")
 
+# When a run's outcome is final, over `runs r`: it failed, or it succeeded and its proposal is
+# settled, so its tasks learn the merge request (or that there is none) rather than a bare
+# "succeeded". The outbox delivers by this rule and the task service reads by it, so a
+# notification can only ever lead to an outcome the outbox would deliver itself.
+FINAL_OUTCOME = (
+    "(r.status = 'failed' OR (r.status = 'succeeded' AND r.proposal_settled_at IS NOT NULL))"
+)
+
 
 @dataclass(frozen=True)
 class StartRequest:
@@ -31,6 +39,16 @@ class RunReused:
     run_id: str
     root_run_id: str
     status: str = "running"
+
+
+@dataclass(frozen=True)
+class RecordedRun:
+    run_id: str
+    caller: str
+    agent: str
+    status: str
+    detail: str | None
+    final: bool
 
 
 async def apply_schema(conn: AsyncConnection) -> None:
@@ -110,6 +128,19 @@ async def run_status(conn: AsyncConnection, run_id: str) -> str | None:
     cursor = await conn.execute("SELECT status FROM runs WHERE id = %s", (run_uuid,))
     row = await cursor.fetchone()
     return None if row is None else row[0]
+
+
+async def run_of_task(conn: AsyncConnection, task_id: str) -> RecordedRun | None:
+    cursor = await conn.execute(
+        "SELECT r.id, r.caller, r.agent, r.status, r.detail, " + FINAL_OUTCOME + " AS final"
+        " FROM run_tasks t JOIN runs r ON r.id = t.run_id WHERE t.task_id = %s",
+        (task_id,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    run_id, caller, agent, status, detail, final = row
+    return RecordedRun(str(run_id), caller, agent, status, detail, final)
 
 
 async def fail_run(conn: AsyncConnection, run_id: str) -> None:

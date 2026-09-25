@@ -34,9 +34,23 @@ class RunOutcome:
     detail: str
 
 
+@dataclass(frozen=True)
+class TaskRun:
+    """A task's run as the orchestrator recorded it, the system of record for its outcome."""
+
+    run_id: str
+    # Who started the task and for which agent: they address the task in the task store.
+    caller: str
+    agent: str
+    # None until the outcome is final; a run that is still running, or was canceled, has none.
+    outcome: RunOutcome | None
+
+
 class Orchestrator(Protocol):
     async def start(self, run: RunStart) -> Started | Refused: ...
 
     async def cancel(self, task_id: str) -> None: ...
 
     async def status(self, run_id: str) -> str | None: ...
+
+    async def run_of_task(self, task_id: str) -> TaskRun | None: ...

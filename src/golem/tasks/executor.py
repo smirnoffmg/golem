@@ -13,9 +13,12 @@ MISSING_AGENT = "no agent named: the request carries no tenant"
 RUN_OUTCOME = "golem.run_outcome"
 
 
+ANONYMOUS = "anonymous"
+
+
 def caller_of(call_context: ServerCallContext) -> str:
     user = call_context.user
-    return user.user_name if user.is_authenticated else "anonymous"
+    return user.user_name if user.is_authenticated else ANONYMOUS
 
 
 def run_start_of(context: RequestContext) -> RunStart:

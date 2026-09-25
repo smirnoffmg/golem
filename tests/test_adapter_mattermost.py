@@ -818,14 +818,12 @@ async def test_the_outcome_reaches_the_channel_once_however_often_it_is_reported
 ) -> None:
     await command(platform.adapter)
     [run] = platform.orchestrator.started
-    outcome = {
-        "task_id": run.task_id,
-        "tenant": "discovery",
-        "caller": "service:mattermost-adapter",
-        "run_id": "run-1",
-        "status": "succeeded",
-        "detail": "Merge request: https://gitlab.example.test/p/-/merge_requests/3",
-    }
+    platform.orchestrator.finish(
+        run.task_id,
+        succeeded=True,
+        detail="Merge request: https://gitlab.example.test/p/-/merge_requests/3",
+    )
+    outcome = {"task_id": run.task_id, "run_id": "run-1"}
 
     for _ in range(2):
         response = await platform.tasks_write.post("/internal/run-outcome", json=outcome)

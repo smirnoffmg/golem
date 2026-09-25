@@ -41,7 +41,9 @@ async def rpc(client: httpx.AsyncClient, method: str, params: dict[str, Any]) ->
 
 
 async def test_a_task_survives_a_restart_of_the_task_service(engine: AsyncEngine) -> None:
-    async with service(engine, FakeOrchestrator()) as before:
+    # golem_runs outlives the task service too: one orchestrator's records across the restart.
+    orchestrator = FakeOrchestrator()
+    async with service(engine, orchestrator) as before:
         task = (
             await rpc(
                 before,
@@ -53,19 +55,10 @@ async def test_a_task_survives_a_restart_of_the_task_service(engine: AsyncEngine
             )
         )["task"]
 
-    async with service(engine, FakeOrchestrator()) as after:
+    orchestrator.finish(task["id"], succeeded=True, detail="MR !7 opened")
+    async with service(engine, orchestrator) as after:
         seen = await rpc(after, "GetTask", {"id": task["id"], "tenant": "reviewer"})
-        finished = await after.post(
-            "/internal/run-outcome",
-            json={
-                "task_id": task["id"],
-                "tenant": "reviewer",
-                "caller": "user:alice",
-                "run_id": "run-1",
-                "status": "succeeded",
-                "detail": "MR !7 opened",
-            },
-        )
+        finished = await after.post("/internal/run-outcome", json={"task_id": task["id"]})
         done = await rpc(after, "GetTask", {"id": task["id"], "tenant": "reviewer"})
 
     assert seen["status"]["state"] == "TASK_STATE_WORKING"

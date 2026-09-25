@@ -14,11 +14,12 @@ from golem.orchestrator.runs import (
     StartRequest,
     cancel_run_of_task,
     fail_run,
+    run_of_task,
     run_status,
     start_run,
 )
 from golem.run_token import RunClaims, SigningKey, issue
-from golem.tasks.ports import Refused, RunStart, Started
+from golem.tasks.ports import Refused, RunOutcome, RunStart, Started, TaskRun
 
 # The token outlives the Job's deadline by this much, so a call made in the run's last second
 # is not refused on clock skew between the orchestrator and an MCP server.
@@ -130,6 +131,20 @@ class PostgresOrchestrator:
     async def status(self, run_id: str) -> str | None:
         async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:
             return await run_status(conn, run_id)
+
+    async def run_of_task(self, task_id: str) -> TaskRun | None:
+        async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:
+            run = await run_of_task(conn, task_id)
+        if run is None:
+            return None
+        outcome = None
+        if run.final:
+            outcome = RunOutcome(
+                run_id=run.run_id,
+                succeeded=run.status == "succeeded",
+                detail=run.detail or f"Run {run.run_id} {run.status}.",
+            )
+        return TaskRun(run.run_id, run.caller, run.agent, outcome)
 
     async def cancel(self, task_id: str) -> None:
         async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:

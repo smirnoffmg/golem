@@ -40,6 +40,14 @@ Sources:
 - *Mastering API Architecture*, с. 221 (PDF 259): "Platform security underpins any assumptions
   that you make at the application level"; the task service's edge token is an application
   check that does not rest on the NetworkPolicy alone.
+- *Designing Data-Intensive Applications* (Kleppmann), с. 376 (PDF 398): "A system of record,
+  also known as source of truth, holds the authoritative version of your data ... If there is
+  any discrepancy between another system and the system of record, then the value in the system
+  of record is (by definition) the correct one." For a run's outcome that is `golem_runs`, not
+  the body of a request that reports it.
+- *Изучаем DDD — предметно-ориентированное проектирование*, с. 260: information carried by an
+  event notification may already be stale when a subscriber gets it; to avoid races, the
+  subscriber gets the current state with an explicit query.
 - uvicorn 0.53 (`uvicorn/server.py`): `Server.serve` wraps itself in `capture_signals`, which
   replaces the SIGINT and SIGTERM handlers with `signal.signal` and restores the previous ones
   on return.
@@ -101,7 +109,7 @@ each with only its routes (any other path is a 404):
 | --- | --- | --- | --- |
 | 8000 | `a2a` | agent card, `/a2a` | the edge |
 | 8001 | `internal-read` | `GET /internal/run-keys`, `GET /internal/runs/{run_id}` | the MCP servers |
-| 8002 | `internal-write` | `POST /internal/run-outcome` | the reconciler |
+| 8002 | `internal-write` | `POST /internal/run-outcome` (a notification: the task id) | the reconciler |
 
 The public and write apps share one A2A request handler, so an outcome reaches the task that
 `/a2a` created. Three `uvicorn.Server`s run in one event loop under `asyncio.gather`; their
@@ -115,6 +123,21 @@ edge and the task service hold; anything else is a 401 with a JSON-RPC error, be
 principal header is read. The edge builds its forwarded headers from nothing, so a client's own
 `X-Golem-Edge-Token` or `X-Golem-Principal` never passes. A missing or misapplied policy then
 no longer lets a pod in the namespace act as any principal.
+
+**The write port is a notification; the outcome is read from `golem_runs`.** The reconciler's
+body names a task (`task_id`, plus its `run_id` as a hint for logs). The task service ignores
+anything else in it and asks the orchestrator port for that task's run (`run_of_task`:
+`run_tasks` joined with `runs`). The run's status and detail are the outcome; its `caller` and
+`agent` are the owner and tenant that address the task in the task store, so a body cannot point
+a delivery at another caller's task either. An outcome is final when the run failed, or
+succeeded and its proposal is settled; that rule is one SQL predicate, `FINAL_OUTCOME` in
+`golem/orchestrator/runs.py`, used both by the outbox to choose what to notify and by the read,
+so the task service never accepts an outcome the outbox would not send. The answers: 200 when
+the outcome is delivered or the task had already ended (at-least-once delivery stays
+idempotent), 404 for a task with no run or no longer in the task store (final for the outbox, as
+before), 409 when the run has no final outcome yet, which the outbox retries. A `canceled` run
+has no outcome to deliver: its task was canceled through A2A, and a notification for it is a 409
+that changes nothing.
 
 **The manifests are the source of truth for network policy.** `build_network_policy` and its
 types (`EgressAllowList`, `Destination`, `InCluster`, `Cidr`) are removed from `jobs.py`. They
@@ -149,8 +172,18 @@ URLs are `example.com`. The image is `golem`, overridden with kustomize `images`
   manifests give it.
 - The gap of the first version is closed: behind one port, a compromised MCP server could start
   runs as any principal through `/a2a` and forge run outcomes. Now it reaches only run keys and
-  run status, and the reconciler only run outcomes. The reconciler's port still trusts what it
-  is told: a compromised reconciler can complete or fail any task, which is its job.
+  run status, and the reconciler only run outcomes.
+- The reconciler's port no longer trusts what it is told. A forged "succeeded" for a running run
+  leaves the task working (409); a forged "failed" for a settled run completes the task with its
+  real merge request; a body naming another caller or another run still reaches only the named
+  task, with its own run's outcome. What a compromised reconciler, or anything else admitted to
+  `internal-write`, can still do: make a true, final outcome reach its task before the outbox
+  would have sent it (for a settled run that is only earlier, never different), and withhold
+  notifications, so tasks stay working until a healthy reconciler's outbox catches up. Writing
+  false outcomes now takes write access to `golem_runs`, which the reconciler has by design, so
+  the reconciler's database role, not its port, is what bounds it.
+- Every notification costs the task service one query to `golem_runs`; the write port depends
+  on Postgres being reachable, and when it is not, the request fails and the outbox retries.
 - `GOLEM_EDGE_TOKEN` is one more Secret key, shared by two Deployments; rotating it means
   changing both and restarting both, with a short window of refused forwards. It proves only
   that the caller holds the secret, not that it is the edge pod; a leaked token plus a policy

@@ -19,7 +19,14 @@ def pushed() -> list[httpx.Request]:
 
 
 @pytest.fixture
-async def client(pushed: list[httpx.Request]) -> AsyncIterator[httpx.AsyncClient]:
+def orchestrator() -> FakeOrchestrator:
+    return FakeOrchestrator()
+
+
+@pytest.fixture
+async def client(
+    pushed: list[httpx.Request], orchestrator: FakeOrchestrator
+) -> AsyncIterator[httpx.AsyncClient]:
     async def receive(request: httpx.Request) -> httpx.Response:
         pushed.append(request)
         return httpx.Response(204)
@@ -29,7 +36,7 @@ async def client(pushed: list[httpx.Request]) -> AsyncIterator[httpx.AsyncClient
         client=httpx.AsyncClient(transport=httpx.MockTransport(receive)),
         allowed_prefixes=(f"{ADAPTER}/",),
     )
-    app = create_app(make_card(), FakeOrchestrator(), push=push)
+    app = create_app(make_card(), orchestrator, push=push)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://tasks"
     ) as test_client:
@@ -62,21 +69,12 @@ async def send(client: httpx.AsyncClient, push_url: str) -> dict[str, Any]:
 
 
 async def test_a_terminal_state_is_pushed_to_an_allowed_receiver(
-    client: httpx.AsyncClient, pushed: list[httpx.Request]
+    client: httpx.AsyncClient, pushed: list[httpx.Request], orchestrator: FakeOrchestrator
 ) -> None:
     task = (await send(client, f"{ADAPTER}/a2a/push"))["result"]["task"]
+    orchestrator.finish(task["id"], succeeded=True, detail="MR !42 opened")
 
-    await client.post(
-        "/internal/run-outcome",
-        json={
-            "task_id": task["id"],
-            "tenant": "reviewer",
-            "caller": "service:jira-adapter",
-            "run_id": "run-1",
-            "status": "succeeded",
-            "detail": "MR !42 opened",
-        },
-    )
+    await client.post("/internal/run-outcome", json={"task_id": task["id"], "run_id": "run-1"})
 
     terminal = [r for r in pushed if b"TASK_STATE_COMPLETED" in r.content]
     assert len(terminal) == 1

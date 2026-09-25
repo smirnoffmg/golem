@@ -7,16 +7,17 @@ from dataclasses import dataclass
 from psycopg import AsyncConnection
 
 from golem.orchestrator.jobs import JobLauncher, JobStatus
+from golem.orchestrator.runs import FINAL_OUTCOME
 
 
 @dataclass(frozen=True)
 class TaskOutcome:
+    """A notification that a task's run has a final outcome, not the outcome itself: the task
+    service reads the outcome, the caller and the agent from golem_runs (ADR 0009)."""
+
     task_id: str
-    tenant: str
-    caller: str
+    # A hint for logs; the task service reads the task's run itself.
     run_id: str
-    status: str
-    detail: str
 
 
 @dataclass(frozen=True)
@@ -129,24 +130,12 @@ async def _settle_proposals(conn: AsyncConnection, propose: Propose | None) -> N
 
 
 async def _deliver(conn: AsyncConnection, notify: Notify) -> None:
-    # A succeeded run is announced only once its proposal is settled, so its tasks learn the
-    # merge request (or that there is none) rather than a bare "succeeded".
     cursor = await conn.execute(
-        "SELECT t.task_id, r.agent, r.caller, r.id, r.status, r.detail"
-        " FROM run_tasks t JOIN runs r ON r.id = t.run_id"
-        " WHERE t.notified_at IS NULL AND (r.status = 'failed'"
-        " OR (r.status = 'succeeded' AND r.proposal_settled_at IS NOT NULL))"
+        "SELECT t.task_id, r.id FROM run_tasks t JOIN runs r ON r.id = t.run_id"
+        " WHERE t.notified_at IS NULL AND " + FINAL_OUTCOME
     )
-    for task_id, agent, caller, run_id, status, detail in await cursor.fetchall():
-        outcome = TaskOutcome(
-            task_id=task_id,
-            tenant=agent,
-            caller=caller,
-            run_id=str(run_id),
-            status=status,
-            detail=detail,
-        )
-        if await notify(outcome):
+    for task_id, run_id in await cursor.fetchall():
+        if await notify(TaskOutcome(task_id=task_id, run_id=str(run_id))):
             await conn.execute(
                 "UPDATE run_tasks SET notified_at = now() WHERE task_id = %s", (task_id,)
             )

@@ -6,8 +6,20 @@ import pytest
 
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import JobSpec, JobStatus
-from golem.orchestrator.reconcile import TaskOutcome, outcome_detail, reconcile_once
-from golem.orchestrator.runs import RunCreated, StartRequest, cancel_run_of_task, start_run
+from golem.orchestrator.reconcile import (
+    SucceededRun,
+    TaskOutcome,
+    outcome_detail,
+    reconcile_once,
+)
+from golem.orchestrator.runs import (
+    RecordedRun,
+    RunCreated,
+    StartRequest,
+    cancel_run_of_task,
+    run_of_task,
+    start_run,
+)
 
 LIMITS = Limits(max_runs_per_caller=5, max_runs_per_root=5, budget_per_root=Decimal("100"))
 
@@ -71,6 +83,14 @@ async def run_status(dsn: str, run_id: str) -> str:
     return row[0]
 
 
+async def recorded(dsn: str, task_id: str) -> RecordedRun:
+    """What the task service reads for a notified task: the run as golem_runs holds it."""
+    async with await connect(dsn) as conn:
+        run = await run_of_task(conn, task_id)
+    assert run is not None
+    return run
+
+
 async def reconcile(dsn: str, board: StatusBoard, inbox: Inbox) -> None:
     async with await connect(dsn) as conn:
         await reconcile_once(conn, board, inbox.notify)
@@ -105,16 +125,15 @@ async def test_a_succeeded_job_finishes_the_run_and_notifies_its_task_once(
     await reconcile(runs_db, board, inbox)
 
     assert await run_status(runs_db, run_id) == "succeeded"
-    assert inbox.received == [
-        TaskOutcome(
-            task_id="task-m-1",
-            tenant="discovery",
-            caller="user:alice",
-            run_id=run_id,
-            status="succeeded",
-            detail=f"Run {run_id} succeeded.",
-        )
-    ]
+    assert inbox.received == [TaskOutcome(task_id="task-m-1", run_id=run_id)]
+    assert await recorded(runs_db, "task-m-1") == RecordedRun(
+        run_id=run_id,
+        caller="user:alice",
+        agent="discovery",
+        status="succeeded",
+        detail=f"Run {run_id} succeeded.",
+        final=True,
+    )
 
 
 async def test_every_task_of_a_retried_run_is_notified(
@@ -151,7 +170,8 @@ async def test_a_failed_job_fails_the_run(runs_db: str, board: StatusBoard, inbo
     await reconcile(runs_db, board, inbox)
 
     assert await run_status(runs_db, run_id) == "failed"
-    assert [o.status for o in inbox.received] == ["failed"]
+    assert [o.task_id for o in inbox.received] == ["task-m-1"]
+    assert (await recorded(runs_db, "task-m-1")).status == "failed"
 
 
 async def test_a_vanished_job_fails_the_run_with_a_reason(
@@ -164,7 +184,7 @@ async def test_a_vanished_job_fails_the_run_with_a_reason(
 
     assert await run_status(runs_db, run_id) == "failed"
     [outcome] = inbox.received
-    assert "disappeared" in outcome.detail
+    assert "disappeared" in (await recorded(runs_db, outcome.task_id)).detail
 
 
 async def test_an_undelivered_notification_is_retried_until_delivered(
@@ -209,8 +229,9 @@ async def test_the_runtime_report_explains_a_failed_run(
     await reconcile(runs_db, board, inbox)
 
     [outcome] = inbox.received
-    assert "rejected by validation" in outcome.detail
-    assert "solutions/S-9.md is outside hypotheses/" in outcome.detail
+    detail = (await recorded(runs_db, outcome.task_id)).detail
+    assert "rejected by validation" in detail
+    assert "solutions/S-9.md is outside hypotheses/" in detail
 
 
 def test_an_idle_report_says_why_nothing_was_proposed():
@@ -232,3 +253,48 @@ def test_a_runner_failure_report_carries_its_summary():
 def test_an_unreadable_report_falls_back_to_the_job_status():
     assert outcome_detail("r-1", JobStatus.FAILED, "not json") == "Run r-1 failed."
     assert outcome_detail("r-1", JobStatus.FAILED, None) == "Run r-1 failed."
+
+
+# The task service reads the same rule the outbox delivers by: a notification can only ever
+# lead to delivering an outcome the outbox itself would deliver.
+
+
+async def test_an_unknown_task_has_no_recorded_run(runs_db: str) -> None:
+    async with await connect(runs_db) as conn:
+        assert await run_of_task(conn, "no-such-task") is None
+
+
+async def test_only_what_the_outbox_would_deliver_is_final(runs_db: str) -> None:
+    running = await new_run(runs_db, "m-running")
+    unsettled = await new_run(runs_db, "m-unsettled")
+    settled = await new_run(runs_db, "m-settled")
+    failed = await new_run(runs_db, "m-failed")
+    canceled = await new_run(runs_db, "m-canceled")
+    async with await connect(runs_db) as conn:
+        await cancel_run_of_task(conn, "task-m-canceled")
+        await conn.execute(
+            "UPDATE runs SET status = 'succeeded' WHERE id = ANY(%s)", ([unsettled, settled],)
+        )
+        await conn.execute("UPDATE runs SET proposal_settled_at = now() WHERE id = %s", (settled,))
+        await conn.execute("UPDATE runs SET status = 'failed' WHERE id = %s", (failed,))
+    inbox = Inbox()
+
+    async def cannot_propose(run: SucceededRun) -> str:
+        raise RuntimeError("GitLab is down")
+
+    async with await connect(runs_db) as conn:
+        await reconcile_once(conn, StatusBoard(), inbox.notify, cannot_propose)
+
+    delivered = sorted(o.run_id for o in inbox.received)
+    finals = {
+        run_id: (await recorded(runs_db, f"task-{m}")).final
+        for run_id, m in [
+            (running, "m-running"),
+            (unsettled, "m-unsettled"),
+            (settled, "m-settled"),
+            (failed, "m-failed"),
+            (canceled, "m-canceled"),
+        ]
+    }
+    assert delivered == sorted([settled, failed])
+    assert sorted(r for r, final in finals.items() if final) == delivered

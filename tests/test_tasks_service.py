@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import jwt
@@ -12,20 +12,32 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from golem.run_token import RunClaims, SigningKey, issue, verify
 from golem.tasks.app import EDGE_TOKEN_HEADER, OUTCOME_PATH, PushDelivery, create_listeners
-from golem.tasks.ports import Orchestrator, Refused, RunStart, Started
+from golem.tasks.ports import Orchestrator, Refused, RunOutcome, RunStart, Started, TaskRun
 
 TEST_EDGE_TOKEN = "test-edge-token"
 
 
 @dataclass
 class FakeOrchestrator:
+    """The orchestrator's records: every started task's run, and its outcome once final."""
+
     decision: Started | Refused = field(default_factory=lambda: Started(run_id="run-1"))
     started: list[RunStart] = field(default_factory=list)
     canceled: list[str] = field(default_factory=list)
+    runs: dict[str, TaskRun] = field(default_factory=dict)
 
     async def start(self, run: RunStart) -> Started | Refused:
         self.started.append(run)
+        if isinstance(self.decision, Started):
+            self.runs[run.task_id] = TaskRun(self.decision.run_id, run.caller, run.agent, None)
         return self.decision
+
+    def finish(self, task_id: str, *, succeeded: bool, detail: str) -> None:
+        run = self.runs[task_id]
+        self.runs[task_id] = replace(run, outcome=RunOutcome(run.run_id, succeeded, detail))
+
+    async def run_of_task(self, task_id: str) -> TaskRun | None:
+        return self.runs.get(task_id)
 
     async def cancel(self, task_id: str) -> None:
         self.canceled.append(task_id)
@@ -247,27 +259,46 @@ def test_caller_comes_from_the_edge_principal_header(
     assert [run.caller for run in orchestrator.started] == ["user:alice"]
 
 
-def report_outcome(client: TestClient, task: dict[str, Any], **outcome: str) -> Any:
-    return client.post(
-        "/internal/run-outcome",
-        json={
-            "task_id": task["id"],
-            "tenant": "reviewer",
-            "caller": outcome.pop("caller", ""),
-            "run_id": "run-1",
-            **outcome,
-        },
-    )
+def notify(client: TestClient, task_id: str, **forged: str) -> Any:
+    """The reconciler's notification, plus whatever a forger adds to it."""
+    return client.post("/internal/run-outcome", json={"task_id": task_id, **forged})
 
 
-def get_task(client: TestClient, task_id: str) -> dict[str, Any]:
-    return rpc(client, "GetTask", {"id": task_id, "tenant": "reviewer"})
+def get_task(client: TestClient, task_id: str, principal: str = "") -> dict[str, Any]:
+    if principal:
+        client.headers["X-Golem-Principal"] = principal
+    try:
+        return rpc(client, "GetTask", {"id": task_id, "tenant": "reviewer"})
+    finally:
+        client.headers.pop("X-Golem-Principal", None)
 
 
-def test_a_succeeded_run_completes_its_task(client: TestClient) -> None:
+def send_as(client: TestClient, principal: str, message_id: str) -> dict[str, Any]:
+    client.headers["X-Golem-Principal"] = principal
+    try:
+        return rpc(
+            client,
+            "SendMessage",
+            {
+                "tenant": "reviewer",
+                "message": {
+                    "role": "ROLE_USER",
+                    "messageId": message_id,
+                    "parts": [{"text": "go"}],
+                },
+            },
+        )["task"]
+    finally:
+        client.headers.pop("X-Golem-Principal")
+
+
+def test_a_succeeded_run_completes_its_task(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
     task = send(client, "fix the flaky test")
+    orchestrator.finish(task["id"], succeeded=True, detail="MR !42 opened")
 
-    response = report_outcome(client, task, status="succeeded", detail="MR !42 opened")
+    response = notify(client, task["id"], run_id="run-1")
 
     assert response.status_code == 200
     done = get_task(client, task["id"])
@@ -275,20 +306,77 @@ def test_a_succeeded_run_completes_its_task(client: TestClient) -> None:
     assert "MR !42 opened" in status_text(done)
 
 
-def test_a_failed_run_fails_its_task(client: TestClient) -> None:
+def test_a_failed_run_fails_its_task(client: TestClient, orchestrator: FakeOrchestrator) -> None:
     task = send(client, "fix the flaky test")
+    orchestrator.finish(task["id"], succeeded=False, detail="validators red")
 
-    report_outcome(client, task, status="failed", detail="validators red")
+    notify(client, task["id"])
 
     failed = get_task(client, task["id"])
     assert failed["status"]["state"] == "TASK_STATE_FAILED"
     assert "validators red" in status_text(failed)
 
 
-def test_an_unknown_outcome_status_is_refused(client: TestClient) -> None:
+def test_a_forged_success_for_a_running_run_leaves_the_task_working(client: TestClient) -> None:
     task = send(client, "fix the flaky test")
 
-    response = report_outcome(client, task, status="maybe")
+    response = notify(
+        client, task["id"], run_id="run-1", status="succeeded", detail="MR !666 opened"
+    )
+
+    assert response.status_code == 409
+    working = get_task(client, task["id"])
+    assert working["status"]["state"] == "TASK_STATE_WORKING"
+    assert "MR !666" not in str(working)
+
+
+def test_a_forged_failure_delivers_the_true_outcome_instead(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task = send(client, "fix the flaky test")
+    orchestrator.finish(task["id"], succeeded=True, detail="MR !42 opened")
+
+    notify(client, task["id"], status="failed", detail="validators red")
+
+    done = get_task(client, task["id"])
+    assert done["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert "MR !42 opened" in status_text(done)
+    assert "validators red" not in str(done)
+
+
+def test_a_notification_naming_another_callers_run_reaches_only_the_tasks_own_run(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    alices = send_as(client, "user:alice", "m-alice")
+    bobs = send_as(client, "user:bob", "m-bob")
+    orchestrator.finish(bobs["id"], succeeded=False, detail="Bob's run failed")
+
+    # Alice's caller and tenant in the body, even Alice's run: Bob's task is still addressed
+    # as Bob, the owner the orchestrator recorded, and gets Bob's outcome.
+    response = notify(
+        client,
+        bobs["id"],
+        run_id="run-alice",
+        caller="user:alice",
+        tenant="other-agent",
+        status="succeeded",
+        detail="Alice's MR",
+    )
+
+    assert response.status_code == 200
+    bob_sees = get_task(client, bobs["id"], principal="user:bob")
+    assert bob_sees["status"]["state"] == "TASK_STATE_FAILED"
+    assert "Bob's run failed" in status_text(bob_sees)
+    assert "Alice's MR" not in str(bob_sees)
+    assert get_task(client, alices["id"], principal="user:alice")["status"]["state"] == (
+        "TASK_STATE_WORKING"
+    )
+
+
+def test_a_notification_without_a_task_id_is_refused(client: TestClient) -> None:
+    task = send(client, "fix the flaky test")
+
+    response = client.post("/internal/run-outcome", json={"run_id": "run-1", "status": "succeeded"})
 
     assert response.status_code == 422
     assert get_task(client, task["id"])["status"]["state"] == "TASK_STATE_WORKING"
@@ -317,16 +405,19 @@ def test_a_run_outcome_cannot_be_forged_through_the_a2a_endpoint(client: TestCli
 
 
 def test_an_outcome_for_an_unknown_task_is_not_found(client: TestClient) -> None:
-    response = report_outcome(client, {"id": "no-such-task"}, status="succeeded")
+    response = notify(client, "no-such-task", status="succeeded")
 
     assert response.status_code == 404
 
 
-def test_a_repeated_outcome_is_accepted_and_changes_nothing(client: TestClient) -> None:
+def test_a_repeated_notification_is_accepted_and_changes_nothing(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
     task = send(client, "fix the flaky test")
-    report_outcome(client, task, status="succeeded", detail="MR !42 opened")
+    orchestrator.finish(task["id"], succeeded=True, detail="MR !42 opened")
+    notify(client, task["id"])
 
-    again = report_outcome(client, task, status="succeeded", detail="MR !42 opened")
+    again = notify(client, task["id"])
 
     assert again.status_code == 200
     assert get_task(client, task["id"])["status"]["state"] == "TASK_STATE_COMPLETED"

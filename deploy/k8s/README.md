@@ -34,7 +34,7 @@ per kind of caller (ADR 0009):
 | --- | --- | --- | --- |
 | 8000 | `a2a` | the agent card, `/a2a`; every request needs `GOLEM_EDGE_TOKEN` | the edge |
 | 8001 | `internal-read` | `GET /internal/run-keys`, `GET /internal/runs/{run_id}` | the MCP servers |
-| 8002 | `internal-write` | `POST /internal/run-outcome` | the reconciler |
+| 8002 | `internal-write` | `POST /internal/run-outcome`: a notification naming a task; its outcome is read from `golem_runs` | the reconciler |
 
 `GOLEM_PORT`, `GOLEM_INTERNAL_READ_PORT` and `GOLEM_INTERNAL_WRITE_PORT` move them; the
 Deployment's container ports, the Service and the `tasks` policy must move with them. Probes:

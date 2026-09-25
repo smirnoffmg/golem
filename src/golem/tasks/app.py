@@ -36,20 +36,20 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from golem.run_token import SigningKey, public_jwks
-from golem.tasks.executor import RUN_OUTCOME, RunExecutor
-from golem.tasks.ports import Orchestrator, RunOutcome
+from golem.tasks.executor import ANONYMOUS, RUN_OUTCOME, RunExecutor
+from golem.tasks.ports import Orchestrator
 
 RPC_PATH = "/a2a"
 # Each listener serves one kind of caller (ADR 0009): NetworkPolicy admits a caller to a port,
 # not to a path, so a route on a port is reachable by every caller admitted to that port.
-# The reconciler's port: the only route that changes a task without the edge.
+# The reconciler's port: the only route that changes a task without the edge, and only to the
+# outcome golem_runs holds for it.
 OUTCOME_PATH = "/internal/run-outcome"
 # The MCP servers' port, read-only: platform MCP servers verify run tokens against these keys.
 RUN_KEYS_PATH = "/internal/run-keys"
 # Platform MCP servers ask whether a run is still running before serving its token: a canceled
 # run's token is refused before it expires.
 RUN_STATUS_PATH = "/internal/runs/{run_id}"
-OUTCOME_STATUSES = {"succeeded": True, "failed": False}
 TERMINAL_STATES = {
     TaskState.TASK_STATE_COMPLETED,
     TaskState.TASK_STATE_FAILED,
@@ -193,42 +193,56 @@ def internal_read_app(orchestrator: Orchestrator, run_keys: tuple[SigningKey, ..
     )
 
 
-def internal_write_app(handler: DefaultRequestHandler) -> Starlette:
-    """The reconciler's port: run outcomes only."""
+def user_of(caller: str) -> User:
+    # The inverse of caller_of: the task store keys a task by the name of the user who sent it.
+    return UnauthenticatedUser() if caller == ANONYMOUS else EdgePrincipal(caller)
+
+
+def internal_write_app(handler: DefaultRequestHandler, orchestrator: Orchestrator) -> Starlette:
+    """The reconciler's port: notifications that a task's run has a final outcome.
+
+    The body only names the task. Its outcome, and the caller and agent that address it in the
+    task store, are read from golem_runs, the system of record, so whoever can reach this port
+    can at most make a true outcome arrive early, never a false one (ADR 0009).
+    """
 
     async def run_outcome(request: Request) -> Response:
-        body = await request.json()
-        if body.get("status") not in OUTCOME_STATUSES:
-            return JSONResponse({"error": "status must be succeeded or failed"}, status_code=422)
-        outcome = RunOutcome(
-            run_id=body["run_id"],
-            succeeded=OUTCOME_STATUSES[body["status"]],
-            detail=body.get("detail") or f"Run {body['run_id']} {body['status']}.",
-        )
-        caller = body.get("caller") or ""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        task_id = body.get("task_id") if isinstance(body, dict) else None
+        if not isinstance(task_id, str) or not task_id:
+            return JSONResponse({"error": "task_id is required"}, status_code=422)
+        run = await orchestrator.run_of_task(task_id)
+        if run is None:
+            return JSONResponse({"error": "task not found"}, status_code=404)
+        if run.outcome is None:
+            # Running, or canceled (the task was canceled through A2A already): nothing to
+            # deliver. Not a 200, so a notifier that got here early retries.
+            return JSONResponse(
+                {"error": "the task's run has no final outcome yet"}, status_code=409
+            )
+        outcome = run.outcome
         context = ServerCallContext(
-            user=EdgePrincipal(caller) if caller else UnauthenticatedUser(),
-            tenant=body["tenant"],
-            state={RUN_OUTCOME: outcome},
+            user=user_of(run.caller), tenant=run.agent, state={RUN_OUTCOME: outcome}
         )
         try:
-            task = await handler.on_get_task(
-                GetTaskRequest(tenant=body["tenant"], id=body["task_id"]), context
-            )
+            task = await handler.on_get_task(GetTaskRequest(tenant=run.agent, id=task_id), context)
         except TaskNotFoundError:
             task = None
         if task is None:
             return JSONResponse({"error": "task not found"}, status_code=404)
         # Outcomes are delivered at least once; a task that already ended stays as it is.
         if task.status.state in TERMINAL_STATES:
-            return JSONResponse({"task_id": body["task_id"]})
+            return JSONResponse({"task_id": task_id})
         try:
             await handler.on_message_send(
                 SendMessageRequest(
-                    tenant=body["tenant"],
+                    tenant=run.agent,
                     message=Message(
-                        message_id=f"run-outcome-{outcome.run_id}-{body['task_id']}",
-                        task_id=body["task_id"],
+                        message_id=f"run-outcome-{outcome.run_id}-{task_id}",
+                        task_id=task_id,
                         # A restarted service has no live task to infer the context from.
                         context_id=task.context_id,
                         role=Role.ROLE_USER,
@@ -239,7 +253,7 @@ def internal_write_app(handler: DefaultRequestHandler) -> Starlette:
             )
         except TaskNotFoundError:
             return JSONResponse({"error": "task not found"}, status_code=404)
-        return JSONResponse({"task_id": body["task_id"]})
+        return JSONResponse({"task_id": task_id})
 
     return Starlette(routes=[Route(OUTCOME_PATH, run_outcome, methods=["POST"])])
 
@@ -265,5 +279,5 @@ def create_listeners(
     return Listeners(
         public=public_app(card, handler, edge_token),
         internal_read=internal_read_app(orchestrator, run_keys),
-        internal_write=internal_write_app(handler),
+        internal_write=internal_write_app(handler, orchestrator),
     )
