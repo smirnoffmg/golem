@@ -1,0 +1,462 @@
+# Each client wears the labels of the process it stands in for, so the process's own policy
+# governs it; every "closed" target is some other check's "open", or the run listener, so a
+# closed verdict cannot pass because nothing was listening. Each first waits until its egress
+# rules are in force (netcheck.sh, settled), on the canary below.
+
+# A run: the edge and the MCP servers, never the task service, Postgres or another run.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: netcheck-run
+  namespace: golem-jobs
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-run
+        golem.dev/netcheck: run
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: netcheck
+          image: busybox:1.37
+          command: ["sh", "/etc/netcheck/netcheck.sh"]
+          args:
+            - "settled:netcheck-canary.golem-netcheck.svc.cluster.local:8000"
+            - "dns:kubernetes.default.svc.cluster.local"
+            - "dns:netcheck-run-listener.golem-jobs.svc.cluster.local"
+            - "open:edge.golem-system.svc:8000"
+            - "open:mcp-tracker-read.golem-system.svc:8000"
+            - "open:mcp-wiki-read.golem-system.svc:8000"
+            - "closed:tasks.golem-system.svc:8000"
+            - "closed:tasks.golem-system.svc:8001"
+            - "closed:tasks.golem-system.svc:8002"
+            - "closed:$(NETCHECK_POSTGRES)"
+            - "closed:netcheck-run-listener.golem-jobs.svc.cluster.local:8000"
+          env:
+            - name: NETCHECK_POSTGRES
+              valueFrom:
+                configMapKeyRef:
+                  name: golem-netcheck
+                  key: NETCHECK_POSTGRES
+          # Never Ready while it runs (the delay outlasts activeDeadlineSeconds), so a Service
+          # selecting the process's labels never sends it real traffic.
+          readinessProbe:
+            exec:
+              command: ["true"]
+            initialDelaySeconds: 3600
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: netcheck
+              mountPath: /etc/netcheck
+              readOnly: true
+      volumes:
+        - name: netcheck
+          configMap:
+            name: golem-netcheck
+            items:
+              - key: netcheck.sh
+                path: netcheck.sh
+---
+# The edge: the task service's a2a port only; the MCP servers admit runs only.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: netcheck-edge
+  namespace: golem-system
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-edge
+        app.kubernetes.io/part-of: golem
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: netcheck
+          image: busybox:1.37
+          command: ["sh", "/etc/netcheck/netcheck.sh"]
+          args:
+            - "settled:netcheck-canary.golem-netcheck.svc.cluster.local:8000"
+            - "dns:kubernetes.default.svc.cluster.local"
+            - "open:tasks.golem-system.svc:8000"
+            - "closed:tasks.golem-system.svc:8001"
+            - "closed:tasks.golem-system.svc:8002"
+            - "closed:mcp-tracker-read.golem-system.svc:8000"
+          env:
+            - name: NETCHECK_POSTGRES
+              valueFrom:
+                configMapKeyRef:
+                  name: golem-netcheck
+                  key: NETCHECK_POSTGRES
+          # Never Ready while it runs (the delay outlasts activeDeadlineSeconds), so a Service
+          # selecting the process's labels never sends it real traffic.
+          readinessProbe:
+            exec:
+              command: ["true"]
+            initialDelaySeconds: 3600
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: netcheck
+              mountPath: /etc/netcheck
+              readOnly: true
+      volumes:
+        - name: netcheck
+          configMap:
+            name: golem-netcheck
+            items:
+              - key: netcheck.sh
+                path: netcheck.sh
+---
+# An MCP server: the task service's internal-read port only. Without the instance label
+# the MCP Services do not select it.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: netcheck-mcp
+  namespace: golem-system
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-mcp
+        app.kubernetes.io/part-of: golem
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: netcheck
+          image: busybox:1.37
+          command: ["sh", "/etc/netcheck/netcheck.sh"]
+          args:
+            - "settled:netcheck-canary.golem-netcheck.svc.cluster.local:8000"
+            - "dns:kubernetes.default.svc.cluster.local"
+            - "open:tasks.golem-system.svc:8001"
+            - "closed:tasks.golem-system.svc:8000"
+            - "closed:tasks.golem-system.svc:8002"
+          env:
+            - name: NETCHECK_POSTGRES
+              valueFrom:
+                configMapKeyRef:
+                  name: golem-netcheck
+                  key: NETCHECK_POSTGRES
+          # Never Ready while it runs (the delay outlasts activeDeadlineSeconds), so a Service
+          # selecting the process's labels never sends it real traffic.
+          readinessProbe:
+            exec:
+              command: ["true"]
+            initialDelaySeconds: 3600
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: netcheck
+              mountPath: /etc/netcheck
+              readOnly: true
+      volumes:
+        - name: netcheck
+          configMap:
+            name: golem-netcheck
+            items:
+              - key: netcheck.sh
+                path: netcheck.sh
+---
+# The reconciler: the task service's internal-write port only, and Postgres.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: netcheck-reconciler
+  namespace: golem-system
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-reconciler
+        app.kubernetes.io/part-of: golem
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: netcheck
+          image: busybox:1.37
+          command: ["sh", "/etc/netcheck/netcheck.sh"]
+          args:
+            - "settled:netcheck-canary.golem-netcheck.svc.cluster.local:8000"
+            - "dns:kubernetes.default.svc.cluster.local"
+            - "open:tasks.golem-system.svc:8002"
+            - "open:$(NETCHECK_POSTGRES)"
+            - "closed:tasks.golem-system.svc:8000"
+            - "closed:tasks.golem-system.svc:8001"
+          env:
+            - name: NETCHECK_POSTGRES
+              valueFrom:
+                configMapKeyRef:
+                  name: golem-netcheck
+                  key: NETCHECK_POSTGRES
+          # Never Ready while it runs (the delay outlasts activeDeadlineSeconds), so a Service
+          # selecting the process's labels never sends it real traffic.
+          readinessProbe:
+            exec:
+              command: ["true"]
+            initialDelaySeconds: 3600
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: netcheck
+              mountPath: /etc/netcheck
+              readOnly: true
+      volumes:
+        - name: netcheck
+          configMap:
+            name: golem-netcheck
+            items:
+              - key: netcheck.sh
+                path: netcheck.sh
+---
+# Another run, for the run client to fail to reach. It has no "open" check anywhere (nothing
+# may reach a run), so its headless Service stands in: the name resolves only while the pod is
+# Ready, and Ready means its own probe got an answer from the listener.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: netcheck-run-listener
+  namespace: golem-jobs
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-run
+        golem.dev/netcheck: run-listener
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: listener
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - >-
+              mkdir -p /tmp/www && echo netcheck > /tmp/www/index.html
+              && httpd -p 8000 -h /tmp/www || exit 1;
+              trap 'exit 0' TERM; sleep 300 & wait
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            exec:
+              command: ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/"]
+            periodSeconds: 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netcheck-run-listener
+  namespace: golem-jobs
+spec:
+  clusterIP: None
+  selector:
+    golem.dev/netcheck: run-listener
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+# The canary: a listener in a namespace without NetworkPolicies, which no egress rule admits.
+# Only a client's own egress rules can refuse it, so while a client still reaches it, those
+# rules are not in force yet. Its name resolves only while it is Ready.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: golem-netcheck
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: netcheck-canary
+  namespace: golem-netcheck
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        golem.dev/netcheck: canary
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: listener
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - >-
+              mkdir -p /tmp/www && echo netcheck > /tmp/www/index.html
+              && httpd -p 8000 -h /tmp/www || exit 1;
+              trap 'exit 0' TERM; sleep 300 & wait
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            exec:
+              command: ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/"]
+            periodSeconds: 1
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netcheck-canary
+  namespace: golem-netcheck
+spec:
+  clusterIP: None
+  selector:
+    golem.dev/netcheck: canary
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

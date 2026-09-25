@@ -7,6 +7,7 @@ Kustomize manifests for the platform's processes. Decisions and their reasons:
 deploy/k8s/
   base/                            namespaces, RBAC, config, workloads, network policies
   overlays/external-secrets/       optional: the base plus ExternalSecrets for every Secret
+  netcheck/                        the network check to run after deploy (see below)
 ```
 
 ```sh
@@ -17,7 +18,9 @@ kubectl apply -k deploy/k8s/overlays/external-secrets # with External Secrets Op
 Apply an overlay of your own that replaces the placeholders below; never edit the base per
 environment. `tests/test_k8s_render.py` checks that every process's settings parser accepts the
 environment the manifests give it, and `tests/test_k8s_manifests.py` applies the base to k3s
-and checks RBAC and network policies with real traffic.
+and checks RBAC and network policies with real traffic; `tests/test_k8s_network_k3s.py` adds
+kubelet probes, the Kubernetes API egress and the network check below. k3s is not your cluster:
+run the network check after every deploy that changes a policy or the CNI.
 
 ## What runs where
 
@@ -167,3 +170,76 @@ kubectl get endpointslices -n default -l kubernetes.io/service-name=kubernetes \
 Use those addresses (as `/32`) and port in the `tasks` and `reconciler` policies. On a managed
 cluster whose API server sits outside the pod network, use the address and port your provider
 documents for the control plane endpoint.
+
+Tested on k3s (`tests/test_k8s_network_k3s.py`): a pod under the `tasks` policy with the
+endpoint in place creates and deletes a Job in `golem-jobs` through the `kubernetes` Service;
+the same pod under a policy that names the Service's ClusterIP instead cannot connect, nor can
+it under the MCP servers' policy. The network check does not cover this egress (a client
+wearing the task service's labels would join its Service); after deploy, a run that starts is
+the proof, and `kubectl logs deploy/tasks -n golem-system` shows a connection timeout when the
+address is wrong.
+
+## Verify the network after deploy
+
+A NetworkPolicy the API server accepts is not a policy the cluster enforces: the CNI enforces
+it, some CNIs ignore it, and they differ in details that decide whether Golem works and whether
+runs stay contained (ADR 0009). The tests prove the manifests on k3s (kube-router); on your
+cluster, run `deploy/k8s/netcheck` after the platform is up (the edge, the task service, both
+MCP servers Ready and Postgres reachable):
+
+```yaml
+# overlays/prod-netcheck/kustomization.yaml
+resources: [../../netcheck]
+configMapGenerator:        # the Postgres address of your policies, in both namespaces
+  - {name: golem-netcheck, namespace: golem-system, behavior: merge,
+     literals: [NETCHECK_POSTGRES=10.20.0.5:5432]}
+  - {name: golem-netcheck, namespace: golem-jobs, behavior: merge,
+     literals: [NETCHECK_POSTGRES=10.20.0.5:5432]}
+# images: [{name: busybox, newName: registry.example.com/mirror/busybox}]  # if you mirror images
+```
+
+```sh
+kubectl delete -k overlays/prod-netcheck --ignore-not-found   # the previous check, if any
+kubectl apply -k overlays/prod-netcheck
+kubectl get jobs -A -l app.kubernetes.io/component=netcheck -w  # until each client is Complete or Failed
+kubectl logs -n golem-jobs job/netcheck-run
+kubectl logs -n golem-system job/netcheck-edge                  # and netcheck-mcp, netcheck-reconciler
+kubectl delete -k overlays/prod-netcheck
+```
+
+Each client Job wears the labels of one process, so that process's policy governs it, and
+prints one `PASS` or `FAIL` line per check; the Job fails if any line is `FAIL`. All four
+Complete means the matrix holds:
+
+| Client (labels of) | Namespace | Must reach | Must not reach |
+| --- | --- | --- | --- |
+| a run | `golem-jobs` | DNS; `edge:8000`; `mcp-tracker-read:8000`; `mcp-wiki-read:8000` | `tasks` on 8000, 8001, 8002; Postgres; another run |
+| the edge | `golem-system` | DNS; `tasks:8000` (`a2a`) | `tasks` on 8001, 8002; `mcp-tracker-read:8000` |
+| an MCP server | `golem-system` | DNS; `tasks:8001` (`internal-read`) | `tasks` on 8000, 8002 |
+| the reconciler | `golem-system` | DNS; `tasks:8002` (`internal-write`); Postgres | `tasks` on 8000, 8001 |
+
+The real Services are the targets. Stand-ins exist only where nothing real is expected: another
+run (`netcheck-run-listener`, a run-labelled listener in `golem-jobs`), and a canary
+(`netcheck-canary`, in a namespace `golem-netcheck` without policies). A check cannot pass by
+accident:
+
+- Every "must not reach" target is some other client's "must reach", or the run listener,
+  whose name resolves only while it is Ready: a dead target fails a check, it never passes one.
+- Some CNIs let a new pod's traffic through unfiltered until its rules are programmed. Each
+  client first waits until it can no longer reach the canary, which only its own egress rules
+  can refuse (`PASS settled:... (egress unfiltered for Ns)`); only then does it try the matrix.
+  On k3s N is about 1 second. Any N above 0 on your cluster means a new pod, a run included, can
+  reach anything not guarded by the destination's own ingress rules for that long.
+- The client pods are never Ready (their readiness probe outlasts the Job's deadline), so the
+  edge's Service never sends real traffic to the edge's stand-in.
+
+Not covered: the ingress controller to the edge, the UI and the Jira adapter (label your
+controller's namespace and try the public URLs), the Mattermost server's address, the
+destinations outside the cluster other than Postgres (identity provider, Atlassian, GitLab,
+the model gateway, the trace store: their `ipBlock`s need their real endpoints, so a run that
+completes is the check), and the Kubernetes API (above). Kubelet probes need no check: under
+the default deny, a Deployment that becomes Ready and stays Ready shows the CNI admits them.
+If the CNI does not, every Deployment stays unready and its liveness probe restarts it.
+
+The Kubernetes project's own conformance tests measure the CNI itself, independent of Golem:
+`sonobuoy run --e2e-focus=NetworkPolicy`.

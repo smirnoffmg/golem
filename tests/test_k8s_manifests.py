@@ -280,9 +280,12 @@ def has_finished(pod) -> bool:
 
 
 def attempt(label: str, command: str, success: str, failure: str) -> str:
-    # The policy controller programs a new pod's rules a moment after it starts, and until then
-    # the default deny drops everything. So each check retries, and the scripts run the checks
-    # that must pass first: a later "blocked" is the allow-list's answer, not an early drop.
+    # The policy controller programs a new pod's rules a moment after it starts. Until then
+    # kube-router lets the pod's own traffic through unfiltered, and only the destination's
+    # ingress rules apply (test_k8s_network_k3s.py waits that moment out on a canary). So each
+    # check retries, and the scripts run the checks that must pass first. Every "blocked" here
+    # is a destination under a default deny, so it is the ingress side's answer at any moment;
+    # a "reached" proves the ingress side, and the egress side only once the rules are in force.
     return (
         f"r={failure}; for i in 1 2 3 4 5 6 7 8 9 10; do"
         f" if {command} >/dev/null 2>&1; then r={success}; break; fi; sleep 1; done;"

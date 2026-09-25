@@ -41,9 +41,10 @@ packages = ["src/golem"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-# The e2e suite builds the image and runs it in k3s; CI runs it as its own stage.
+# Slow checks in a real cluster (the image as a Job, network traffic); CI runs them as their
+# own stage after the fast checks.
 addopts = "-m 'not e2e'"
-markers = ["e2e: a run of the real image in a real cluster (run with -m e2e)"]
+markers = ["e2e: slow checks in a real cluster (run with -m e2e)"]
 
 [tool.ruff]
 line-length = 100

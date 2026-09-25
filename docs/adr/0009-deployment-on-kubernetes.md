@@ -48,6 +48,20 @@ Sources:
 - *Изучаем DDD — предметно-ориентированное проектирование*, с. 260: information carried by an
   event notification may already be stale when a subscriber gets it; to avoid races, the
   subscriber gets the current state with an explicit query.
+- *k8s_изнутри*, с. 334 (PDF 336): "Мы настоятельно рекомендуем запускать тесты для проверки
+  соответствия NetworkPolicy при оценке вашего провайдера CNI на совместимость со спецификациями
+  сетевой безопасности Kubernetes." What k3s enforces says nothing about the operator's CNI.
+- *Release It!*, с. 137: "A good test harness should be devious"; a socket "can be refused" or
+  "can sit in a listen queue until the caller times out". kube-router rejects a denied
+  connection, other CNIs drop it: the network check counts both as closed, and its negative
+  tests break policies to show that it can fail.
+- *Cloud Native DevOps with Kubernetes*, с. 114: when a readiness check fails, "Kubernetes уберет
+  контейнер из списка подходящих сервисов". The network check's clients wear the labels of the
+  processes they stand in for and are never Ready, so a Service never sends them real traffic.
+- kube-router's rules in k3s v1.33.4, read with `iptables-save` in the test cluster: every pod's
+  chain accepts traffic "when source is the pod's local node" (`--src-type LOCAL`), and a pod's
+  chain exists only once the controller has handled the new pod; before that, nothing matches
+  the pod's own traffic.
 - uvicorn 0.53 (`uvicorn/server.py`): `Server.serve` wraps itself in `capture_signals`, which
   replaces the SIGINT and SIGTERM handlers with `signal.signal` and restores the previous ones
   on return.
@@ -147,6 +161,32 @@ catch-all `ipBlock`, no empty `namespaceSelector`, exactly five destinations plu
 Generating the YAML from Python was rejected: operators patch YAML with kustomize, and a
 generator would put a build step between the reviewed file and the cluster.
 
+**What k3s proves, and a network check for the rest.** Three things the manifests only
+rendered are now exercised on k3s (`tests/test_k8s_network_k3s.py`), in an environment built
+the way an operator's overlay builds it: the Kubernetes API placeholder replaced by the address
+in the `kubernetes` EndpointSlice, Postgres by an in-cluster Postgres, and the edge, the task
+service and both MCP servers by busybox listening on their ports inside their own Deployments,
+labels and probes untouched.
+
+- Kubelet probes: every stand-in becomes Ready under the default deny and stays Ready past its
+  liveness probe's first run, with no restart and no failed liveness probe, on the task
+  service's HTTP probes and the others' TCP probes.
+- The Kubernetes API: a pod under the `tasks` policy and the task service's account creates
+  and deletes a suspended Job in `golem-jobs` through the `kubernetes` Service; the same pod
+  under the MCP servers' policy cannot connect, and neither can it under a policy that names the
+  Service's ClusterIP. The placeholder's place (the endpoint, not the ClusterIP) was right; no
+  manifest changed.
+- `deploy/k8s/netcheck`, the operator's check: Jobs wearing the labels of a run, the edge, an
+  MCP server and the reconciler try the traffic matrix above against the real Services and
+  print PASS or FAIL per check; a Job fails on any FAIL. It passes against the manifests, and it
+  fails, naming the checks, when `golem-run-egress` is deleted (the run's names and opens) and
+  when that policy also admits Postgres (the run's closed Postgres check, which nothing else
+  guards). Every closed target is another check's open target, or a listener whose headless
+  name resolves only while it is Ready, so a dead target cannot pass a closed check.
+
+The operator runs the network check after every deploy that touches a policy or the CNI
+(`deploy/k8s/README.md`, "Verify the network after deploy").
+
 **Secrets are not in git.** The base references Secrets by name; `deploy/k8s/README.md` lists
 every name and key. The `external-secrets` overlay creates each one with an `ExternalSecret` from
 a `ClusterSecretStore` the operator provides. The run token signing key is mounted as a file;
@@ -170,6 +210,26 @@ URLs are `example.com`. The image is `golem`, overridden with kustomize `images`
   the edge, an MCP server and the reconciler each reach their own task service port through the
   `tasks` Service and are blocked on the other two. `tests/test_k8s_render.py` runs every process's settings parser over the environment the
   manifests give it.
+- Verified on k3s only, and only for kube-router: kubelet probes are admitted because
+  kube-router accepts everything from a pod's own node, which also means a `hostNetwork` pod on
+  that node passes every ingress policy. Another CNI may admit probes differently or not at all
+  (the Deployments then never become Ready, which the operator sees at once); the network check
+  does not test probes, a rollout that ends Ready does.
+- On k3s a new pod's egress is unfiltered for about a second after it starts, until kube-router
+  has written the pod's rules: the test pods reached the API server in that window under a
+  policy that denies it. A run is such a pod, so for that second it can reach whatever is not
+  guarded by the destination's own ingress rules: the API server, Postgres outside the cluster,
+  any host. In that second the Job runs only the platform's image, not anything a model
+  directed, so the untrusted part of a run cannot use it; the operator's check measures the
+  window on their CNI (`egress unfiltered for Ns`), and a CNI that programs rules before the
+  pod starts closes it. The tests and the check wait it out on a canary no rule admits before
+  they trust an open connection. The positive checks in `tests/test_k8s_manifests.py` do not,
+  so they prove the ingress side of each allowed path; the egress side is proven by the network
+  check's tests.
+- Still unverified by any test: the ingress controller's namespace label, the Mattermost
+  `ipBlock`, egress to the hosts outside the cluster other than Postgres (identity provider,
+  Atlassian, GitLab, model gateway, trace store), and the API egress on a managed control plane
+  outside the pod network. Each depends on addresses only the operator has.
 - The gap of the first version is closed: behind one port, a compromised MCP server could start
   runs as any principal through `/a2a` and forge run outcomes. Now it reaches only run keys and
   run status, and the reconciler only run outcomes.
