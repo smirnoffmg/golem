@@ -18,6 +18,7 @@ import pytest
 import yaml
 from cryptography.fernet import Fernet
 
+from golem.catalog import DELEGATE_GROUP
 from golem.mcp.settings import mcp_settings
 from golem.orchestrator.jobs import APP_LABEL, APP_NAME
 from golem.runtime import tools
@@ -66,11 +67,12 @@ ADAPTERS = {
 }
 KUBERNETES_API_USERS = {"tasks": "golem-tasks", "reconciler": "golem-reconciler"}
 # Who may call the task service, and on which of its ports (ADR 0009): NetworkPolicy admits a
-# caller to a port, and each port serves only that caller's routes.
+# caller to a port, and each port serves only its callers' routes. The first port is the one
+# GOLEM_TASK_SERVICE_URL names; the edge also reads the run keys, for call tokens (ADR 0014).
 TASK_SERVICE_PORTS = {
-    "golem-edge": "a2a",
-    "golem-mcp": "internal-read",
-    "golem-reconciler": "internal-write",
+    "golem-edge": ("a2a", "internal-read"),
+    "golem-mcp": ("internal-read",),
+    "golem-reconciler": ("internal-write",),
 }
 IDP_PLACEHOLDER = "198.51.100.10/32"
 MATTERMOST_PLACEHOLDER = "203.0.113.30/32"
@@ -259,7 +261,15 @@ def test_each_caller_of_the_task_service_is_pointed_at_its_own_port(name: str) -
 
     match = SERVICE_URL.fullmatch(url)
     assert match and (match[1], match[2]) == ("tasks", SYSTEM), url
-    assert int(match[3]) == task_service_port(objects, TASK_SERVICE_PORTS[app])
+    assert int(match[3]) == task_service_port(objects, TASK_SERVICE_PORTS[app][0])
+
+
+def test_the_edge_reads_run_keys_and_statuses_on_the_internal_read_port() -> None:
+    objects = render(EXTERNAL_SECRETS)
+    deployment = find(objects, "Deployment", "edge", SYSTEM)
+    url = env_of(deployment, objects, secret_keys(objects))["GOLEM_TASK_SERVICE_READ_URL"]
+
+    assert url == f"http://tasks.{SYSTEM}.svc:{task_service_port(objects, 'internal-read')}"
 
 
 def test_the_edge_and_the_task_service_get_the_edge_token_from_the_same_secret_key() -> None:
@@ -296,6 +306,8 @@ def test_each_mcp_server_serves_the_group_the_registry_routes_to_it() -> None:
     )
 
     for group, entry in registry.items():
+        if group == DELEGATE_GROUP:
+            continue
         service = find(objects, "Service", SERVICE_URL.fullmatch(entry["url"])[1], SYSTEM)
         [deployment] = [
             d
@@ -304,6 +316,20 @@ def test_each_mcp_server_serves_the_group_the_registry_routes_to_it() -> None:
             <= d["spec"]["template"]["metadata"]["labels"].items()
         ]
         assert env_of(deployment, objects, secret_keys(objects))["GOLEM_MCP_GROUP"] == group
+
+
+def test_the_delegation_group_routes_to_the_edge_a2a_endpoint() -> None:
+    objects = render(EXTERNAL_SECRETS)
+    registry = yaml.safe_load(
+        find(objects, "ConfigMap", "golem-mcp-registry", JOBS)["data"]["registry.yaml"]
+    )
+    edge = find(objects, "Deployment", "edge", SYSTEM)
+    port = int(env_of(edge, objects, secret_keys(objects)).get("GOLEM_PORT", "8000"))
+
+    assert registry[DELEGATE_GROUP] == {
+        "url": f"http://edge.{SYSTEM}.svc:{port}/a2a",
+        "tools": ["delegate_to_agent"],
+    }
 
 
 # --- Pod security -------------------------------------------------------------------------------
@@ -403,7 +429,8 @@ def test_the_task_service_admits_each_caller_on_its_own_port_only() -> None:
     policy = find(objects, "NetworkPolicy", "tasks", SYSTEM)
 
     assert ports_by_peer(policy["spec"]["ingress"], "from") == {
-        app: {task_service_port(objects, port)} for app, port in TASK_SERVICE_PORTS.items()
+        app: {task_service_port(objects, port) for port in ports}
+        for app, ports in TASK_SERVICE_PORTS.items()
     }
 
 
@@ -417,7 +444,9 @@ def test_each_caller_may_send_to_its_own_task_service_port_only(app: str) -> Non
     ]
 
     egress = ports_by_peer(policy["spec"]["egress"], "to")
-    assert egress["golem-tasks"] == {task_service_port(objects, TASK_SERVICE_PORTS[app])}
+    assert egress["golem-tasks"] == {
+        task_service_port(objects, port) for port in TASK_SERVICE_PORTS[app]
+    }
 
 
 def run_egress() -> list[dict]:

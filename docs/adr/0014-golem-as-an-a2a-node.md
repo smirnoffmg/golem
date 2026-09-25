@@ -104,3 +104,43 @@ Golem's; it needs the partners' agreement and the security partner's.
 - The edge grows: token verification for a second issuer, the directory, later the outbound
   client. Each stays small and stateless, and the edge keeps failing closed.
 - Steps 3 and 4 depend on other platforms supporting A2A 1.0, which has not been confirmed.
+
+### Step 1 as built
+
+- **The call token** (`golem.call_token`) carries `iss` = `golem`, `aud` = `golem-a2a`, `sub`
+  = the subject (`user:…` or `service:…`, never an agent), `act` = `{"sub": "agent:<name>"}`
+  (RFC 8693, section 4.1: "a JSON object, and members in the JSON object are claims that
+  identify the actor"), `chain` (the agents so far, the acting one last), `root`, `run`, `iat`
+  and `exp` (the run token's: the deadline plus a minute). The orchestrator signs it with the
+  run-token key and delivers it as `GOLEM_CALL_TOKEN` in the run's token Secret; a child's
+  chain is its parent's plus its own agent, and its subject is its parent's. Earlier actors are
+  in `chain`, not in nested `act` claims, which the policy would have to unwind.
+- **The edge dispatches on the unverified issuer**: `golem` goes to the call-token check
+  (ES256 only, audience `golem-a2a`, the orchestrator's keys from the task service's
+  `internal-read` port, so the edge now reaches port 8001 too, amending ADR 0009's port table),
+  anything else to the identity provider's (its algorithms, issuer and audience). A run token
+  presented to the edge fails on its audience; `GOLEM_OIDC_ISSUER` may not be `golem`.
+- **An agent may only start a new task.** Forwarded as the subject, it would otherwise read,
+  list, cancel or write into the subject's tasks; the edge refuses every other method and any
+  message naming an existing task (`method_not_allowed`).
+- **The chain crosses the edge in two headers**, `X-Golem-Chain` and `X-Golem-Root-Run`, built
+  by the edge from the verified token and trusted by the task service only with the edge
+  token, like the principal. The child counts against the subject's per-caller concurrency as
+  well as against the chain's limits.
+- **The tool is a tool group**, `agents.delegate`, entered in the platform's MCP registry with
+  the edge's A2A URL and served by the runtime; a role names it in its catalog, and the call
+  registry (`agent:<name>`) decides what it reaches.
+- **Keys at startup.** A verifier that has never loaded keys (an MCP server or the edge started
+  before the task service) retries after 1 s, doubling up to its refresh interval, instead of
+  refusing every token for the whole interval; an unknown key id with keys loaded stays rate
+  limited.
+- **Revoked with its run.** Before it serves a call token, the edge asks the task service
+  whether the token's `run` is still running (`GET /internal/runs/{run_id}` on the
+  `internal-read` port, set by `GOLEM_TASK_SERVICE_READ_URL`), the same check the MCP servers
+  make for run tokens (ADR 0008; ASVS 10.4.9, "tokens can be revoked"), with the answer cached
+  `GOLEM_RUN_STATUS_TTL_SECONDS` (10 s). A run that is canceled, finished or unknown gets 401
+  `invalid_token` (`run_not_active`), audited with the chain; a lookup that fails gets 503,
+  also audited: the edge fails closed. The status client is shared with the MCP servers
+  (`golem.run_status`).
+- **No cascade on cancel.** Cancelling a run stops it delegating but does not cancel the
+  children it already started; that is left for the step that waits for children (Temporal).

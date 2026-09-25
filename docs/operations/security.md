@@ -12,9 +12,10 @@ between parties that do not trust each other's claims.
 | Boundary | Control | Protects against | Decision |
 | --- | --- | --- | --- |
 | People, services, agents → Golem | the edge checks every token (issuer, audience, signature, expiry), the call registry, the chain policy (depth, cycles), a rate limit per caller; it audits the decision before forwarding and refuses what it cannot check | calls by anyone the identity provider did not vouch for, to agents they may not call; floods | [0002](../adr/0002-edge-and-task-service-split.md), [0012](../adr/0012-rate-limits.md) |
+| Run → another agent | the run's call token (ES256, audience `golem-a2a`, the subject, the acting agent, the chain, the root run, the run's deadline), checked by the edge against the orchestrator's keys and refused once its run is no longer running (status cached `GOLEM_RUN_STATUS_TTL_SECONDS`, 10 s; unknown status refused); the call registry must name `agent:<name>`, the chain may not grow past `GOLEM_MAX_CHAIN_DEPTH` or repeat an agent; the child runs as the subject under the root's budget; the agent may only start a task | a leaked call token outliving its run; a run acting as its own principal, reading or cancelling the subject's tasks, fanning out without bound, or calling agents nobody allowed it to | [0014](../adr/0014-golem-as-an-a2a-node.md) |
 | Browser → UI | authorization code with PKCE S256, `state`/`nonce` bound to the browser, tokens only on the server (encrypted in `golem_ui`), `__Host-` cookie, CSRF token on every `POST`, strict CSP | token theft by scripts, login CSRF, session fixation, clickjacking | [0011](../adr/0011-web-ui.md) |
-| Edge → task service | NetworkPolicy admits only the edge to port 8000, and every request must carry `GOLEM_EDGE_TOKEN`; the principal header is trusted only then | a pod in the namespace acting as any user | [0009](../adr/0009-deployment-on-kubernetes.md) |
-| MCP servers, reconciler → task service | one listener per kind of caller: MCP servers read run keys and status (8001), the reconciler only notifies (8002), and the outcome is read from `golem_runs` | a compromised MCP server starting runs or forging outcomes | [0009](../adr/0009-deployment-on-kubernetes.md) |
+| Edge → task service | NetworkPolicy admits only the edge to port 8000, and every request must carry `GOLEM_EDGE_TOKEN`; the principal, chain and root-run headers are trusted only then, and the edge builds them from nothing, so a client's own never pass | a pod in the namespace acting as any user; a client claiming a chain or another chain's budget | [0009](../adr/0009-deployment-on-kubernetes.md), [0014](../adr/0014-golem-as-an-a2a-node.md) |
+| MCP servers, edge, reconciler → task service | one listener per kind of caller: MCP servers read run keys and status (8001), the edge reads the run keys too (8001, for call tokens), the reconciler only notifies (8002), and the outcome is read from `golem_runs` | a compromised MCP server starting runs or forging outcomes | [0009](../adr/0009-deployment-on-kubernetes.md) |
 | Run → anything | namespace `golem-jobs` with default-deny egress to five destinations, `restricted` Pod Security, no service account token, a `ResourceQuota`, admission quotas per caller and chain | a run reaching databases, other runs, the Kubernetes API or the internet; one caller exhausting the cluster | [0004](../adr/0004-security-boundary-outside-the-job.md), [0009](../adr/0009-deployment-on-kubernetes.md) |
 | Run → Jira, Confluence | platform MCP servers accept only run tokens (ES256, audience `golem-mcp`, the group in `tools`, the run still running), hold the upstream credentials, audit every request | a leaked run token outliving its run; a run using tools it was not granted; upstream credentials in untrusted code | [0007](../adr/0007-run-tokens.md), [0008](../adr/0008-platform-mcp-servers.md) |
 | Run → Git | protected default branch; the run only pushes `golem/<target>/<run>`; the merge request is opened by the reconciler; a human merges | a run changing the record of truth by itself | [0004](../adr/0004-security-boundary-outside-the-job.md) |
@@ -25,11 +26,28 @@ between parties that do not trust each other's claims.
 | Processes → Kubernetes API | only the task service (create Jobs and token Secrets) and the reconciler (read Jobs and pods) have tokens; nobody can read a Secret | a process reading run tokens back or escaping its role | [0009](../adr/0009-deployment-on-kubernetes.md) |
 | Metrics | a port of their own, reachable only from the namespace labelled `golem.dev/monitoring` | traffic, refusals and agent names leaking to callers | [0013](../adr/0013-metrics.md) |
 
+### What a delegating agent can and cannot do
+
+A role gets `delegate_to_agent` only when its catalog names the `agents.delegate` tool group;
+the edge then decides every call:
+
+- it **can** start a task of an agent whose call registry entry names `agent:<its name>`, with
+  a goal it writes, as the subject of its chain (the person or service that started the first
+  run); the child is admitted under the chain's root, so the chain's concurrency and budget
+  cover it;
+- it **cannot** delegate once its run is no longer running (`run_not_active`, 401, audited;
+  the edge refuses with 503 when it cannot learn the run's status), act as itself or as anyone else than that subject, call an agent already in
+  its chain, go deeper than `GOLEM_MAX_CHAIN_DEPTH`, read, list or cancel tasks (the edge
+  allows it `SendMessage` of a new task only), send into an existing task, or present its call
+  token to an MCP server or its run token to the edge (the audiences differ);
+- every call is audited with the subject as the account and the whole chain, the acting agent
+  last, and rate-limited per acting agent (`GOLEM_RATE_CALLER_*`).
+
 ## Keys and secrets
 
 | Secret | Held by | Leaked, it allows | Rotation below |
 | --- | --- | --- | --- |
-| run token signing key | task service | minting run tokens with any tool group for any running run, until rotated | [yes](#run-token-signing-key) |
+| run token signing key | task service | minting run tokens with any tool group for any running run, and call tokens for any subject and chain the call registry admits, until rotated | [yes](#run-token-signing-key) |
 | `GOLEM_EDGE_TOKEN` | edge, task service | with a network policy gap too, starting runs as any principal | [yes](#edge-token) |
 | `GOLEM_UI_SESSION_KEY` | UI | with a copy of `golem_ui`, users' access and refresh tokens | [yes](#fernet-keys) |
 | `GOLEM_PUSH_CONFIG_KEY` | task service | with a copy of `golem_tasks`, the adapters' push tokens | [yes](#fernet-keys) |
@@ -59,8 +77,8 @@ Nothing can pause admission, so a run may still start meanwhile; it fails, the c
 
 ### Run token signing key
 
-The task service signs every run token with one key and publishes only that key at
-`/internal/run-keys`. **Two keys cannot be published at once**, so there is no overlap: a
+The task service signs every run token and every call token with one key and publishes only
+that key at `/internal/run-keys`. **Two keys cannot be published at once**, so there is no overlap: a
 token signed with the old key is refused as soon as an MCP server has fetched the new key
 set, and a run that holds one fails at its next tool call. Rotate when nothing is running.
 
@@ -75,7 +93,8 @@ kubectl -n golem-system create secret generic golem-run-token-key \
 
 2. Give it a new key id: set `GOLEM_RUN_TOKEN_KID` in `golem-tasks-env` in your overlay (for
    example `golem-2`) and apply the overlay.
-3. Restart the task service, then the MCP servers, so both hold the new key at once:
+3. Restart the task service, then the MCP servers and the edge, so all hold the new key at
+   once:
 
 <!-- run: rotate-run-key-restart -->
 ```sh
@@ -84,6 +103,8 @@ kubectl -n golem-system rollout status deployment/tasks --timeout=5m
 kubectl -n golem-system rollout restart deployment/mcp-tracker-read deployment/mcp-wiki-read
 kubectl -n golem-system rollout status deployment/mcp-tracker-read --timeout=5m
 kubectl -n golem-system rollout status deployment/mcp-wiki-read --timeout=5m
+kubectl -n golem-system rollout restart deployment/edge
+kubectl -n golem-system rollout status deployment/edge --timeout=5m
 ```
 
 4. Check that the new key id is published, from a pod that may read it:
@@ -191,6 +212,10 @@ Known gaps, each recorded where it was decided:
 - **Run tokens** ([ADR 0007](../adr/0007-run-tokens.md)) stay valid until `exp`; revocation
   is the MCP servers' status check, cached 10 s. The signing key has no rotation overlap
   (above).
+- **Call tokens** ([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)) are revoked like run
+  tokens: the edge asks whether the delegating run is still running, cached 10 s, so a
+  canceled or finished run can start children for at most that long. Cancelling a run does not
+  cancel the children it already started; cancel each child task too.
 - **Audit immutability** rests on grants ([ADR 0003](../adr/0003-one-postgres-cluster-per-owner-databases.md));
   a database administrator can change the log. Ship it to a central log store if that is not
   acceptable. There is no retention job.

@@ -25,7 +25,7 @@ from golem.adapters.jira import jira_authorization
 from golem.catalog import Role
 from golem.jwks import SigningKeys, fetch_jwks
 from golem.mcp.atlassian import JiraDeployment
-from golem.mcp.auth import RunStatuses, run_token_verifier
+from golem.mcp.auth import run_token_verifier
 from golem.mcp.gate import Gate
 from golem.mcp.groups import GROUPS
 from golem.mcp.server import create_mcp_app
@@ -34,6 +34,7 @@ from golem.orchestrator.admission import Limits
 from golem.orchestrator.runs import RunCreated, StartRequest, cancel_run_of_task, start_run
 from golem.orchestrator.service import PostgresOrchestrator
 from golem.ratelimit import Limiter, Rate
+from golem.run_status import RunStatuses
 from golem.run_token import RunClaims, SigningKey, issue
 from golem.runtime.tools import (
     McpToolbox,

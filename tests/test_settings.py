@@ -41,6 +41,7 @@ EDGE_ENV = {
     "GOLEM_CATALOGS_DIR": "/app/examples",
     "GOLEM_PUBLIC_BASE_URL": "https://golem.example.test",
     "GOLEM_EDGE_TOKEN": "edge-shared-secret",
+    "GOLEM_TASK_SERVICE_READ_URL": "http://tasks:8001",
 }
 
 TASKS_ENV = {
@@ -87,6 +88,33 @@ def test_edge_settings_are_parsed_from_the_environment() -> None:
     assert settings.max_chain_depth == 4
     assert settings.catalogs_dir == Path("/app/examples")
     assert settings.port == 8000
+    assert settings.task_service_read_url == "http://tasks:8001"
+    assert settings.run_status_ttl_seconds == 10
+
+
+def test_the_edge_run_status_ttl_can_be_set() -> None:
+    settings = edge_settings({**EDGE_ENV, "GOLEM_RUN_STATUS_TTL_SECONDS": "2.5"})
+
+    assert settings.run_status_ttl_seconds == 2.5
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("GOLEM_RUN_STATUS_TTL_SECONDS", "soon"),
+        ("GOLEM_RUN_STATUS_TTL_SECONDS", "-1"),
+        ("GOLEM_TASK_SERVICE_READ_URL", "http://tasks:8001/"),
+    ],
+)
+def test_invalid_edge_revocation_settings_name_their_variable(name: str, value: str) -> None:
+    with pytest.raises(SettingsError, match=name):
+        edge_settings({**EDGE_ENV, name: value})
+
+
+def test_the_identity_provider_cannot_be_golem_itself() -> None:
+    # The edge tells call tokens from IdP tokens by their issuer (ADR 0014).
+    with pytest.raises(SettingsError, match="GOLEM_OIDC_ISSUER"):
+        edge_settings({**EDGE_ENV, "GOLEM_OIDC_ISSUER": "golem"})
 
 
 def test_every_missing_variable_is_named_at_once() -> None:

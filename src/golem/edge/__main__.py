@@ -14,16 +14,25 @@ from starlette.types import ASGIApp
 
 from golem.catalog import load_catalog
 from golem.edge.app import create_edge_app
-from golem.edge.auth import AuthFailure, Principal, authenticate
+from golem.edge.auth import (
+    AuthFailure,
+    Principal,
+    authenticate,
+    authenticate_any,
+    authenticate_call,
+)
 from golem.edge.cards import build_public_card
 from golem.edge.policy import ChainLimits
 from golem.jwks import SigningKeys, fetch_jwks, key_id_of
 from golem.metrics import Metrics, process_registry
 from golem.ratelimit import Limiter
+from golem.run_status import RunStatuses
 from golem.serving import serve_all, with_metrics
 from golem.settings import EdgeSettings, SettingsError, edge_settings, parse_registry
+from golem.tasks.app import RUN_KEYS_PATH
 
 JWKS_TIMEOUT_SECONDS = 2
+RUN_STATUS_TIMEOUT_SECONDS = 2
 FORWARD_TIMEOUT_SECONDS = 30
 CATALOG_FILE = "agent.yaml"
 
@@ -36,6 +45,16 @@ def authenticator(
         if current is None:
             return AuthFailure("signing keys unavailable")
         return authenticate(token, keys=current, issuer=issuer, audience=audience)
+
+    return check
+
+
+def call_authenticator(keys: SigningKeys) -> Callable[[str], Principal | AuthFailure]:
+    def check(token: str) -> Principal | AuthFailure:
+        current = keys.for_key_id(key_id_of(token))
+        if current is None:
+            return AuthFailure("Golem signing keys unavailable")
+        return authenticate_call(token, keys=current)
 
     return check
 
@@ -57,8 +76,16 @@ def build_app(
 ) -> ASGIApp:
     keys = SigningKeys(partial(fetch_jwks, jwks_client, settings.jwks_url))
     keys.refresh()
+    golem_keys = SigningKeys(
+        partial(fetch_jwks, jwks_client, f"{settings.task_service_read_url}{RUN_KEYS_PATH}")
+    )
+    golem_keys.refresh()
     return create_edge_app(
-        authenticate=authenticator(keys, issuer=settings.issuer, audience=settings.audience),
+        authenticate=partial(
+            authenticate_any,
+            idp=authenticator(keys, issuer=settings.issuer, audience=settings.audience),
+            golem=call_authenticator(golem_keys),
+        ),
         registry=parse_registry(settings.registry_file.read_text()),
         limits=ChainLimits(max_depth=settings.max_chain_depth),
         audit_dsn=settings.audit_dsn,
@@ -75,6 +102,12 @@ def build_app(
         auth_failures=Limiter(settings.auth_failure_rate),
         trusted_proxies=settings.trusted_proxies,
         metrics=metrics,
+        run_statuses=RunStatuses(
+            httpx.AsyncClient(
+                base_url=settings.task_service_read_url, timeout=RUN_STATUS_TIMEOUT_SECONDS
+            ),
+            ttl_seconds=settings.run_status_ttl_seconds,
+        ),
     )
 
 

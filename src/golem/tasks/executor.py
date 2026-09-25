@@ -11,6 +11,8 @@ MISSING_AGENT = "no agent named: the request carries no tenant"
 # Set only by the task service's internal outcome route, never from a request body, so a
 # caller cannot finish a task by sending a message that claims the run is done.
 RUN_OUTCOME = "golem.run_outcome"
+CHAIN_HEADER = "x-golem-chain"
+ROOT_RUN_HEADER = "x-golem-root-run"
 
 
 ANONYMOUS = "anonymous"
@@ -31,7 +33,14 @@ def run_start_of(context: RequestContext) -> RunStart:
         message_id=context.message.message_id if context.message is not None else "",
         traceparent=header_of(context.call_context, "traceparent"),
         tracestate=header_of(context.call_context, "tracestate"),
+        root_run_id=header_of(context.call_context, ROOT_RUN_HEADER),
+        chain=chain_of(header_of(context.call_context, CHAIN_HEADER)),
     )
+
+
+def chain_of(header: str) -> tuple[str, ...]:
+    # Set by the edge from a verified call token; the edge strips any a client sends.
+    return tuple(agent for agent in (a.strip() for a in header.split(",")) if agent)
 
 
 def header_of(call_context: ServerCallContext, name: str) -> str:
@@ -73,12 +82,16 @@ class RunExecutor(AgentExecutor):
             await reject(updater, MISSING_AGENT)
             return
         await updater.start_work()
-        match await self._orchestrator.start(run_start_of(context)):
+        run = run_start_of(context)
+        match await self._orchestrator.start(run):
             case Refused(reason=reason):
                 await reject(updater, reason)
             case Started(run_id=run_id):
+                # The chain comes back with the task: whoever reads it sees which agents
+                # took part (ADR 0014).
+                chain = {"chain": list(run.chain)} if run.chain else {}
                 await updater.update_status(
-                    TaskState.TASK_STATE_WORKING, metadata={"runId": run_id}
+                    TaskState.TASK_STATE_WORKING, metadata={"runId": run_id, **chain}
                 )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:

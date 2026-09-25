@@ -13,6 +13,9 @@ data:
   GOLEM_MAX_CHAIN_DEPTH: "4"
   # The task service's a2a port.
   GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8000
+  # The task service's internal-read port: the keys that verify call tokens, and the run
+  # statuses that revoke them (ADR 0014).
+  GOLEM_TASK_SERVICE_READ_URL: http://tasks.golem-system.svc:8001
   # The example catalogs baked into the image; an environment mounts its own.
   GOLEM_CATALOGS_DIR: /app/examples
   GOLEM_PUBLIC_BASE_URL: https://golem.example.com

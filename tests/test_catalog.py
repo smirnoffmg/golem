@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from golem.catalog import AgentCatalog, EmptySection, NoLinked, load_catalog
+from golem.catalog import DELEGATE_GROUP, AgentCatalog, EmptySection, NoLinked, Role, load_catalog
 
 CATALOG_YAML = """
 name: discovery
@@ -133,3 +133,19 @@ def test_rule_must_name_a_declared_role():
 def test_name_must_be_a_slug():
     with pytest.raises(ValidationError):
         AgentCatalog(name="Discovery Agent", description="d", version="0.1.0")
+
+
+def test_a_role_may_name_the_delegation_group_like_any_tool_group():
+    role = Role(name="planner", writes="hypotheses/", tools=(DELEGATE_GROUP, "wiki.read"))
+
+    assert role.tools == ("agents.delegate", "wiki.read")
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [("Agents Delegate",), ("agents.",), ("wiki.read", "wiki.read"), ("",)],
+    ids=repr,
+)
+def test_a_role_names_each_tool_group_once_and_by_its_dotted_name(tools):
+    with pytest.raises(ValidationError):
+        Role(name="planner", writes="hypotheses/", tools=tools)

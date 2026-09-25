@@ -11,6 +11,8 @@ import pytest
 from starlette.testclient import TestClient
 from test_tasks_service import create_app, make_card
 
+from golem import call_token
+from golem.call_token import CallClaims
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef, JobSpec, JobStatus
 from golem.orchestrator.service import JobTemplate, PostgresOrchestrator
@@ -264,3 +266,136 @@ def test_the_internal_run_route_reads_the_status_from_golem_runs(
     assert running == {"run_id": run_id, "status": "running"}
     assert canceled == {"run_id": run_id, "status": "canceled"}
     assert client.get("/internal/runs/not-a-run").status_code == 404
+
+
+# Delegation (ADR 0014): call tokens, and a child run admitted under its chain's root
+
+
+def call_claims(token: str) -> object:
+    return call_token.verify(token, jwt.PyJWKSet.from_dict(public_jwks([SIGNING_KEY])), now=NOW)
+
+
+def send_delegated(
+    client: TestClient, message_id: str, *, chain: str, root: str, tenant: str = "reviewer"
+) -> dict[str, Any]:
+    """A message as the edge forwards a verified call token's delegation."""
+    body = client.post(
+        "/a2a",
+        headers={
+            "A2A-Version": "1.0",
+            "X-Golem-Principal": "user:alice",
+            "X-Golem-Chain": chain,
+            "X-Golem-Root-Run": root,
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "SendMessage",
+            "params": {
+                "tenant": tenant,
+                "message": {
+                    "role": "ROLE_USER",
+                    "messageId": message_id,
+                    "parts": [{"text": "go"}],
+                },
+            },
+        },
+    ).json()
+    assert "error" not in body, body
+    return body["result"]["task"]
+
+
+def root_rows(dsn: str) -> dict[str, str]:
+    with psycopg.connect(dsn) as conn:
+        rows = conn.execute("SELECT id, root_run_id FROM runs").fetchall()
+    return {str(run_id): str(root) for run_id, root in rows}
+
+
+@pytest.fixture
+def chain_client(runs_db: str, launcher: FakeLauncher) -> Iterator[TestClient]:
+    """Two runs' worth of budget per chain, and room for many runs per caller and chain."""
+    orchestrator = PostgresOrchestrator(
+        dsn=runs_db,
+        limits=Limits(max_runs_per_caller=10, max_runs_per_root=10, budget_per_root=Decimal("2")),
+        estimated_cost=Decimal("1"),
+        launcher=launcher,
+        template=TEMPLATE,
+        catalogs={"discovery": CATALOG, "reviewer": CATALOG},
+        signing_key=SIGNING_KEY,
+        grants=GRANTS,
+        clock=fixed_clock,
+    )
+    with TestClient(create_app(make_card(), orchestrator)) as test_client:
+        yield test_client
+
+
+def test_a_launched_job_carries_a_call_token_for_its_subject_and_agent(
+    client: TestClient, launcher: FakeLauncher
+) -> None:
+    client.headers["X-Golem-Principal"] = "user:alice"
+
+    task = send(client, "m-1")
+
+    [spec] = launcher.launched
+    run_id = task["metadata"]["runId"]
+    assert call_claims(spec.call_token) == CallClaims(
+        subject="user:alice",
+        agent="discovery",
+        chain=("discovery",),
+        root_run_id=run_id,
+        run_id=run_id,
+        expires_at=NOW + TEMPLATE.active_deadline_seconds + 60,
+    )
+
+
+def test_a_delegated_run_is_admitted_under_the_root_and_extends_the_chain(
+    chain_client: TestClient, launcher: FakeLauncher, runs_db: str
+) -> None:
+    chain_client.headers["X-Golem-Principal"] = "user:alice"
+    parent = send(chain_client, "m-parent")
+    root = parent["metadata"]["runId"]
+
+    child = send_delegated(chain_client, "m-child", chain="discovery", root=root)
+
+    child_run = child["metadata"]["runId"]
+    assert child["status"]["state"] == "TASK_STATE_WORKING"
+    assert child["metadata"]["chain"] == ["discovery"]
+    assert root_rows(runs_db) == {root: root, child_run: root}
+    _, spec = launcher.launched
+    claims = call_claims(spec.call_token)
+    assert isinstance(claims, CallClaims)
+    assert (claims.subject, claims.agent, claims.chain, claims.root_run_id, claims.run_id) == (
+        "user:alice",
+        "reviewer",
+        ("discovery", "reviewer"),
+        root,
+        child_run,
+    )
+    run_claims = verified(spec.run_token)
+    assert isinstance(run_claims, RunClaims)
+    assert (run_claims.caller, run_claims.root_run_id) == ("user:alice", root)
+
+
+def test_a_chain_over_its_roots_budget_is_rejected(
+    chain_client: TestClient, launcher: FakeLauncher, runs_db: str
+) -> None:
+    chain_client.headers["X-Golem-Principal"] = "user:alice"
+    root = send(chain_client, "m-parent")["metadata"]["runId"]
+    send_delegated(chain_client, "m-child-1", chain="discovery", root=root)
+
+    over = send_delegated(chain_client, "m-child-2", chain="discovery", root=root)
+
+    assert over["status"]["state"] == "TASK_STATE_REJECTED"
+    assert "budget" in " ".join(p["text"] for p in over["status"]["message"]["parts"])
+    assert len(root_rows(runs_db)) == 2
+    assert len(launcher.launched) == 2
+
+
+def test_a_root_that_is_not_a_run_id_is_refused_before_any_run(
+    chain_client: TestClient, launcher: FakeLauncher, runs_db: str
+) -> None:
+    task = send_delegated(chain_client, "m-1", chain="discovery", root="not-a-run")
+
+    assert task["status"]["state"] == "TASK_STATE_REJECTED"
+    assert root_rows(runs_db) == {}
+    assert launcher.launched == []

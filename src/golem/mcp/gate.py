@@ -25,10 +25,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from golem.edge.app import bearer_token
 from golem.edge.audit import source_ip_of
 from golem.mcp.audit import Operation, audit_entry, written
-from golem.mcp.auth import Refusal, RunStatuses, grant_refusal, status_refusal
+from golem.mcp.auth import Refusal, grant_refusal, status_refusal
 from golem.mcp.groups import Group
 from golem.metrics import Metrics
 from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
+from golem.run_status import RunStatuses
 from golem.run_token import RunClaims, RunTokenError
 
 REALM = "golem-mcp"

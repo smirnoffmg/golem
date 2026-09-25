@@ -20,6 +20,7 @@ from golem.edge.auth import AuthFailure, Principal
 from golem.edge.policy import ChainLimits, Registry
 from golem.metrics import Metrics
 from golem.ratelimit import Limiter, Rate, parse_networks
+from golem.run_status import RunStatuses
 from golem.tasks.app import create_listeners
 
 EDGE_TOKEN = "edge-shared-secret"
@@ -29,11 +30,26 @@ TOKENS = {
     "alice-token": Principal(name="user:alice", chain=()),
     "bob-token": Principal(name="user:bob", chain=()),
     "ci-token": Principal(name="service:ci", chain=()),
+    # What a verified call token becomes (golem.edge.auth.authenticate_call).
+    "discovery-for-alice": Principal(
+        name="agent:discovery",
+        chain=("discovery",),
+        subject="user:alice",
+        root_run_id="root-1",
+        run_id="run-a",
+    ),
+    "discovery-for-bob": Principal(
+        name="agent:discovery",
+        chain=("discovery",),
+        subject="user:bob",
+        root_run_id="root-2",
+        run_id="run-b",
+    ),
 }
 
 REGISTRY = Registry(
     allowed_callers={
-        "reviewer": frozenset({"user:*"}),
+        "reviewer": frozenset({"user:*", "agent:discovery"}),
         "discovery": frozenset({"user:alice"}),
         "evaluator": frozenset({"service:gitlab-ci"}),
     }
@@ -64,11 +80,37 @@ def authenticate(token: str) -> Principal | AuthFailure:
 
 
 @dataclass
+class RunsOrchestrator(FakeOrchestrator):
+    """Also answers run statuses, which the edge asks for a call token's issuing run."""
+
+    statuses: dict[str, str] = field(
+        default_factory=lambda: {"run-a": "running", "run-b": "running"}
+    )
+    asked: list[str] = field(default_factory=list)
+    broken: bool = False
+
+    async def status(self, run_id: str) -> str | None:
+        self.asked.append(run_id)
+        if self.broken:
+            raise RuntimeError("golem_runs unavailable")
+        return self.statuses.get(run_id)
+
+
+@dataclass
 class TaskService:
     """The real in-process task service, with the headers of every request it received."""
 
-    orchestrator: FakeOrchestrator = field(default_factory=FakeOrchestrator)
+    orchestrator: RunsOrchestrator = field(default_factory=RunsOrchestrator)
     received: list[dict[str, str]] = field(default_factory=list)
+
+    def statuses(self, clock: Any = None) -> RunStatuses:
+        """The edge's view of run statuses: the task service's internal read port."""
+        read = create_listeners(make_card(), self.orchestrator, edge_token=EDGE_TOKEN)
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=read.internal_read, raise_app_exceptions=False),
+            base_url="http://tasks-read",
+        )
+        return RunStatuses(client, ttl_seconds=10, **({"clock": clock} if clock else {}))
 
     def app(self) -> ASGIApp:
         inner = create_listeners(make_card(), self.orchestrator, edge_token=EDGE_TOKEN).public
@@ -98,7 +140,7 @@ def edge_client(tasks: TaskService, audit_dsn: str, **rate_limits: Any) -> httpx
         forward=forward,
         edge_token=EDGE_TOKEN,
         cards={"discovery": discovery_card()},
-        **rate_limits,
+        **({"run_statuses": tasks.statuses()} | rate_limits),
     )
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=edge, client=("10.0.0.7", 51234)),
@@ -711,3 +753,188 @@ async def test_an_audit_write_failure_is_counted(tasks: TaskService) -> None:
         await call(client, send_message())
 
     assert sample(metrics, "golem_audit_write_failures_total", process="edge") == 1
+
+
+# Delegation: an agent holding a call token (ADR 0014)
+
+
+async def audit_chains(admin_dsn: str) -> list[tuple[str, str, list[str]]]:
+    async with await psycopg.AsyncConnection.connect(admin_dsn) as conn:
+        cursor = await conn.execute("SELECT account, result, chain FROM audit_log ORDER BY id")
+        return await cursor.fetchall()
+
+
+async def test_a_delegated_call_is_forwarded_for_the_subject_with_its_chain(
+    edge: httpx.AsyncClient, tasks: TaskService, audit_admin_dsn: str
+) -> None:
+    response = await call(edge, send_message(), token="discovery-for-alice")
+
+    assert response.json()["result"]["task"]["status"]["state"] == "TASK_STATE_WORKING"
+    [headers] = tasks.received
+    assert headers["x-golem-principal"] == "user:alice"
+    assert headers["x-golem-chain"] == "discovery"
+    assert headers["x-golem-root-run"] == "root-1"
+    assert await audit_chains(audit_admin_dsn) == [("user:alice", "allow", ["discovery"])]
+
+
+async def test_chain_headers_from_a_client_never_reach_the_task_service(
+    edge: httpx.AsyncClient, tasks: TaskService
+) -> None:
+    await call(
+        edge,
+        send_message(),
+        extra_headers={"X-Golem-Chain": "discovery", "X-Golem-Root-Run": "someone-elses-run"},
+    )
+    await call(
+        edge,
+        send_message(),
+        token="discovery-for-alice",
+        extra_headers={"X-Golem-Chain": "forged", "X-Golem-Root-Run": "forged"},
+    )
+
+    human, agent = tasks.received
+    assert "x-golem-chain" not in human
+    assert "x-golem-root-run" not in human
+    assert (agent["x-golem-chain"], agent["x-golem-root-run"]) == ("discovery", "root-1")
+
+
+async def test_the_chain_policy_bites_on_a_delegated_call(
+    edge: httpx.AsyncClient, tasks: TaskService, audit_admin_dsn: str
+) -> None:
+    cycle = await call(edge, send_message(tenant="discovery"), token="discovery-for-alice")
+    not_allowed = await call(edge, send_message(tenant="evaluator"), token="discovery-for-alice")
+
+    assert error_of(cycle)["code"] == CALL_DENIED
+    assert error_of(cycle)["message"].startswith("cycle:")
+    assert error_of(not_allowed)["message"].startswith("not_allowed:")
+    assert tasks.received == []
+    assert [row[2] for row in await audit_chains(audit_admin_dsn)] == [["discovery"]] * 2
+
+
+@pytest.mark.parametrize("method", ["GetTask", "ListTasks", "CancelTask"])
+async def test_an_agent_may_only_start_a_task_never_read_or_cancel_the_subjects(
+    edge: httpx.AsyncClient, tasks: TaskService, audit_admin_dsn: str, method: str
+) -> None:
+    params = {"tenant": "reviewer", "id": "t"}
+    body = {"jsonrpc": "2.0", "id": 3, "method": method, "params": params}
+
+    response = await call(edge, body, token="discovery-for-alice")
+
+    assert error_of(response)["code"] == CALL_DENIED
+    assert tasks.received == []
+    [(account, result, _)] = await audit_chains(audit_admin_dsn)
+    assert (account, result.startswith("deny: ")) == ("user:alice", True)
+
+
+async def test_an_agent_may_not_send_into_an_existing_task(
+    edge: httpx.AsyncClient, tasks: TaskService
+) -> None:
+    body = send_message()
+    body["params"]["message"]["taskId"] = "a-task-of-alice"
+
+    response = await call(edge, body, token="discovery-for-alice")
+
+    assert error_of(response)["code"] == CALL_DENIED
+    assert tasks.received == []
+
+
+async def test_the_rate_limit_counts_the_acting_agent_across_subjects(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    callers = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
+
+    async with edge_client(tasks, audit_dsn, callers=callers) as client:
+        first = await call(client, send_message(), token="discovery-for-alice")
+        second = await call(client, send_message(), token="discovery-for-bob")
+        alice = await call(client, send_message())
+
+    assert first.status_code == 200
+    assert rate_limited(second)
+    assert alice.status_code == 200
+
+
+# Revocation: a call token is only good while its issuing run is running (ASVS 10.4.9)
+
+
+def unauthorized_as_revoked(response: httpx.Response) -> bool:
+    return (
+        response.status_code == 401
+        and response.headers["www-authenticate"] == 'Bearer error="invalid_token"'
+        and error_of(response)["message"].startswith("run_not_active:")
+    )
+
+
+@pytest.mark.parametrize("status", ["canceled", "succeeded", "failed"])
+async def test_a_call_token_of_a_run_that_stopped_is_refused_and_audited(
+    edge: httpx.AsyncClient, tasks: TaskService, audit_admin_dsn: str, status: str
+) -> None:
+    tasks.orchestrator.statuses["run-a"] = status
+
+    response = await call(edge, send_message(), token="discovery-for-alice")
+
+    assert unauthorized_as_revoked(response)
+    assert status in error_of(response)["message"]
+    assert tasks.received == []
+    [(account, result, chain)] = await audit_chains(audit_admin_dsn)
+    assert (account, chain) == ("user:alice", ["discovery"])
+    assert result.startswith("deny: run_not_active")
+
+
+async def test_a_call_token_of_an_unknown_run_is_refused(
+    edge: httpx.AsyncClient, tasks: TaskService
+) -> None:
+    del tasks.orchestrator.statuses["run-a"]
+
+    assert unauthorized_as_revoked(await call(edge, send_message(), token="discovery-for-alice"))
+
+
+async def test_without_a_run_status_the_edge_fails_closed(
+    edge: httpx.AsyncClient, tasks: TaskService, audit_admin_dsn: str
+) -> None:
+    tasks.orchestrator.broken = True
+
+    response = await call(edge, send_message(), token="discovery-for-alice")
+
+    assert response.status_code == 503
+    assert error_of(response)["message"].startswith("run status unavailable")
+    assert tasks.received == []
+    [(_, result, _)] = await audit_chains(audit_admin_dsn)
+    assert result.startswith("deny: run status unavailable")
+
+
+async def test_an_edge_that_cannot_ask_for_run_statuses_refuses_every_call_token(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    async with edge_client(tasks, audit_dsn, run_statuses=None) as client:
+        agent = await call(client, send_message(), token="discovery-for-alice")
+        person = await call(client, send_message())
+
+    assert agent.status_code == 503
+    assert person.status_code == 200
+
+
+async def test_a_running_run_is_asked_about_once_per_ttl(
+    tasks: TaskService, audit_dsn: str, audit_admin_dsn: str
+) -> None:
+    clock = Clock()
+
+    async with edge_client(tasks, audit_dsn, run_statuses=tasks.statuses(clock)) as client:
+        first = await call(client, send_message(), token="discovery-for-alice")
+        tasks.orchestrator.statuses["run-a"] = "canceled"
+        clock.now += 9
+        cached = await call(client, send_message(), token="discovery-for-alice")
+        clock.now += 1
+        revoked = await call(client, send_message(), token="discovery-for-alice")
+
+    assert first.status_code == cached.status_code == 200
+    assert unauthorized_as_revoked(revoked)
+    assert tasks.orchestrator.asked == ["run-a", "run-a"]
+
+
+async def test_people_and_services_are_never_asked_about(
+    edge: httpx.AsyncClient, tasks: TaskService
+) -> None:
+    await call(edge, send_message())
+    await call(edge, send_message(), token="ci-token")
+
+    assert tasks.orchestrator.asked == []

@@ -25,6 +25,7 @@ from golem.orchestrator.jobs import CatalogRef
 from golem.orchestrator.merge_requests import GitLabProject
 from golem.orchestrator.service import JobTemplate
 from golem.ratelimit import Network, Rate, parse_networks
+from golem.run_token import ISSUER as GOLEM_ISSUER
 from golem.run_token import SigningKey
 from golem.ui.app import LOGIN_RATE, START_RATE
 
@@ -63,6 +64,10 @@ class EdgeSettings:
     # Sent with every forwarded request; the task service trusts the principal header only
     # together with it.
     edge_token: str = field(repr=False)
+    # The task service's internal read port: the orchestrator's public keys, which verify the
+    # call tokens runs present when they delegate, and run statuses, which revoke them (ADR 0014).
+    task_service_read_url: str = ""
+    run_status_ttl_seconds: float = 10.0
     caller_rate: Rate = CALLER_RATE
     auth_failure_rate: Rate = AUTH_FAILURE_RATE
     trusted_proxies: tuple[Network, ...] = ()
@@ -121,7 +126,13 @@ def edge_settings(env: Env) -> EdgeSettings:
         "GOLEM_CATALOGS_DIR",
         "GOLEM_PUBLIC_BASE_URL",
         "GOLEM_EDGE_TOKEN",
+        "GOLEM_TASK_SERVICE_READ_URL",
     )
+    if v["GOLEM_OIDC_ISSUER"] == GOLEM_ISSUER:
+        raise SettingsError(
+            f"GOLEM_OIDC_ISSUER must not be {GOLEM_ISSUER!r}: the edge tells Golem's call tokens"
+            " from the identity provider's tokens by their issuer"
+        )
     return EdgeSettings(
         issuer=v["GOLEM_OIDC_ISSUER"],
         audience=v["GOLEM_OIDC_AUDIENCE"],
@@ -135,6 +146,8 @@ def edge_settings(env: Env) -> EdgeSettings:
         public_base_url=_base_url(v, "GOLEM_PUBLIC_BASE_URL"),
         port=_port(env),
         edge_token=v["GOLEM_EDGE_TOKEN"],
+        task_service_read_url=_base_url(v, "GOLEM_TASK_SERVICE_READ_URL"),
+        run_status_ttl_seconds=_non_negative_seconds(env, "GOLEM_RUN_STATUS_TTL_SECONDS", "10"),
         metrics_port=metrics_port_setting(env, _port(env)),
         caller_rate=rate_setting(env, "GOLEM_RATE_CALLER", CALLER_RATE),
         auth_failure_rate=rate_setting(env, "GOLEM_RATE_AUTH_FAILURES", AUTH_FAILURE_RATE),
@@ -375,6 +388,14 @@ def _positive_int(v: Mapping[str, str], name: str) -> int:
 def _non_negative_int(v: Mapping[str, str], name: str) -> int:
     value = _parsed(v, name, int, "an integer")
     if value < 0:
+        raise SettingsError(f"{name} must not be negative, got {value}")
+    return value
+
+
+def _non_negative_seconds(env: Env, name: str, default: str) -> float:
+    raw = env.get(name, "").strip() or default
+    value = _parsed({name: raw}, name, float, "a number of seconds")
+    if not value >= 0:
         raise SettingsError(f"{name} must not be negative, got {value}")
     return value
 

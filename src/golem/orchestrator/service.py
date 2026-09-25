@@ -1,11 +1,14 @@
 import asyncio
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 
 from psycopg import AsyncConnection
 
+from golem import call_token
+from golem.call_token import CallClaims
 from golem.metrics import Metrics
 from golem.orchestrator.admission import Limits, Rejected
 from golem.orchestrator.jobs import CatalogRef, JobLauncher, JobSpec
@@ -57,8 +60,26 @@ def run_claims(
     )
 
 
+def call_claims(started: RunCreated | RunReused, run: RunStart, expires_at: int) -> CallClaims:
+    # The run acts for whoever started its chain (a delegated run's caller is already that
+    # subject), and its own agent joins the chain it was started with.
+    return CallClaims(
+        subject=run.caller,
+        agent=run.agent,
+        chain=(*run.chain, run.agent),
+        root_run_id=started.root_run_id,
+        run_id=started.run_id,
+        expires_at=expires_at,
+    )
+
+
 def job_spec_for(
-    run_id: str, run: RunStart, catalog: CatalogRef, template: JobTemplate, run_token: str
+    run_id: str,
+    run: RunStart,
+    catalog: CatalogRef,
+    template: JobTemplate,
+    run_token: str,
+    call_token: str,
 ) -> JobSpec:
     return JobSpec(
         run_id=run_id,
@@ -73,6 +94,7 @@ def job_spec_for(
         cpu=template.cpu,
         memory=template.memory,
         run_token=run_token,
+        call_token=call_token,
         traceparent=run.traceparent,
         tracestate=run.tracestate,
         mcp_registry_configmap=template.mcp_registry_configmap,
@@ -103,12 +125,16 @@ class PostgresOrchestrator:
         if catalog is None:
             self.metrics.admission_rejected(UNKNOWN_AGENT)
             return Refused(reason=f"No agent named {run.agent!r} is registered.")
+        if run.root_run_id and not _is_run_id(run.root_run_id):
+            return Refused(reason=f"The root run {run.root_run_id!r} is not a run id.")
         request = StartRequest(
             caller=run.caller,
             message_id=run.message_id,
             task_id=run.task_id,
             agent=run.agent,
             estimated_cost=self.estimated_cost,
+            # A delegated run shares its chain's concurrency and budget (ADR 0004, ADR 0014).
+            root_run_id=run.root_run_id or None,
         )
         async with await AsyncConnection.connect(self.dsn, autocommit=True) as conn:
             outcome = await start_run(conn, request, self.limits)
@@ -127,7 +153,10 @@ class PostgresOrchestrator:
             now = int(self.clock())
             claims = run_claims(outcome, run, self.grants, self.template, now)
             token = issue(claims, self.signing_key, now)
-            spec = job_spec_for(outcome.run_id, run, catalog, self.template, token)
+            delegation = call_token.issue(
+                call_claims(outcome, run, claims.expires_at), self.signing_key, now
+            )
+            spec = job_spec_for(outcome.run_id, run, catalog, self.template, token, delegation)
             try:
                 await asyncio.to_thread(self.launcher.launch, spec)
             except Exception as error:
@@ -161,3 +190,11 @@ class PostgresOrchestrator:
         if ended is not None:
             self.metrics.run_ended(ended.agent, "canceled", ended.seconds)
             await asyncio.to_thread(self.launcher.delete, ended.run_id)
+
+
+def _is_run_id(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True

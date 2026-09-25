@@ -36,8 +36,10 @@ def audit_entry(
 ) -> AuditEntry:
     # Only the method and tenant: message bodies may carry credentials or personal data,
     # and the log is insert-only, so nothing written here can ever be masked afterwards.
+    # A delegated call is the subject's: the account is whom the chain acts for, and the chain
+    # ends with the acting agent.
     return AuditEntry(
-        account=principal.name,
+        account=principal.on_behalf_of,
         request=f"{method} tenant={callee}",
         target_system=f"agent:{callee}",
         operation=method,

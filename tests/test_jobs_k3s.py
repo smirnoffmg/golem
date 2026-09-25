@@ -9,6 +9,8 @@ import pytest
 from kubernetes.client import ApiClient, BatchV1Api, CoreV1Api, V1Secret
 from kubernetes.client.exceptions import ApiException
 
+from golem import call_token
+from golem.call_token import CallClaims
 from golem.orchestrator.jobs import (
     CatalogRef,
     JobNameTaken,
@@ -58,6 +60,11 @@ def token_for(run_id: str) -> str:
     return issue(claims, SIGNING_KEY, now=1_800_000_000)
 
 
+def call_token_for(run_id: str) -> str:
+    claims = CallClaims("user:alice", "reviewer", ("reviewer",), run_id, run_id, 2_000_000_000)
+    return call_token.issue(claims, SIGNING_KEY, now=1_800_000_000)
+
+
 def busybox_spec(namespace: str, script: str) -> JobSpec:
     run_id = str(uuid.uuid4())
     return JobSpec(
@@ -74,6 +81,7 @@ def busybox_spec(namespace: str, script: str) -> JobSpec:
         memory="64Mi",
         command=("sh", "-c", script),
         run_token=token_for(run_id),
+        call_token=call_token_for(run_id),
     )
 
 
@@ -211,7 +219,7 @@ def read_token_secret(launcher: KubernetesJobLauncher, run_id: str) -> V1Secret:
     )
 
 
-def test_the_job_sees_its_run_token_and_the_mounted_mcp_registry(
+def test_the_job_sees_its_run_and_call_tokens_and_the_mounted_mcp_registry(
     launcher: KubernetesJobLauncher,
 ) -> None:
     job = busybox_spec(launcher.namespace, "exit 1")
@@ -222,6 +230,7 @@ def test_the_job_sees_its_run_token_and_the_mounted_mcp_registry(
             "sh",
             "-c",
             f'[ "$GOLEM_RUN_TOKEN" = "{job.run_token}" ]'
+            f' && [ "$GOLEM_CALL_TOKEN" = "{job.call_token}" ]'
             ' && [ "$GOLEM_MCP_REGISTRY" = /etc/golem/mcp/registry.yaml ]'
             " && grep -q wiki.read /etc/golem/mcp/registry.yaml"
             " && ! touch /etc/golem/mcp/x 2>/dev/null",

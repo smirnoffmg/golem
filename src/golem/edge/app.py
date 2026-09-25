@@ -21,12 +21,19 @@ from golem.edge.auth import AuthFailure, Principal
 from golem.edge.policy import Call, ChainLimits, Deny, Registry, evaluate
 from golem.metrics import Instrumented, Metrics
 from golem.ratelimit import Decision, Limiter, Network, Rate, client_address
+from golem.run_status import RUNNING, RunStatuses, StatusUnavailable
 
 RPC_PATH = "/a2a"
 PRINCIPAL_HEADER = "X-Golem-Principal"
 EDGE_TOKEN_HEADER = "X-Golem-Edge-Token"
+# A delegated call's chain and root run, for the child run's admission and its task (ADR 0014).
+CHAIN_HEADER = "X-Golem-Chain"
+ROOT_RUN_HEADER = "X-Golem-Root-Run"
 # ListTasks is scoped to the caller by the task store (the owner is the edge principal).
 FORWARDED_METHODS = frozenset({"SendMessage", "GetTask", "ListTasks", "CancelTask"})
+# An agent acts for its subject, whose tasks the task service would show it: delegation may
+# start a task and nothing else, so an agent never reads, lists or cancels the subject's tasks.
+DELEGATED_METHOD = "SendMessage"
 AUDIT_CONNECT_TIMEOUT_SECONDS = 2
 
 PARSE_ERROR = -32700
@@ -43,6 +50,7 @@ AUDIT_UNAVAILABLE = INTERNAL_ERROR
 CALLER_RATE = Rate(per_minute=60, burst=20)
 AUTH_FAILURE_RATE = Rate(per_minute=30, burst=10)
 RATE_LIMITED_REASON = "rate_limited"
+RUN_NOT_ACTIVE = "run_not_active"
 # An address that is not an IP (a test client, a Unix socket) shares one bucket.
 UNKNOWN_ADDRESS = "unknown"
 
@@ -54,12 +62,16 @@ class RpcCall:
     id: RpcId
     method: str
     tenant: str
+    # A message into a task that already exists, rather than a new task.
+    continues_task: bool = False
 
 
 @dataclass(frozen=True)
 class Refusal:
     code: int
     message: str
+    # The HTTP status of the refusal; JSON-RPC errors of a served call are 200.
+    status_code: int = 200
 
 
 @dataclass(frozen=True)
@@ -98,7 +110,12 @@ def parse_call(body: bytes) -> RpcCall | Rejected:
     if not tenant:
         refusal = Refusal(INVALID_PARAMS, "params.tenant must name the called agent")
         return Rejected(rpc_id, method, "", refusal)
-    return RpcCall(rpc_id, method, tenant)
+    return RpcCall(rpc_id, method, tenant, continues_task=_names_a_task(params.get("message")))
+
+
+def _names_a_task(message: object) -> bool:
+    # ProtoJSON accepts both the camelCase and the original field name.
+    return isinstance(message, dict) and any(message.get(k) for k in ("taskId", "task_id"))
 
 
 def policy_denial(
@@ -112,6 +129,16 @@ def policy_denial(
 
 def denial_refusal(denial: Deny) -> Refusal:
     return Refusal(CALL_DENIED, f"{denial.reason.value}: {denial.detail}")
+
+
+def delegation_refusal(principal: Principal, call: RpcCall) -> Refusal | None:
+    if not principal.chain:
+        return None
+    if call.method != DELEGATED_METHOD:
+        return Refusal(CALL_DENIED, f"method_not_allowed: an agent may only {DELEGATED_METHOD}")
+    if call.continues_task:
+        return Refusal(CALL_DENIED, "method_not_allowed: an agent may only start a new task")
+    return None
 
 
 TRACEPARENT = re.compile(r"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
@@ -131,17 +158,44 @@ def trace_headers(request: Request) -> dict[str, str]:
 
 
 def forward_headers(request: Request, principal: Principal, edge_token: str) -> dict[str, str]:
-    # Built from nothing, so a client's own principal or edge token header never reaches the
-    # task service.
+    # Built from nothing, so a client's own principal, chain or edge token header never reaches
+    # the task service. A delegated call runs as its subject: the child task is the person's,
+    # and the agent's own name travels in the chain.
     headers = {
         "Content-Type": "application/json",
-        PRINCIPAL_HEADER: principal.name,
+        PRINCIPAL_HEADER: principal.on_behalf_of,
         EDGE_TOKEN_HEADER: edge_token,
     }
+    if principal.chain:
+        headers[CHAIN_HEADER] = ",".join(principal.chain)
+        headers[ROOT_RUN_HEADER] = principal.root_run_id
     version = request.headers.get(VERSION_HEADER)
     if version is not None:
         headers[VERSION_HEADER] = version
     return headers | trace_headers(request)
+
+
+async def revocation_refusal(principal: Principal, statuses: RunStatuses | None) -> Refusal | None:
+    """A call token is revoked once its run stops running (ASVS 10.4.9), as run tokens are at
+    the MCP servers; anything that cannot be checked is refused."""
+    if not principal.chain:
+        return None
+    if statuses is None:
+        return Refusal(INTERNAL_ERROR, "run status unavailable: not configured", 503)
+    status = await statuses.status_of(principal.run_id)
+    if isinstance(status, StatusUnavailable):
+        return Refusal(INTERNAL_ERROR, f"run status unavailable: {status.reason}", 503)
+    if status != RUNNING:
+        return Refusal(UNAUTHENTICATED, f"{RUN_NOT_ACTIVE}: the run is {status}", 401)
+    return None
+
+
+def revoked_response(rpc_id: RpcId, refusal: Refusal) -> JSONResponse:
+    response = rpc_error(rpc_id, refusal, status_code=refusal.status_code)
+    if refusal.status_code == 401:
+        # RFC 6750: a revoked token is an invalid token.
+        response.headers["WWW-Authenticate"] = 'Bearer error="invalid_token"'
+    return response
 
 
 def rpc_error(rpc_id: RpcId, refusal: Refusal, status_code: int = 200) -> JSONResponse:
@@ -193,6 +247,7 @@ def create_edge_app(
     auth_failures: Limiter | None = None,
     trusted_proxies: tuple[Network, ...] = (),
     metrics: Metrics | None = None,
+    run_statuses: RunStatuses | None = None,
 ) -> ASGIApp:
     callers = Limiter(CALLER_RATE) if callers is None else callers
     auth_failures = Limiter(AUTH_FAILURE_RATE) if auth_failures is None else auth_failures
@@ -249,11 +304,23 @@ def create_edge_app(
                     address, principal, Rejected(call.id, call.method, call.tenant, refused)
                 )
             return too_many(call.id, decision)
+        revoked = await revocation_refusal(principal, run_statuses)
+        if revoked is not None:
+            if revoked.status_code == 401:
+                auth_failures.take(address_key)
+                metrics.authentication_failed()
+            await audited(address, principal, Rejected(call.id, call.method, call.tenant, revoked))
+            return revoked_response(call.id, revoked)
         if isinstance(call, RpcCall):
             denial = policy_denial(principal, call, registry, limits)
             if denial is not None:
                 metrics.policy_denied(denial.reason.value)
                 call = Rejected(call.id, call.method, call.tenant, denial_refusal(denial))
+        if isinstance(call, RpcCall):
+            refusal = delegation_refusal(principal, call)
+            if refusal is not None:
+                metrics.policy_denied("method_not_allowed")
+                call = Rejected(call.id, call.method, call.tenant, refusal)
         if not await audited(address, principal, call):
             return rpc_error(call.id, Refusal(AUDIT_UNAVAILABLE, "audit log unavailable"))
         if isinstance(call, Rejected):

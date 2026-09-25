@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from functools import partial
 
 import httpx
+import jwt
 import pytest
 from starlette.testclient import TestClient
 from test_tasks_service import FakeOrchestrator, read_listener
@@ -12,13 +13,12 @@ from test_tasks_service import FakeOrchestrator, read_listener
 from golem.jwks import SigningKeys, fetch_jwks
 from golem.mcp.auth import (
     Refusal,
-    RunStatuses,
-    StatusUnavailable,
     grant_refusal,
     run_token_verifier,
     status_refusal,
 )
 from golem.mcp.groups import GROUPS
+from golem.run_status import RunStatuses, StatusUnavailable
 from golem.run_token import RunClaims, RunTokenError, SigningKey, issue
 
 KEY = SigningKey.generate(kid="run-key-1")
@@ -119,6 +119,28 @@ def test_without_ever_having_keys_every_token_is_refused(clock: Clock) -> None:
     verdict = run_token_verifier(keys, clock)(issue(CLAIMS, KEY, NOW))
 
     assert verdict == RunTokenError("signing keys unavailable")
+
+
+def test_a_server_started_before_the_task_service_verifies_tokens_within_seconds(
+    task_service: TestClient, clock: Clock
+) -> None:
+    up = False
+
+    def fetch() -> jwt.PyJWKSet:
+        if not up:
+            raise httpx.ConnectError("task service not started yet")
+        return fetch_jwks(task_service, "/internal/run-keys")
+
+    # The interval of GOLEM_MCP_KEYS_REFRESH_SECONDS, which a fresh server must not wait out.
+    keys = SigningKeys(fetch, clock=clock, min_refresh_seconds=60)
+    keys.refresh()
+    verify = run_token_verifier(keys, clock)
+    assert verify(issue(CLAIMS, KEY, NOW)) == RunTokenError("signing keys unavailable")
+
+    up = True
+    clock.now += 1
+
+    assert verify(issue(CLAIMS, KEY, NOW)) == CLAIMS
 
 
 # Claims

@@ -55,7 +55,7 @@ rules:                          # in priority order
 | `context.url`, `context.branch` | where the records are; runs clone this branch and push proposals next to it |
 | `skills` | `id`, `name`, `description`, `tags`: what the agent card advertises; not the `SKILL.md` files |
 | `kinds` | every `kind` of record the rules name, with its allowed `statuses` and `sections` |
-| `roles` | `name`, `writes` (a directory of the context repository), `tools` (tool group names, default none) |
+| `roles` | `name`, `writes` (a directory of the context repository), `tools` (dotted tool group names, each once, default none) |
 | `rules` | `role`, `kind`, `statuses`, `conditions` |
 
 A rule, a condition or a status that names something not declared above is an error when the
@@ -160,6 +160,38 @@ A role naming a group the registry does not have fails the run before the first 
 one naming a group the agent is not granted fails when the MCP server refuses its run token.
 Tool results are cut at 200 000 characters, and a call that takes longer than 60 s returns an
 error to the model.
+
+### Delegating to another agent
+
+One tool group is served by the runtime itself, not an MCP server: `agents.delegate`, with one
+tool, `delegate_to_agent(agent, goal)`. It asks another agent to work on `goal` in a run of its
+own ([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)). A role gets it only by naming it:
+
+```yaml
+roles:
+  - name: planner
+    writes: plans/
+    tools: [agents.delegate, wiki.read]
+```
+
+- **It does not wait.** The tool returns at once with the child task's id and its state, for
+  example `Delegated to discovery: task 1f0c…, state TASK_STATE_WORKING.` The child proposes
+  its own merge request. Tell the role, in its instructions, to write the task id into the
+  record it changes, so the reviewer of its proposal sees what was delegated. A role that
+  needs the child's result before it can go on cannot be written yet.
+- **The goal is all the child gets.** Write it self-contained: the child sees nothing of the
+  delegating run, only its own catalog and context.
+- **A retry is not a second child.** The same run, agent and goal always reach the same child
+  run; to delegate twice, give two goals.
+- **The platform decides.** The call goes through the edge like any caller's: the call
+  registry must list `agent:<your agent>` for the called agent
+  ([configuration.md](../operations/configuration.md#call-registry)); a chain may not call an
+  agent already in it, nor go deeper than the platform's limit; the child runs for the person
+  who started the first run and counts against that chain's budget. A refusal comes back to
+  the model as the tool's answer (for example `Refused by the edge: not_allowed: ...` or
+  `state TASK_STATE_REJECTED` with the budget's reason), not as a failed run.
+- The child task lists the chain in its metadata (`"chain": ["planner"]`), so whoever reads it
+  sees which agents took part.
 
 ## Try it locally
 
@@ -297,8 +329,9 @@ evaluation.
 
 The platform team adds the agent to its configuration
 ([configuration.md](../operations/configuration.md#configmaps)): the call registry (who may
-start it), the catalogs file (repository and revision), the tool grant, the GitLab project of
-its context repository, optionally a Jira label, the agent card, and the UI's or Mattermost's
+start it, and `agent:<name>` in the entries of the agents its roles delegate to), the catalogs
+file (repository and revision), the tool grant, the GitLab project of its context repository,
+optionally a Jira label, the agent card, and the UI's or Mattermost's
 agent list. The bot account needs Reporter on the catalog and Developer on the context
 repository ([install.md, step 5](../operations/install.md#5-set-up-gitlab-the-model-gateway-and-the-trace-store)).
 A catalog change reaches runs as soon as it is merged into the revision the catalogs file names;

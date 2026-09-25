@@ -21,6 +21,7 @@ AGENT_LABEL = "golem.dev/agent"
 JOB_NAME_PREFIX = "golem-run-"
 TOKEN_SECRET_SUFFIX = "-token"
 RUN_TOKEN_ENV = "GOLEM_RUN_TOKEN"
+CALL_TOKEN_ENV = "GOLEM_CALL_TOKEN"
 MCP_REGISTRY_DIR = "/etc/golem/mcp"
 MCP_REGISTRY_PATH = f"{MCP_REGISTRY_DIR}/registry.yaml"
 MCP_REGISTRY_VOLUME = "mcp-registry"
@@ -75,6 +76,8 @@ class JobSpec:
     cpu: str
     memory: str
     run_token: str = field(repr=False)
+    # For the edge, when a role delegates to another agent (ADR 0014).
+    call_token: str = field(repr=False)
     command: tuple[str, ...] | None = None
     traceparent: str = ""
     tracestate: str = ""
@@ -109,6 +112,7 @@ class JobSpec:
         _require(bool(self.memory.strip()), "memory must not be empty")
         _require(self.command is None or len(self.command) > 0, "command must not be empty")
         _require(bool(self.run_token.strip()), "run_token must not be empty")
+        _require(bool(self.call_token.strip()), "call_token must not be empty")
         _require(
             self.mcp_registry_configmap is None or _is_dns_subdomain(self.mcp_registry_configmap),
             f"mcp_registry_configmap is not a DNS subdomain: {self.mcp_registry_configmap!r}",
@@ -243,7 +247,7 @@ def build_token_secret(spec: JobSpec, job_uid: str) -> dict:
             ],
         },
         "type": "Opaque",
-        "stringData": {RUN_TOKEN_ENV: spec.run_token},
+        "stringData": {RUN_TOKEN_ENV: spec.run_token, CALL_TOKEN_ENV: spec.call_token},
     }
 
 

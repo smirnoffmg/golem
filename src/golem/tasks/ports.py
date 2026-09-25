@@ -15,6 +15,10 @@ class RunStart:
     # W3C Trace Context of the request, so the run's trace continues the caller's.
     traceparent: str = ""
     tracestate: str = ""
+    # A delegated run (ADR 0014): the agents that delegated so far and the root run of their
+    # chain, which the run is admitted under. Empty for a run a person or a service started.
+    root_run_id: str = ""
+    chain: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

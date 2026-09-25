@@ -17,6 +17,7 @@ from golem.orchestrator.jobs import (
 
 RUN_ID = "3f2b8c1e-8d4a-4c3e-9a57-0b7f2d6e1a90"
 RUN_TOKEN = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJydW4ifQ.c2lnbmF0dXJl"
+CALL_TOKEN = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1c2VyOmFsaWNlIn0.Y2FsbA"
 
 
 def spec(**changes: object) -> JobSpec:
@@ -33,6 +34,7 @@ def spec(**changes: object) -> JobSpec:
         cpu="500m",
         memory="1Gi",
         run_token=RUN_TOKEN,
+        call_token=CALL_TOKEN,
     )
     return replace(base, **changes)
 
@@ -148,12 +150,16 @@ def test_secrets_come_only_by_reference_to_the_shared_and_the_per_run_secret() -
     assert "secret" not in str(pod_spec(manifest)["volumes"]).lower()
 
 
-def test_the_run_token_never_appears_in_the_job_manifest() -> None:
-    assert RUN_TOKEN not in str(build_job_manifest(spec(mcp_registry_configmap="golem-mcp")))
+def test_the_run_and_call_tokens_never_appear_in_the_job_manifest() -> None:
+    manifest = str(build_job_manifest(spec(mcp_registry_configmap="golem-mcp")))
+
+    assert RUN_TOKEN not in manifest
+    assert CALL_TOKEN not in manifest
 
 
-def test_the_run_token_is_hidden_from_the_spec_repr() -> None:
+def test_the_run_and_call_tokens_are_hidden_from_the_spec_repr() -> None:
     assert RUN_TOKEN not in repr(spec())
+    assert CALL_TOKEN not in repr(spec())
 
 
 def test_without_a_registry_config_map_nothing_is_mounted_for_mcp() -> None:
@@ -179,7 +185,7 @@ def test_the_token_secret_holds_the_token_and_is_owned_by_the_job() -> None:
     assert secret["metadata"]["name"] == token_secret_name(RUN_ID) == f"golem-run-{RUN_ID}-token"
     assert secret["metadata"]["namespace"] == "team-a-jobs"
     assert secret["metadata"]["labels"]["golem.dev/run-id"] == RUN_ID
-    assert secret["stringData"] == {"GOLEM_RUN_TOKEN": RUN_TOKEN}
+    assert secret["stringData"] == {"GOLEM_RUN_TOKEN": RUN_TOKEN, "GOLEM_CALL_TOKEN": CALL_TOKEN}
     assert secret["metadata"]["ownerReferences"] == [
         {
             "apiVersion": "batch/v1",
@@ -230,6 +236,7 @@ def test_command_can_be_overridden() -> None:
         {"memory": ""},
         {"command": ()},
         {"run_token": ""},
+        {"call_token": ""},
         {"mcp_registry_configmap": ""},
         {"mcp_registry_configmap": "Golem_MCP"},
     ],

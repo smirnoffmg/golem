@@ -51,7 +51,8 @@ MATRIX = {
         SETTLED,
         DNS,
         f"open:{TASKS}:8000",
-        f"closed:{TASKS}:8001",
+        # The run keys, for call tokens (ADR 0014).
+        f"open:{TASKS}:8001",
         f"closed:{TASKS}:8002",
         "closed:mcp-tracker-read.golem-system.svc:8000",
     },

@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+from dataclasses import replace
 from typing import Any
 
 import jwt
@@ -9,7 +10,16 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
-from golem.edge.auth import AuthFailure, Principal, authenticate
+from golem import call_token, run_token
+from golem.call_token import CallClaims
+from golem.edge.auth import (
+    AuthFailure,
+    Principal,
+    authenticate,
+    authenticate_any,
+    authenticate_call,
+)
+from golem.run_token import RunClaims, SigningKey, public_jwks
 
 ISSUER = "https://idp.example.test/realms/golem"
 AUDIENCE = "golem-edge"
@@ -137,3 +147,99 @@ def test_ec_key_cannot_verify_a_token_claiming_rs256() -> None:
     result = check(sign(claims(), key=RSA_KEY, alg="RS256", kid="ec-1"))
 
     assert isinstance(result, AuthFailure)
+
+
+# Golem call tokens (ADR 0014): the edge's second issuer
+
+
+GOLEM_KEY = SigningKey.generate(kid="golem-1")
+GOLEM_KEYS = jwt.PyJWKSet.from_dict(public_jwks([GOLEM_KEY]))
+CALL = CallClaims(
+    subject="user:alice",
+    agent="reviewer",
+    chain=("discovery", "reviewer"),
+    root_run_id="root-run",
+    run_id="child-run",
+    expires_at=NOW + 600,
+)
+
+
+def dispatch(token: str) -> Principal | AuthFailure:
+    return authenticate_any(
+        token,
+        idp=check,
+        golem=lambda raw: authenticate_call(raw, keys=GOLEM_KEYS, now=NOW),
+    )
+
+
+def test_a_call_token_becomes_the_acting_agent_on_behalf_of_the_subject() -> None:
+    principal = dispatch(call_token.issue(CALL, GOLEM_KEY, now=NOW))
+
+    assert principal == Principal(
+        name="agent:reviewer",
+        chain=("discovery", "reviewer"),
+        subject="user:alice",
+        root_run_id="root-run",
+        run_id="child-run",
+    )
+    assert isinstance(principal, Principal)
+    assert principal.on_behalf_of == "user:alice"
+
+
+def test_an_identity_provider_token_still_acts_for_itself() -> None:
+    principal = dispatch(sign(claims()))
+
+    assert principal == Principal(name="user:alice", chain=())
+    assert isinstance(principal, Principal)
+    assert principal.on_behalf_of == "user:alice"
+
+
+def test_a_run_token_is_refused_by_the_edge() -> None:
+    claims_ = RunClaims(
+        run_id="run-1",
+        agent="discovery",
+        caller="user:alice",
+        root_run_id="run-1",
+        tools=("tracker.read",),
+        expires_at=NOW + 600,
+    )
+
+    result = dispatch(run_token.issue(claims_, GOLEM_KEY, now=NOW))
+
+    assert isinstance(result, AuthFailure)
+    assert "audience" in result.reason.lower()
+
+
+def test_a_token_claiming_golem_is_never_checked_against_the_identity_provider() -> None:
+    # Signed by the IdP's key but naming Golem as issuer: Golem's keys do not verify it.
+    forged = sign({"iss": "golem", "aud": "golem-a2a", "sub": "user:alice", "exp": NOW + 60})
+
+    assert isinstance(dispatch(forged), AuthFailure)
+
+
+def test_a_golem_token_signed_with_rs256_is_refused() -> None:
+    body = {
+        "iss": "golem",
+        "aud": "golem-a2a",
+        "sub": "user:alice",
+        "act": {"sub": "agent:reviewer"},
+        "chain": ["reviewer"],
+        "root": "r",
+        "run": "r",
+        "exp": NOW + 60,
+    }
+
+    result = dispatch(sign(body, kid="golem-1"))
+
+    assert isinstance(result, AuthFailure)
+    assert "ES256" in result.reason
+
+
+def test_an_expired_call_token_is_refused() -> None:
+    token = call_token.issue(replace(CALL, expires_at=NOW), GOLEM_KEY, now=NOW - 1000)
+
+    assert dispatch(token) == AuthFailure("token expired")
+
+
+def test_a_malformed_token_goes_to_the_identity_provider_check() -> None:
+    assert dispatch("not-a-jwt") == AuthFailure("malformed token")

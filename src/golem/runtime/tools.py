@@ -4,6 +4,9 @@ The registry belongs to the platform and is mounted into the Job: tool group nam
 server that serves it and the tool names the group allows. A role names tool groups in the
 catalog and gets exactly those, deny by default. Every call carries the run token; the servers
 hold the secrets to the systems behind them, the Job never does.
+
+One group is served by the runtime itself: ``agents.delegate``, whose URL is the edge's A2A
+endpoint and whose one tool, ``delegate_to_agent``, carries the call token instead (ADR 0014).
 """
 
 import asyncio
@@ -13,6 +16,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
+import httpx
 import yaml
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.interceptors import MCPToolCallRequest, MCPToolCallResult
@@ -20,9 +24,10 @@ from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.types import CallToolResult, ContentBlock, TextContent
 
-from golem.catalog import Role
+from golem.catalog import DELEGATE_GROUP, TOOL_GROUP, Role
+from golem.runtime.delegation import DELEGATE_TOOL, Delegation, delegation_tool
 
-GROUP_NAME = re.compile(r"^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*$")
+GROUP_NAME = re.compile(TOOL_GROUP)
 GROUP_KEYS = frozenset({"url", "tools"})
 
 
@@ -84,7 +89,12 @@ def parse_group(name: object, entry: object) -> ToolGroup:
     if unknown:
         raise RegistryError(f"group {name!r} has unknown keys {unknown}")
     url = parse_url(name, entry.get("url"))
-    return ToolGroup(name=name, url=url, tools=parse_tools(name, entry))
+    tools = parse_tools(name, entry)
+    if name == DELEGATE_GROUP and tools != (DELEGATE_TOOL,):
+        raise RegistryError(
+            f"group {name!r} is served by the runtime: tools must be [{DELEGATE_TOOL}]"
+        )
+    return ToolGroup(name=name, url=url, tools=tools)
 
 
 def parse_url(group: str, url: object) -> str:
@@ -139,19 +149,42 @@ class McpToolbox:
     registry: Registry = Registry()
     run_token: str | None = field(default=None, repr=False)
     limits: ToolLimits = ToolLimits()
+    call_token: str | None = field(default=None, repr=False)
+    run_id: str = ""
+    # The edge is a network boundary; tests put it behind a transport.
+    edge_transport: httpx.AsyncBaseTransport | None = None
 
     async def tools_for(self, role: Role) -> list[BaseTool]:
         groups = allowed_groups(self.registry, role)
-        if not groups:
-            return []
+        delegating = [group for group in groups if group.name == DELEGATE_GROUP]
+        served = [group for group in groups if group.name != DELEGATE_GROUP]
+        tools = [self._delegation(role, group) for group in delegating]
+        if not served:
+            return tools
         if not self.run_token:
             raise ToolLoadError(
                 f"role {role.name!r} needs MCP tools, but the Job has no GOLEM_RUN_TOKEN"
             )
         loaded = await asyncio.gather(
-            *(load_group(group, self.run_token, self.limits) for group in groups)
+            *(load_group(group, self.run_token, self.limits) for group in served)
         )
-        return [tool for tools in loaded for tool in tools]
+        return tools + [tool for group_tools in loaded for tool in group_tools]
+
+    def _delegation(self, role: Role, group: ToolGroup) -> BaseTool:
+        if not self.call_token:
+            raise ToolLoadError(
+                f"role {role.name!r} may delegate, but the Job has no GOLEM_CALL_TOKEN"
+            )
+        return delegation_tool(
+            Delegation(
+                url=group.url,
+                call_token=self.call_token,
+                run_id=self.run_id,
+                call_timeout=self.limits.call_timeout,
+                max_result_chars=self.limits.max_result_chars,
+                transport=self.edge_transport,
+            )
+        )
 
 
 def toolbox_from_env(environ: Mapping[str, str]) -> McpToolbox:
@@ -159,6 +192,8 @@ def toolbox_from_env(environ: Mapping[str, str]) -> McpToolbox:
     return McpToolbox(
         registry=load_registry(Path(path)) if path else Registry(),
         run_token=environ.get("GOLEM_RUN_TOKEN") or None,
+        call_token=environ.get("GOLEM_CALL_TOKEN") or None,
+        run_id=environ.get("GOLEM_RUN_ID", ""),
     )
 
 

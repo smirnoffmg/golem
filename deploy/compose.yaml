@@ -41,6 +41,7 @@ services:
       GOLEM_MAX_CHAIN_DEPTH: "4"
       GOLEM_AUDIT_DSN: host=postgres dbname=golem_audit user=golem_edge password=dev-only-golem-edge
       GOLEM_TASK_SERVICE_URL: http://tasks:8000
+      GOLEM_TASK_SERVICE_READ_URL: http://tasks:8001
       GOLEM_EDGE_TOKEN: &edge-token dev-only-edge-token
       GOLEM_CATALOGS_DIR: /app/examples
       GOLEM_PUBLIC_BASE_URL: http://127.0.0.1:${GOLEM_EDGE_PORT:-8480}

@@ -5,6 +5,7 @@ import httpx
 import yaml
 from starlette.testclient import TestClient
 
+from golem.catalog import DELEGATE_GROUP
 from golem.mcp.__main__ import build_app, target_system, upstream_client
 from golem.mcp.atlassian import JiraDeployment
 from golem.mcp.groups import GROUPS
@@ -24,6 +25,8 @@ ENV = {
 
 def test_the_groups_serve_what_the_example_registry_allows() -> None:
     registry = yaml.safe_load(EXAMPLE_REGISTRY.read_text())
+    # Served by the runtime itself, not a platform MCP server (ADR 0014).
+    registry.pop(DELEGATE_GROUP)
 
     assert {name: tuple(entry["tools"]) for name, entry in registry.items()} == {
         name: group.tools for name, group in GROUPS.items()

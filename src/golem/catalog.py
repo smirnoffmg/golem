@@ -5,6 +5,10 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SLUG = r"^[a-z][a-z0-9-]*$"
+TOOL_GROUP = r"^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*$"
+# The one tool group the runtime serves itself, not an MCP server: `delegate_to_agent`, which
+# asks another agent for work through the edge (ADR 0014). Like every group, deny by default.
+DELEGATE_GROUP = "agents.delegate"
 
 
 class _Frozen(BaseModel):
@@ -52,7 +56,14 @@ class Kind(_Frozen):
 class Role(_Frozen):
     name: str = Field(pattern=SLUG)
     writes: str
-    tools: tuple[str, ...] = ()
+    tools: tuple[Annotated[str, Field(pattern=TOOL_GROUP)], ...] = ()
+
+    @model_validator(mode="after")
+    def _tools_named_once(self) -> "Role":
+        repeated = sorted({tool for tool in self.tools if self.tools.count(tool) > 1})
+        if repeated:
+            raise ValueError(f"role {self.name!r} names tool group {repeated[0]!r} twice")
+        return self
 
 
 class ContextRepo(_Frozen):

@@ -1,9 +1,14 @@
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import jwt
 from jwt.types import Options
+
+from golem import call_token
+from golem.run_token import ISSUER as GOLEM_ISSUER
+from golem.run_token import RunTokenError
 
 ALLOWED_ALGORITHMS = frozenset({"RS256", "ES256"})
 REQUIRED_CLAIMS = ("exp", "iss", "aud")
@@ -14,6 +19,15 @@ SERVICE_ACCOUNT_PREFIX = "service-account-"
 class Principal:
     name: str
     chain: tuple[str, ...]
+    # Set for an agent holding a call token: the user or service the chain acts for, the
+    # chain's root run and the run that holds the token. A person or service acts for itself.
+    subject: str = ""
+    root_run_id: str = ""
+    run_id: str = ""
+
+    @property
+    def on_behalf_of(self) -> str:
+        return self.subject or self.name
 
 
 @dataclass(frozen=True)
@@ -34,6 +48,39 @@ def authenticate(
     if expiry is not None:
         return expiry
     return principal_of(claims)
+
+
+def authenticate_any(
+    token: str,
+    *,
+    idp: Callable[[str], Principal | AuthFailure],
+    golem: Callable[[str], Principal | AuthFailure],
+) -> Principal | AuthFailure:
+    """Dispatch on the unverified issuer; each branch then verifies issuer, audience and
+    signature with its own keys and algorithms, so the claim only picks who checks it."""
+    return golem(token) if _issuer_of(token) == GOLEM_ISSUER else idp(token)
+
+
+def authenticate_call(
+    token: str, *, keys: jwt.PyJWKSet, now: int | None = None
+) -> Principal | AuthFailure:
+    claims = call_token.verify(token, keys, int(time.time()) if now is None else now)
+    if isinstance(claims, RunTokenError):
+        return AuthFailure(claims.reason)
+    return Principal(
+        name=f"{call_token.AGENT_PREFIX}{claims.agent}",
+        chain=claims.chain,
+        subject=claims.subject,
+        root_run_id=claims.root_run_id,
+        run_id=claims.run_id,
+    )
+
+
+def _issuer_of(token: str) -> object:
+    try:
+        return jwt.decode(token, options={"verify_signature": False}).get("iss")
+    except jwt.PyJWTError:
+        return None
 
 
 def principal_of(claims: dict[str, Any]) -> Principal | AuthFailure:

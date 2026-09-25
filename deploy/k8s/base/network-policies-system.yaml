@@ -95,6 +95,7 @@ spec:
         - protocol: TCP
           port: 8000
   egress:
+    # A2A, and the run keys that verify the call tokens runs delegate with (ADR 0014).
     - to:
         - podSelector:
             matchLabels:
@@ -102,6 +103,8 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
+        - protocol: TCP
+          port: 8001
     # Placeholder: Postgres (golem_audit).
     - to:
         - ipBlock:
@@ -118,8 +121,8 @@ spec:
           port: 443
 ---
 # Not reachable from outside (ADR 0002). Policies work on ports, not paths, so each caller is
-# admitted to its own listener only (ADR 0009): the edge to A2A, the MCP servers to run keys
-# and run status, the reconciler to run outcomes.
+# admitted to its own listeners only (ADR 0009): the edge to A2A and the run keys, the MCP
+# servers to run keys and run status, the reconciler to run outcomes.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -138,10 +141,14 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
+    # The run keys: the MCP servers verify run tokens, the edge call tokens.
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-mcp
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-edge
       ports:
         - protocol: TCP
           port: 8001

@@ -81,7 +81,8 @@ spec:
               - key: netcheck.sh
                 path: netcheck.sh
 ---
-# The edge: the task service's a2a port only; the MCP servers admit runs only.
+# The edge: the task service's a2a port and its run keys (internal-read, for call tokens), never
+# the reconciler's port; the MCP servers admit runs only.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -113,7 +114,7 @@ spec:
             - "settled:netcheck-canary.golem-netcheck.svc.cluster.local:8000"
             - "dns:kubernetes.default.svc.cluster.local"
             - "open:tasks.golem-system.svc:8000"
-            - "closed:tasks.golem-system.svc:8001"
+            - "open:tasks.golem-system.svc:8001"
             - "closed:tasks.golem-system.svc:8002"
             - "closed:mcp-tracker-read.golem-system.svc:8000"
           env:

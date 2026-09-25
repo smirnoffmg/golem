@@ -378,12 +378,12 @@ def test_a_pod_outside_golem_jobs_cannot_reach_the_mcp_server(
 # --- The task service's ports, with real traffic ------------------------------------------------
 
 TASK_SERVICE_PORTS = {"a2a": 8000, "internal-read": 8001, "internal-write": 8002}
-# Each caller of the task service, and the one port it must reach; the other two must be
-# blocked. The reached port is tried first (see attempt()).
+# Each caller of the task service, and the ports it must reach; the others must be blocked.
+# The reached ports are tried first (see attempt()). The edge reads the run keys too (ADR 0014).
 CALLERS = {
-    "edge": ({APP_LABEL: "golem-edge"}, "a2a"),
-    "mcp": (MCP_TRACKER_LABELS, "internal-read"),
-    "reconciler": ({APP_LABEL: "golem-reconciler"}, "internal-write"),
+    "edge": ({APP_LABEL: "golem-edge"}, ("a2a", "internal-read")),
+    "mcp": (MCP_TRACKER_LABELS, ("internal-read",)),
+    "reconciler": ({APP_LABEL: "golem-reconciler"}, ("internal-write",)),
 }
 
 
@@ -394,8 +394,8 @@ def task_service_traffic(deployed: list[dict], k3s_api_client: ApiClient) -> dic
     tasks = http_server("stand-in-tasks", {APP_LABEL: "golem-tasks"}, TASK_SERVICE_PORTS)
     core.create_namespaced_pod(SYSTEM, tasks)
     wait_until(core, SYSTEM, "stand-in-tasks", is_ready)
-    for caller, (labels, allowed_port) in CALLERS.items():
-        ordered = [allowed_port, *(p for p in TASK_SERVICE_PORTS if p != allowed_port)]
+    for caller, (labels, allowed) in CALLERS.items():
+        ordered = [*allowed, *(p for p in TASK_SERVICE_PORTS if p not in allowed)]
         script = "; ".join(
             reach(
                 f"{caller}_{port.replace('-', '_')}",
@@ -416,8 +416,8 @@ def task_service_traffic(deployed: list[dict], k3s_api_client: ApiClient) -> dic
 @pytest.mark.parametrize(
     ("caller", "port", "expected"),
     [
-        (caller, port, "reached" if port == allowed_port else "blocked")
-        for caller, (_, allowed_port) in CALLERS.items()
+        (caller, port, "reached" if port in allowed else "blocked")
+        for caller, (_, allowed) in CALLERS.items()
         for port in TASK_SERVICE_PORTS
     ],
 )

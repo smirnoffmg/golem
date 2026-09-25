@@ -12,13 +12,14 @@ from starlette.types import ASGIApp
 
 from golem.adapters.jira import jira_authorization
 from golem.jwks import SigningKeys, fetch_jwks
-from golem.mcp.auth import RunStatuses, run_token_verifier
+from golem.mcp.auth import run_token_verifier
 from golem.mcp.gate import Gate
 from golem.mcp.groups import GROUPS
 from golem.mcp.server import create_mcp_app
 from golem.mcp.settings import McpSettings, mcp_settings
 from golem.metrics import Metrics, process_registry
 from golem.ratelimit import Limiter
+from golem.run_status import RunStatuses
 from golem.serving import serve_all, with_metrics
 from golem.settings import SettingsError
 from golem.tasks.app import RUN_KEYS_PATH

@@ -85,6 +85,14 @@ def public_jwks(keys: Iterable[SigningKey]) -> dict[str, Any]:
 
 
 def verify(token: str, keys: jwt.PyJWKSet, now: int) -> RunClaims | RunTokenError:
+    payload = decode(token, keys, AUDIENCE, now)
+    return payload if isinstance(payload, RunTokenError) else _claims(payload)
+
+
+def decode(
+    token: str, keys: jwt.PyJWKSet, audience: str, now: int
+) -> dict[str, Any] | RunTokenError:
+    """The verified payload of a Golem token for ``audience``; shared by every Golem token."""
     try:
         header = jwt.get_unverified_header(token)
     except jwt.PyJWTError as error:
@@ -101,7 +109,7 @@ def verify(token: str, keys: jwt.PyJWKSet, now: int) -> RunClaims | RunTokenErro
             token,
             key.key,
             algorithms=[ALGORITHM],
-            audience=AUDIENCE,
+            audience=audience,
             issuer=ISSUER,
             options={
                 "require": ["exp", "sub", "aud", "iss"],
@@ -115,7 +123,7 @@ def verify(token: str, keys: jwt.PyJWKSet, now: int) -> RunClaims | RunTokenErro
         return RunTokenError(f"invalid token: {error}")
     if payload["exp"] <= now:
         return RunTokenError("token expired")
-    return _claims(payload)
+    return payload
 
 
 def _claims(payload: dict[str, Any]) -> RunClaims | RunTokenError:

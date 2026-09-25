@@ -23,6 +23,8 @@ from e2e_cluster import (
 )
 from kubernetes.client import ApiClient, CoreV1Api
 
+from golem import call_token
+from golem.call_token import CallClaims
 from golem.orchestrator.jobs import (
     RUN_AS_USER,
     CatalogRef,
@@ -59,6 +61,11 @@ def run_spec(mode: str) -> JobSpec:
         cpu="1",
         memory="1Gi",
         run_token=issue(claims, SIGNING_KEY, now=int(time.time())),
+        call_token=call_token.issue(
+            CallClaims("user:e2e", "discovery", ("discovery",), run_id, run_id, 2_000_000_000),
+            SIGNING_KEY,
+            now=int(time.time()),
+        ),
     )
 
 

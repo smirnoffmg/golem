@@ -37,7 +37,7 @@ the task service ([ADR 0002](../adr/0002-edge-and-task-service-split.md)).
 | --- | --- | --- |
 | `GOLEM_OIDC_ISSUER` | required | the identity provider's issuer; tokens must carry exactly this `iss` |
 | `GOLEM_OIDC_AUDIENCE` | required | the audience every access token must carry (`golem-edge`) |
-| `GOLEM_OIDC_JWKS_URL` | required | the provider's signing keys; fetched at start and on an unknown key id, at most once a minute |
+| `GOLEM_OIDC_JWKS_URL` | required | the provider's signing keys; fetched at start and on an unknown key id, at most once a minute (until the first fetch succeeds: after 1 s, doubling up to a minute) |
 | `GOLEM_OIDC_DISCOVERY_URL` | required | named in the agent cards for clients |
 | `GOLEM_CALL_REGISTRY_FILE` | required | the call registry ([format](#call-registry)) |
 | `GOLEM_MAX_CHAIN_DEPTH` | required | the deepest agent-to-agent chain allowed (positive integer) |
@@ -46,6 +46,8 @@ the task service ([ADR 0002](../adr/0002-edge-and-task-service-split.md)).
 | `GOLEM_CATALOGS_DIR` | required | a directory of `<agent>/agent.yaml` the agent cards are built from ([cards](#agent-cards)) |
 | `GOLEM_PUBLIC_BASE_URL` | required | the edge's public address, written into the agent cards |
 | `GOLEM_EDGE_TOKEN` | required | shared secret sent with every forwarded request |
+| `GOLEM_TASK_SERVICE_READ_URL` | required | the task service's `internal-read` listener (`http://tasks.golem-system.svc:8001`): the orchestrator's public keys, which verify the call tokens of delegating runs (fetched like the provider's keys), and run statuses, which revoke them ([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)) |
+| `GOLEM_RUN_STATUS_TTL_SECONDS` | `10` | how long the edge caches a delegating run's status; a canceled or finished run's call token stops working within it |
 | `GOLEM_PORT` | `8000` | A2A and agent cards |
 | `GOLEM_METRICS_PORT` | `9090` | metrics |
 | `GOLEM_RATE_CALLER_PER_MINUTE`, `GOLEM_RATE_CALLER_BURST` | `60`, `20` | per authenticated caller, every `/a2a` call |
@@ -62,8 +64,8 @@ A2A tasks, run admission, Job launch, run tokens. Three listeners, one per kind 
 | --- | --- | --- |
 | `GOLEM_RUNS_DSN` | required | libpq connection string to `golem_runs` as `golem_runs` |
 | `GOLEM_TASKS_DB_URL` | required | SQLAlchemy URL to `golem_tasks` as `golem_tasks`: `postgresql+asyncpg://golem_tasks:<password>@<host>:<port>/golem_tasks` |
-| `GOLEM_MAX_RUNS_PER_CALLER` | required | running runs one caller may have; over it, `REJECTED` (`caller_concurrency`) |
-| `GOLEM_MAX_RUNS_PER_ROOT` | required | running runs one call chain may have (`chain_concurrency`) |
+| `GOLEM_MAX_RUNS_PER_CALLER` | required | running runs one caller may have; over it, `REJECTED` (`caller_concurrency`). A delegated run counts against the person or service its chain acts for |
+| `GOLEM_MAX_RUNS_PER_ROOT` | required | running runs one call chain may have, the first run and every run delegated from it (`chain_concurrency`) |
 | `GOLEM_BUDGET_PER_ROOT` | required | total estimated cost of one call chain (`chain_budget`) |
 | `GOLEM_ESTIMATED_RUN_COST` | required | the flat estimate every run reserves against the budget |
 | `GOLEM_JOB_IMAGE` | required | the runtime image of every run; set it to the image of your overlay |
@@ -163,7 +165,7 @@ One process per tool group ([ADR 0008](../adr/0008-platform-mcp-servers.md)).
 | `GOLEM_TASK_SERVICE_URL` | required | the task service's `internal-read` listener (`http://tasks.golem-system.svc:8001`) |
 | `GOLEM_AUDIT_DSN` | required | libpq connection string to `golem_audit` as `golem_mcp` |
 | `GOLEM_MCP_RUN_STATUS_TTL_SECONDS` | `10` | how long a run's status is cached; a canceled run's calls stop within it |
-| `GOLEM_MCP_KEYS_REFRESH_SECONDS` | `60` | least time between refetches of the run keys |
+| `GOLEM_MCP_KEYS_REFRESH_SECONDS` | `60` | least time between refetches of the run keys on an unknown key id; a server that has never loaded keys (it started before the task service) retries after 1 s, doubling up to this |
 | `GOLEM_PORT` | `8000` | `/mcp` |
 | `GOLEM_METRICS_PORT` | `9090` | metrics |
 | `GOLEM_RATE_AUTH_FAILURES_PER_MINUTE`, `GOLEM_RATE_AUTH_FAILURES_BURST` | `30`, `10` | per client address, failed authentications |
@@ -203,6 +205,7 @@ The task service writes the first group into every Job; the rest comes from the 
 | `GOLEM_CATALOG_REF` | required | `<git url>#<revision>` from the catalogs file |
 | `GOLEM_GOAL` | required | the caller's text |
 | `GOLEM_RUN_TOKEN` | none | the run token, from Secret `golem-run-<run id>-token`; a role with tools fails without it |
+| `GOLEM_CALL_TOKEN` | none | the call token, from the same Secret; a role naming `agents.delegate` fails without it ([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)) |
 | `GOLEM_MCP_REGISTRY` | none | path of the mounted MCP registry; without it a role naming tools fails |
 | `GOLEM_MODEL_GATEWAY_URL` | from the run Secret | the gateway's OpenAI-compatible base URL |
 | `GOLEM_MODEL` | from the run Secret | the model alias |
@@ -276,6 +279,18 @@ missing here is refused at the edge (`unknown_agent`).
 discovery: ["user:*", "service:golem-jira-adapter", "service:golem-mattermost-adapter"]
 ```
 
+`agent:<name>` is a run of that agent delegating with its call token
+([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)): this file is what lets one agent start
+another. List delegating agents by name, never `agent:*`. The child runs for the person or
+service that started the first run of the chain, so an entry here gives the agent no more than
+that subject could start; `GOLEM_MAX_CHAIN_DEPTH` bounds how many agents one request passes
+through, and a chain never calls an agent already in it. A planner that may hand work to
+discovery:
+
+```yaml
+discovery: ["user:*", "agent:planner"]
+```
+
 ### Catalogs
 
 Agent to its catalog repository and revision (a branch, tag or commit). The task service
@@ -318,7 +333,8 @@ golem:discovery: discovery
 ### MCP registry
 
 Tool group to the MCP server that serves it and the tools the group allows. A role gets the
-groups it names, and from each only these tools.
+groups it names, and from each only these tools. `agents.delegate` is served by the runtime
+itself: its URL is the edge's A2A endpoint and its only tool `delegate_to_agent`.
 
 ```yaml
 tracker.read:
@@ -327,6 +343,9 @@ tracker.read:
 wiki.read:
   url: http://mcp-wiki-read.golem-system.svc:8000/mcp
   tools: [search_pages, get_page]
+agents.delegate:
+  url: http://edge.golem-system.svc:8000/a2a
+  tools: [delegate_to_agent]
 ```
 
 ### Agent cards

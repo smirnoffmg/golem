@@ -259,6 +259,53 @@ def test_caller_comes_from_the_edge_principal_header(
     assert [run.caller for run in orchestrator.started] == ["user:alice"]
 
 
+def send_delegated(client: TestClient, chain: str, root: str) -> dict[str, Any]:
+    """A message as the edge forwards a delegated call: the subject, the chain and the root."""
+    response = client.post(
+        "/a2a",
+        headers={
+            "A2A-Version": "1.0",
+            "X-Golem-Principal": "user:alice",
+            "X-Golem-Chain": chain,
+            "X-Golem-Root-Run": root,
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "SendMessage",
+            "params": {
+                "tenant": "reviewer",
+                "message": {"role": "ROLE_USER", "messageId": "m1", "parts": [{"text": "go"}]},
+            },
+        },
+    )
+    return response.json()["result"]["task"]
+
+
+def test_a_delegated_run_starts_with_the_chain_and_root_the_edge_forwarded(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task = send_delegated(client, "discovery,planner", "root-run")
+
+    [run] = orchestrator.started
+    assert (run.caller, run.chain, run.root_run_id) == (
+        "user:alice",
+        ("discovery", "planner"),
+        "root-run",
+    )
+    assert task["metadata"] == {"runId": "run-1", "chain": ["discovery", "planner"]}
+
+
+def test_a_run_started_by_a_person_has_no_chain(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task = send(client, "fix the flaky test")
+
+    [run] = orchestrator.started
+    assert (run.chain, run.root_run_id) == ((), "")
+    assert "chain" not in task["metadata"]
+
+
 def notify(client: TestClient, task_id: str, **forged: str) -> Any:
     """The reconciler's notification, plus whatever a forger adds to it."""
     return client.post("/internal/run-outcome", json={"task_id": task_id, **forged})
