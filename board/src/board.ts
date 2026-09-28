@@ -5,6 +5,18 @@ export type Column = "in_progress" | "waiting" | "review" | "failed" | "archive"
 
 export type Proposal = { id: string; kind: string; state: string; url: string | null };
 
+// A process's task shows where its process stands (ADR 0019); counts are as the BFF sends them.
+export type ProcessView = {
+  state: string;
+  stage: string;
+  index: number;
+  count: number;
+  attempt: number;
+  maxAttempts: number;
+  staleReruns: number;
+  reason: string | null;
+};
+
 export type Task = {
   id: string;
   state: string;
@@ -13,6 +25,7 @@ export type Task = {
   message: string;
   updated: string;
   proposal: Proposal | null;
+  process: ProcessView | null;
 };
 
 export type BoardResponse = {
@@ -22,7 +35,12 @@ export type BoardResponse = {
   tasks: Task[];
 };
 
-export type Board = { cursor: string; tasks: Readonly<Record<string, Task>> };
+// `deltas`: how many deltas since the last snapshot.
+export type Board = { cursor: string; deltas: number; tasks: Readonly<Record<string, Task>> };
+
+// A proposal's or a process's change leaves its task's timestamp alone, so a delta never
+// carries it; a snapshot costs the backend the same one call, and every sixth poll is one.
+export const SNAPSHOT_EVERY = 6;
 
 export const COLUMNS: readonly { id: Column; title: string; empty: string }[] = [
   { id: "waiting", title: "Waiting for me", empty: "Nothing needs your answer." },
@@ -38,7 +56,16 @@ export function nextBoard(previous: Board | undefined, response: BoardResponse):
   const base = response.complete || previous === undefined ? {} : previous.tasks;
   const tasks: Record<string, Task> = { ...base };
   for (const task of response.tasks) tasks[task.id] = task;
-  return { cursor: response.cursor, tasks };
+  const deltas = response.complete || previous === undefined ? 0 : previous.deltas + 1;
+  return { cursor: response.cursor, deltas, tasks };
+}
+
+export function cursorToAsk(board: Board | undefined): string | undefined {
+  return board === undefined || board.deltas >= SNAPSHOT_EVERY - 1 ? undefined : board.cursor;
+}
+
+export function snapshotNext(board: Board | undefined): Board | undefined {
+  return board && { ...board, deltas: SNAPSHOT_EVERY };
 }
 
 export function withTask(board: Board | undefined, task: Task): Board | undefined {

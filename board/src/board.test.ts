@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { type BoardResponse, type Task, columnsOf, nextBoard } from "./board";
+import {
+  type BoardResponse,
+  SNAPSHOT_EVERY,
+  type Task,
+  columnsOf,
+  cursorToAsk,
+  nextBoard,
+  snapshotNext,
+} from "./board";
 
 function task(id: string, overrides: Partial<Task> = {}): Task {
   return {
@@ -10,6 +18,7 @@ function task(id: string, overrides: Partial<Task> = {}): Task {
     message: "",
     updated: "2026-09-28T10:00:00Z",
     proposal: null,
+    process: null,
     ...overrides,
   };
 }
@@ -87,5 +96,32 @@ describe("columnsOf", () => {
     );
 
     expect(columnsOf(board).in_progress.map((t) => t.id)).toEqual(["x"]);
+  });
+});
+
+describe("cursorToAsk", () => {
+  // A proposal's or a process's change does not move its task's timestamp, so only a
+  // snapshot shows it (ADR 0018).
+  it("asks for a snapshot first", () => {
+    expect(cursorToAsk(undefined)).toBeUndefined();
+  });
+
+  it("asks for deltas, then a snapshot after SNAPSHOT_EVERY of them", () => {
+    let board = nextBoard(undefined, response([task("a")], true, "c0"));
+    for (let delta = 1; delta < SNAPSHOT_EVERY; delta += 1) {
+      expect(cursorToAsk(board)).toBe(board.cursor);
+      board = nextBoard(board, response([], false, `c${delta}`));
+    }
+
+    expect(cursorToAsk(board)).toBeUndefined();
+    board = nextBoard(board, response([task("a")], true, "c9"));
+    expect(cursorToAsk(board)).toBe("c9");
+  });
+
+  it("asks for a snapshot next once something changed that deltas cannot see", () => {
+    const board = nextBoard(undefined, response([task("a")], true, "c0"));
+
+    expect(cursorToAsk(snapshotNext(board))).toBeUndefined();
+    expect(snapshotNext(undefined)).toBeUndefined();
   });
 });

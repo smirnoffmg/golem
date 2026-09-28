@@ -435,6 +435,24 @@ textarea {
   font-size: var(--step--1);
 }
 
+.process-stage {
+  font-size: var(--step--1);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.resolution-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--surface);
+}
+
 .reply {
   display: grid;
   gap: 0.35rem;

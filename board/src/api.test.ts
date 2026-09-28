@@ -138,6 +138,46 @@ describe("the API client", () => {
     expect(error.status).toBe(0);
   });
 
+  it("resolves a process waiting for a reason with the action and the reason", async () => {
+    fake = fakeFetch(json(SESSION), json({ taskId: "t/1", action: "rerun" }));
+    const api = createApi(fake.fetch);
+    await api.session();
+
+    await api.resolve("t/1", "rerun", "Cover the API.");
+
+    const write = fake.calls[1];
+    expect(write?.url).toBe("/api/processes/t%2F1/resolution");
+    expect(new Headers(write?.init?.headers).get("X-Golem-CSRF")).toBe("token-1");
+    expect(JSON.parse(String(write?.init?.body))).toEqual({
+      action: "rerun",
+      reason: "Cover the API.",
+    });
+  });
+
+  it("sends no reason to end a process", async () => {
+    fake = fakeFetch(json(SESSION), json({ taskId: "t1", action: "end" }));
+    const api = createApi(fake.fetch);
+    await api.session();
+
+    await api.resolve("t1", "end");
+
+    expect(JSON.parse(String(fake.calls[1]?.init?.body))).toEqual({ action: "end" });
+  });
+
+  it("keeps the code of a process that no longer waits", async () => {
+    fake = fakeFetch(
+      json(SESSION),
+      json({ error: "not_waiting", message: "The process no longer waits." }, 409),
+    );
+    const api = createApi(fake.fetch);
+    await api.session();
+
+    const error = (await api.resolve("t1", "end").catch((e: unknown) => e)) as ApiError;
+
+    expect(error.code).toBe("not_waiting");
+    expect(error.status).toBe(409);
+  });
+
   it("forgets the CSRF token after signing out", async () => {
     fake = fakeFetch(json(SESSION), json({ redirect: "/" }));
     const api = createApi(fake.fetch);

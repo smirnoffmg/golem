@@ -11,6 +11,7 @@ export type TaskDetail = Task & {
   artifacts: { name: string; text: string }[];
 };
 export type TaskPage = { tasks: Task[]; next: string | null };
+export type Resolution = "rerun" | "end";
 
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -119,6 +120,10 @@ export function createApi(fetch: Fetch) {
     },
     async cancel(agent: string, id: string): Promise<Task> {
       return (await write<{ task: Task }>(`${tasksOf(agent)}/${segment(id)}/cancel`, {})).task;
+    },
+    async resolve(taskId: string, action: Resolution, reason?: string): Promise<void> {
+      const url = `/api/processes/${segment(taskId)}/resolution`;
+      await write(url, reason === undefined ? { action } : { action, reason });
     },
     async logout(): Promise<string> {
       const { redirect } = await write<{ redirect: string }>("/logout", {});

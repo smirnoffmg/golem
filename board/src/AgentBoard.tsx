@@ -1,7 +1,15 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { api } from "./api";
-import { type Board, COLUMNS, type Task, columnsOf, nextBoard, withTask } from "./board";
+import {
+  type Board,
+  COLUMNS,
+  type Task,
+  columnsOf,
+  cursorToAsk,
+  nextBoard,
+  withTask,
+} from "./board";
 import { boardInterval } from "./poll";
 import { TaskCard } from "./TaskCard";
 import { newNonce } from "./text";
@@ -16,10 +24,11 @@ export function AgentBoard(props: { agent: string; description: string }) {
   const board = useQuery({
     queryKey: boardKey(agent),
     // Each poll asks for what changed since the last one and merges it into what the board
-    // already shows; a snapshot answer replaces it (ADR 0018).
+    // already shows; a snapshot answer replaces it, and every sixth poll asks for one
+    // (ADR 0018).
     queryFn: async () => {
       const previous = queryClient.getQueryData<Board>(boardKey(agent));
-      return nextBoard(previous, await api.board(agent, previous?.cursor));
+      return nextBoard(previous, await api.board(agent, cursorToAsk(previous)));
     },
     refetchInterval: (query) => boardInterval(query.state.error),
   });

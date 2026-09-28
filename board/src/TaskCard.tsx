@@ -1,8 +1,17 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { api } from "./api";
-import { ACTIVE_STATES, type Proposal, type Task } from "./board";
+import { ACTIVE_STATES, type Board, type Proposal, type Task, snapshotNext } from "./board";
 import { Link } from "./navigation";
 import { taskPath } from "./route";
+import {
+  MAX_REASON_CHARS,
+  attemptText,
+  failureText,
+  resolutionProblem,
+  stageText,
+  staleText,
+} from "./process";
 import { newNonce, since } from "./text";
 
 const STATE_NAMES: Record<string, string> = {
@@ -29,7 +38,7 @@ export function stateName(state: string): string {
   return STATE_NAMES[state] ?? state;
 }
 
-export function ProposalLink(props: { proposal: Proposal }) {
+export function ProposalLink(props: { proposal: Proposal; inProcess?: boolean }) {
   const { proposal } = props;
   const status = PROPOSAL_STATES[proposal.state] ?? proposal.state;
   if (proposal.kind === "merge_request" && proposal.url) {
@@ -38,7 +47,13 @@ export function ProposalLink(props: { proposal: Proposal }) {
         <a href={proposal.url} rel="noreferrer" target="_blank">
           Merge request
         </a>{" "}
-        <span className="muted">{status}. Review and merge it in GitLab.</span>
+        <span className="muted">
+          {status}. Review and merge it in GitLab.
+          {/* The process reruns the stage with the closing comment as its reason (ADR 0019). */}
+          {props.inProcess && proposal.state === "pending" && (
+            <> To reject it, close it with a comment saying why.</>
+          )}
+        </span>
       </p>
     );
   }
@@ -71,9 +86,17 @@ export function TaskCard(props: { agent: string; task: Task; onChanged: (task: T
         <span className="state">{stateName(task.state)}</span>
         <time dateTime={task.updated}>{since(task.updated)}</time>
       </p>
-      {task.message && task.column === "failed" && <p className="card-message">{task.message}</p>}
-      {task.proposal && <ProposalLink proposal={task.proposal} />}
-      {task.column === "waiting" && <ReplyForm agent={agent} task={task} onChanged={props.onChanged} />}
+      {task.process && <ProcessLines task={task} />}
+      {task.message && task.column === "failed" && !task.process?.reason && (
+        <p className="card-message">{task.message}</p>
+      )}
+      {task.proposal && <ProposalLink proposal={task.proposal} inProcess={task.process !== null} />}
+      {task.column === "waiting" &&
+        (task.process?.state === "needs_reason" ? (
+          <ResolutionForm agent={agent} task={task} />
+        ) : (
+          <ReplyForm agent={agent} task={task} onChanged={props.onChanged} />
+        ))}
       {ACTIVE_STATES.has(task.state) && (
         <button type="button" className="quiet" disabled={busy} onClick={cancel}>
           {busy ? "Canceling…" : "Cancel"}
@@ -125,6 +148,117 @@ export function ReplyForm(props: { agent: string; task: Task; onChanged: (task: 
       <button type="submit" disabled={sending || text.trim() === ""}>
         {sending ? "Sending…" : "Send answer"}
       </button>
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+    </form>
+  );
+}
+
+function ProcessLines(props: { task: Task }) {
+  const process = props.task.process;
+  if (!process) return null;
+  const attempt = attemptText(process);
+  const stale = staleText(process);
+  const failure = failureText(process);
+  return (
+    <>
+      <p className="process-stage">{stageText(process)}</p>
+      {(attempt || stale) && (
+        <p className="card-meta">
+          {attempt && <span>{attempt}</span>}
+          {stale && <span>{stale}</span>}
+        </p>
+      )}
+      {failure && props.task.column === "failed" && <p className="card-message">{failure}</p>}
+    </>
+  );
+}
+
+export function ResolutionForm(props: { agent: string; task: Task }) {
+  const queryClient = useQueryClient();
+  const [reason, setReason] = useState("");
+  const [ending, setEnding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const id = `reason-${props.task.id}`;
+
+  async function resolve(action: "rerun" | "end") {
+    const problem = resolutionProblem(action, reason);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    setSending(true);
+    setError(null);
+    try {
+      await api.resolve(props.task.id, action, action === "rerun" ? reason.trim() : undefined);
+      // The process's change does not move its task's timestamp: only a snapshot shows it.
+      const key = ["board", props.agent];
+      queryClient.setQueryData<Board>(key, (current) => snapshotNext(current));
+      await queryClient.invalidateQueries({ queryKey: key });
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "The answer was not sent.");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    void resolve("rerun");
+  }
+
+  return (
+    <form className="reply resolution" onSubmit={submit}>
+      <p className="card-message">
+        The stage&apos;s merge request was closed without a comment. Say why, and the stage runs
+        again with your reason; or end the process.
+      </p>
+      <label htmlFor={id}>Why was it rejected?</label>
+      <textarea
+        id={id}
+        maxLength={MAX_REASON_CHARS}
+        rows={2}
+        value={reason}
+        onChange={(event) => setReason(event.target.value)}
+      />
+      <div className="resolution-actions">
+        <button type="submit" disabled={sending || reason.trim() === ""}>
+          {sending && !ending ? "Sending…" : "Rerun the stage"}
+        </button>
+        {ending ? (
+          <>
+            <button
+              type="button"
+              className="danger"
+              disabled={sending}
+              onClick={() => void resolve("end")}
+            >
+              {sending ? "Ending…" : "End the process for good"}
+            </button>
+            <button
+              type="button"
+              className="quiet"
+              disabled={sending}
+              onClick={() => setEnding(false)}
+            >
+              Keep it
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="quiet"
+            disabled={sending}
+            onClick={() => setEnding(true)}
+          >
+            End the process
+          </button>
+        )}
+      </div>
       {error && (
         <p className="form-error" role="alert">
           {error}
