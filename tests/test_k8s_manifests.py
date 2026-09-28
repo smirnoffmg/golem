@@ -154,6 +154,7 @@ RBAC = [
             f"{SYSTEM}/golem-mattermost-adapter",
             f"{SYSTEM}/golem-mcp",
             f"{SYSTEM}/golem-ui",
+            f"{SYSTEM}/golem-board",
             f"{SYSTEM}/default",
             f"{JOBS}/default",
         )

@@ -32,12 +32,14 @@ run the network check after every deploy that changes a policy or the CNI.
 
 | Namespace | Holds | Pod Security |
 | --- | --- | --- |
-| `golem-system` (`golem.dev/zone: system`) | `edge` (2 replicas), `tasks`, `reconciler`, `jira-adapter`, `mattermost-adapter`, `mcp-tracker-read`, `mcp-wiki-read`, `ui` (2 replicas) | `restricted` |
+| `golem-system` (`golem.dev/zone: system`) | `edge` (2 replicas), `tasks`, `reconciler`, `jira-adapter`, `mattermost-adapter`, `mcp-tracker-read`, `mcp-wiki-read`, `ui` (2 replicas), `board` (2 replicas) | `restricted` |
 | `golem-jobs` (`golem.dev/zone: jobs`) | runs only: the Jobs the task service launches, their token Secrets, the MCP registry, a `ResourceQuota` | `restricted` |
 
 Every process listens on 8000 and its Service exposes 8000, except the reconciler, which serves
 nothing but its metrics and has no probe, and the task service, which has three listeners, one
-per kind of caller (ADR 0009). Every process also serves `GET /metrics` on a port of its own,
+per kind of caller (ADR 0009). The board is not a process: its nginx serves the UI's static
+files on 8080, has no metrics port, and its policy admits the ingress controller and lets it
+reach nothing, not even DNS (ADR 0018). Every process also serves `GET /metrics` on a port of its own,
 9090 (`metrics`), which only the monitoring namespace reaches (ADR 0013, below):
 
 | Port | Name | Routes | Admitted |
@@ -51,13 +53,14 @@ per kind of caller (ADR 0009). Every process also serves `GET /metrics` on a por
 move them (a process refuses to start with two on one port); the Deployment's container ports,
 the Service and the policies must move with them. Probes:
 `tasks` uses `GET /internal/run-keys` on `internal-read`, since the `a2a` port answers only to
-the edge; the UI's readiness probe gets its stylesheet; the edge, the adapters and the MCP servers
+the edge; the UI's readiness probe gets `/healthz`, the board's gets `/`; the edge, the adapters and the MCP servers
 have no cheap unauthenticated route, so their probes are TCP.
 
 ## Image
 
-Every container runs the one image, named `golem` in the base. `images` in kustomize does not
-change environment values, so set the task service's `GOLEM_JOB_IMAGE` to the same reference:
+Every process container runs the one image, named `golem` in the base; the board runs its own,
+`golem-board`, built from `board/` (ADR 0018). `images` in kustomize does not change
+environment values, so set the task service's `GOLEM_JOB_IMAGE` to the same reference:
 
 ```yaml
 # overlays/prod/kustomization.yaml
@@ -65,6 +68,9 @@ resources: [../external-secrets]
 images:
   - name: golem
     newName: registry.example.com/golem
+    newTag: "1.4.0"
+  - name: golem-board
+    newName: registry.example.com/golem-board
     newTag: "1.4.0"
 patches:
   - target: {kind: ConfigMap, name: golem-tasks-env}
@@ -125,11 +131,12 @@ overlay.
 | `203.0.113.20/32:443` | `golem-run-egress` | The trace store's OTLP endpoint. |
 | `203.0.113.30/32`, ingress `:8000`, egress `:443` | policy `mattermost-adapter` | The Mattermost server: it sends slash commands and serves the REST API the adapter posts to. If commands reach the adapter through the ingress controller, admit the controller's namespace instead and restrict the source to Mattermost at the ingress; route `/mattermost/command` to Service `mattermost-adapter`. |
 | `golem.dev/monitoring: "true"` | policy `allow-metrics-scrape` | Label the namespace your Prometheus runs in, or patch the selector. It admits that namespace to port 9090 of every process and to nothing else. |
-| `golem.dev/ingress-controller: "true"` | policies `edge`, `jira-adapter`, `ui` | Label your ingress controller's namespace with it, or patch the selector. The base has no Ingress objects: route the public host to Service `edge`, the Jira webhook path to `jira-adapter`, and the UI's host (TLS terminated at the ingress) to Service `ui`. |
+| `golem.dev/ingress-controller: "true"` | policies `edge`, `jira-adapter`, `ui`, `board` | Label your ingress controller's namespace with it, or patch the selector. The base has no Ingress objects: route the public host to Service `edge`, the Jira webhook path to `jira-adapter`, and the UI's host (TLS terminated at the ingress) by path: `/api/` (prefix) and `/login`, `/callback`, `/logout`, `/healthz` (exact) to Service `ui` port 8000, everything else to Service `board` port 8080 (ADR 0018). |
 | `https://idp.example.com/...`, `golem-edge` | `golem-edge-env`, `golem-jira-adapter-env`, `golem-mattermost-adapter-env` | Issuer, JWKS, discovery and token URLs; the edge's audience; the adapters' client ids (also in the call registry as `service:golem-jira-adapter` and `service:golem-mattermost-adapter`). |
 | `https://mattermost.example.com`, `replace-with-team-id`, `discovery` | `golem-mattermost-adapter-env` | The Mattermost URL; the team ids (and optionally channel ids, `GOLEM_MATTERMOST_CHANNELS`) where `/golem` is enabled; the agents it may start. |
 | `https://golem.example.com` | `golem-edge-env`, `golem-tasks-env` | `GOLEM_PUBLIC_BASE_URL`: the edge's public address. |
-| `https://golem-ui.example.com`, `golem-ui` | `golem-ui-env` | The UI's public address and its redirect URL (both registered at the identity provider, with the address + `/` as the post-logout redirect) and its client id. It offers each person the agents the call registry lets them call. |
+| `https://golem-ui.example.com`, `golem-ui` | `golem-ui-env` | The UI's public address and its redirect URL (both registered at the identity provider, with the address + `/` as the post-logout redirect) and its client id. The board offers each person the agents the call registry lets them call. |
+| image `golem-board` | `board.yaml` | The board's image, built from `board/`; set it under `images` in your overlay next to `golem`. |
 | `https://jira.example.com`, `https://confluence.example.com`, `data-center`, empty `*_USER` | adapter and MCP ConfigMaps | Atlassian hosts; for Cloud set `GOLEM_MCP_JIRA_DEPLOYMENT: cloud` and the account email in `GOLEM_JIRA_USER` / `GOLEM_MCP_UPSTREAM_USER`. |
 | `https://gitlab.example.com`, `golem-config` | reconciler, `golem-config` | GitLab URL; the call registry, catalogs, agent tool grants, GitLab projects, Jira labels. |
 | `GOLEM_CATALOGS_DIR: /app/examples` | `golem-edge-env` | Agent cards come from the example catalogs baked into the image; mount your catalogs instead. |
@@ -163,7 +170,7 @@ none, so the defaults apply:
 | edge | `GOLEM_RATE_CALLER` | authenticated principal, every `/a2a` call | 60/min, burst 20 |
 | edge, MCP servers | `GOLEM_RATE_AUTH_FAILURES` | client address, failed authentications | 30/min, burst 10 |
 | ui | `GOLEM_RATE_LOGIN` | client address, `GET /login` | 30/min, burst 10 |
-| ui | `GOLEM_RATE_START` | session, `POST /tasks` | 10/min, burst 5 |
+| ui | `GOLEM_RATE_START` | session, starting a task or answering one (`POST /api/agents/{agent}/tasks`, `.../messages`) | 10/min, burst 5 |
 | jira-adapter | `GOLEM_RATE_WEBHOOK` | client address, the webhook | 300/min, burst 100 |
 | mattermost-adapter | `GOLEM_RATE_COMMAND` | client address, the slash command | 120/min, burst 60 |
 

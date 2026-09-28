@@ -14,6 +14,7 @@ resources:
   - mattermost-adapter.yaml
   - mcp-servers.yaml
   - ui.yaml
+  - board.yaml
   - network-policies-system.yaml
   - network-policies-jobs.yaml
 

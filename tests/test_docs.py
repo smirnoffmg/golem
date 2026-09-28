@@ -320,8 +320,13 @@ def test_the_example_overlay_leaves_no_placeholder() -> None:
 def test_new_runs_use_the_image_the_example_overlay_deploys() -> None:
     objects = render(EXAMPLE_OVERLAY)
     job_image = find(objects, "ConfigMap", "golem-tasks-env")["data"]["GOLEM_JOB_IMAGE"]
+    deployments = {d["metadata"]["name"]: d for d in objects if d["kind"] == "Deployment"}
+    # The board is not a process: it runs its own image, of the same release (ADR 0018).
+    board = deployments.pop("board")
 
-    assert {container(d)["image"] for d in objects if d["kind"] == "Deployment"} == {job_image}
+    assert {container(d)["image"] for d in deployments.values()} == {job_image}
+    name, _, tag = job_image.rpartition(":")
+    assert container(board)["image"] == f"{name}-board:{tag}"
 
 
 @pytest.mark.parametrize("name", SETTINGS)
