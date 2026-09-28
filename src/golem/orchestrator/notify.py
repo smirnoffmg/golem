@@ -6,6 +6,7 @@ from golem.orchestrator.reconcile import TaskOutcome
 
 OUTCOME_PATH = "/internal/run-outcome"
 PROPOSAL_STATE_PATH = "/internal/proposal-state"
+PROCESS_STATE_PATH = "/internal/process-state"
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,15 @@ class TaskServiceNotifier:
         try:
             response = await self.client.post(
                 PROPOSAL_STATE_PATH, json={"proposal_id": proposal_id}
+            )
+        except httpx.HTTPError:
+            return False
+        return response.status_code in (200, 404)
+
+    async def notify_process(self, process_run_id: str) -> bool:
+        try:
+            response = await self.client.post(
+                PROCESS_STATE_PATH, json={"process_run_id": process_run_id}
             )
         except httpx.HTTPError:
             return False

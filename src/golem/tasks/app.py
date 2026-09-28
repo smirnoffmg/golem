@@ -39,7 +39,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from golem.metrics import Instrumented, Metrics
 from golem.run_token import SigningKey, public_jwks
 from golem.tasks.executor import ANONYMOUS, PROPOSAL_METADATA, RUN_OUTCOME, RunExecutor
-from golem.tasks.ports import Orchestrator
+from golem.tasks.ports import NOT_FOUND, NOT_WAITING, Orchestrator
 
 RPC_PATH = "/a2a"
 # Each listener serves one kind of caller (ADR 0009): NetworkPolicy admits a caller to a port,
@@ -49,6 +49,13 @@ RPC_PATH = "/a2a"
 OUTCOME_PATH = "/internal/run-outcome"
 # Also the reconciler's: a proposal changed state, and its tasks show the state golem_runs holds.
 PROPOSAL_STATE_PATH = "/internal/proposal-state"
+# Also the reconciler's: a process moved, and its task shows where it stands (ADR 0019).
+PROCESS_STATE_PATH = "/internal/process-state"
+# The edge's port: a process's owner answers a process waiting for a reason (ADR 0019).
+RESOLUTION_PATH = "/processes/{task_id}/resolution"
+PROCESS_METADATA = "golemProcess"
+RESOLUTION_ACTIONS = frozenset({"rerun", "end"})
+MAX_REASON_CHARS = 4000
 # The MCP servers' port, read-only: platform MCP servers verify run tokens against these keys.
 RUN_KEYS_PATH = "/internal/run-keys"
 # Platform MCP servers ask whether a run is still running before serving its token: a canceled
@@ -162,18 +169,52 @@ def request_handler(
 
 
 def public_app(
-    card: AgentCard, handler: DefaultRequestHandler, edge_token: str, metrics: Metrics
+    card: AgentCard,
+    handler: DefaultRequestHandler,
+    edge_token: str,
+    metrics: Metrics,
+    orchestrator: Orchestrator | None = None,
 ) -> ASGIApp:
-    """The edge's port: the agent card and A2A, nothing internal."""
+    """The edge's port: the agent card, A2A, and a process owner's resolution, nothing
+    internal."""
 
     @asynccontextmanager
     async def lifespan(_: Starlette) -> AsyncIterator[None]:
         yield
         await handler.aclose()
 
+    async def resolution(request: Request) -> Response:
+        # The edge authenticated the caller and checked the body; the owner is checked here,
+        # against the task store, as for reading the task.
+        principal = request.headers.get(PRINCIPAL_HEADER, "")
+        body = await _json_object(request)
+        action = body.get("action") if body else None
+        reason = body.get("reason") if body else None
+        if action not in RESOLUTION_ACTIONS or (reason is not None and not isinstance(reason, str)):
+            return JSONResponse({"error": "malformed"}, status_code=400)
+        if action == "rerun" and not (
+            isinstance(reason, str) and 0 < len(reason) <= MAX_REASON_CHARS
+        ):
+            return JSONResponse({"error": "reason_required"}, status_code=400)
+        task_id = request.path_params["task_id"]
+        context = ServerCallContext(user=EdgePrincipal(principal))
+        if (
+            not principal
+            or orchestrator is None
+            or await handler.task_store.get(task_id, context) is None
+        ):
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        answer = await orchestrator.resolve_process(task_id, principal, str(action), reason)
+        if answer == NOT_FOUND:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        if answer == NOT_WAITING:
+            return JSONResponse({"error": "not_waiting"}, status_code=409)
+        return JSONResponse({"task_id": task_id, "action": action})
+
     app = Starlette(
         routes=create_agent_card_routes(card)
-        + create_jsonrpc_routes(handler, RPC_PATH, EdgeContextBuilder()),
+        + create_jsonrpc_routes(handler, RPC_PATH, EdgeContextBuilder())
+        + [Route(RESOLUTION_PATH, resolution, methods=["POST"])],
         lifespan=lifespan,
     )
     return Instrumented(
@@ -211,12 +252,17 @@ def user_of(caller: str) -> User:
     return UnauthenticatedUser() if caller == ANONYMOUS else EdgePrincipal(caller)
 
 
-async def named_in_body(request: Request, key: str) -> str | None:
+async def _json_object(request: Request) -> dict[str, Any] | None:
     try:
         body = await request.json()
     except ValueError:
-        body = None
-    value = body.get(key) if isinstance(body, dict) else None
+        return None
+    return body if isinstance(body, dict) else None
+
+
+async def named_in_body(request: Request, key: str) -> str | None:
+    body = await _json_object(request)
+    value = body.get(key) if body else None
     return value if isinstance(value, str) and value else None
 
 
@@ -294,10 +340,32 @@ def internal_write_app(
             await handler.task_store.save(task, context)
         return JSONResponse({"proposal_id": proposal_id})
 
+    async def process_state(request: Request) -> Response:
+        # As for proposals, the body only names the process; where it stands is golem_runs'.
+        process_run_id = await named_in_body(request, "process_run_id")
+        if process_run_id is None:
+            return JSONResponse({"error": "process_run_id is required"}, status_code=422)
+        record = await orchestrator.process(process_run_id)
+        if record is None:
+            return JSONResponse({"error": "process not found"}, status_code=404)
+        context = ServerCallContext(user=user_of(record.caller), tenant=record.agent)
+        shown: dict[str, Any] = {PROCESS_METADATA: dict(record.view)}
+        if record.view.get("proposal"):
+            # A client that knows only ADR 0015 still sees what waits.
+            shown[PROPOSAL_METADATA] = record.view["proposal"]
+        for task_id in record.task_ids:
+            task = await handler.task_store.get(task_id, context)
+            if task is None:
+                continue
+            task.metadata.update(shown)
+            await handler.task_store.save(task, context)
+        return JSONResponse({"process_run_id": process_run_id})
+
     app = Starlette(
         routes=[
             Route(OUTCOME_PATH, run_outcome, methods=["POST"]),
             Route(PROPOSAL_STATE_PATH, proposal_state, methods=["POST"]),
+            Route(PROCESS_STATE_PATH, process_state, methods=["POST"]),
         ]
     )
     return Instrumented(app, routes=app.routes, metrics=metrics)
@@ -325,7 +393,7 @@ def create_listeners(
     handler = request_handler(card, orchestrator, task_store, push)
     metrics = Metrics("tasks") if metrics is None else metrics
     return Listeners(
-        public=public_app(card, handler, edge_token, metrics),
+        public=public_app(card, handler, edge_token, metrics, orchestrator),
         internal_read=internal_read_app(orchestrator, run_keys, metrics),
         internal_write=internal_write_app(handler, orchestrator, metrics),
     )

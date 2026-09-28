@@ -11,6 +11,7 @@ from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface
 from prometheus_client import CollectorRegistry
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from golem.catalog import CatalogError, ProcessCatalog, load_catalogs
 from golem.metrics import Metrics, metrics_app, process_registry
 from golem.orchestrator.launchers import launcher_for
 from golem.orchestrator.reconciler import apply_schema_once
@@ -51,6 +52,17 @@ class TaskService:
     orchestrator: PostgresOrchestrator
 
 
+def pinned_processes(settings: TaskServiceSettings) -> dict[str, ProcessCatalog]:
+    """The processes of the pinned catalogs, checked with their stage agents as the edge checks
+    them; a task for one of them is a process (ADR 0019)."""
+    if settings.catalogs_dir is None:
+        return {}
+    try:
+        return dict(load_catalogs(settings.catalogs_dir).processes)
+    except (CatalogError, OSError) as error:
+        raise SettingsError(f"GOLEM_CATALOGS_DIR: {error}") from error
+
+
 def build_service(
     settings: TaskServiceSettings, registry: CollectorRegistry | None = None
 ) -> TaskService:
@@ -68,6 +80,7 @@ def build_service(
         signing_key=signing_key,
         grants=parse_agent_tools(settings.agent_tools_file.read_text()),
         metrics=metrics,
+        processes=pinned_processes(settings),
     )
     engine = tasks_engine(settings.tasks_db_url)
     push = (

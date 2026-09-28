@@ -302,6 +302,40 @@ def test_reconciler_settings() -> None:
     assert settings.kubernetes is Kubernetes.KUBECONFIG
 
 
+PROCESS_ENV = {
+    "GOLEM_EDGE_URL": "http://edge.golem-system:8000",
+    "GOLEM_RUN_TOKEN_KEY_FILE": "/etc/golem/run-token/key.pem",
+    "GOLEM_RUN_TOKEN_KID": "golem-1",
+}
+
+
+def test_the_reconciler_starts_process_stages_only_with_the_edge_and_the_key() -> None:
+    assert reconciler_settings(RECONCILER_ENV).stages is None
+
+    stages = reconciler_settings({**RECONCILER_ENV, **PROCESS_ENV}).stages
+
+    assert stages is not None
+    assert stages.edge_url == "http://edge.golem-system:8000"
+    assert stages.run_token_key_file == Path("/etc/golem/run-token/key.pem")
+    assert stages.run_token_kid == "golem-1"
+
+
+@pytest.mark.parametrize("missing", sorted(PROCESS_ENV))
+def test_the_process_settings_come_together_or_not_at_all(missing: str) -> None:
+    env = {**RECONCILER_ENV, **PROCESS_ENV}
+    del env[missing]
+
+    with pytest.raises(SettingsError, match=missing):
+        reconciler_settings(env)
+
+
+def test_the_task_service_knows_processes_only_from_a_catalogs_directory() -> None:
+    assert task_service_settings(TASKS_ENV).catalogs_dir is None
+    settings = task_service_settings({**TASKS_ENV, "GOLEM_CATALOGS_DIR": "/etc/golem/cards"})
+
+    assert settings.catalogs_dir == Path("/etc/golem/cards")
+
+
 def test_merge_requests_are_polled_every_five_minutes_unless_set() -> None:
     assert reconciler_settings(RECONCILER_ENV).mr_poll_seconds == 300
     assert (

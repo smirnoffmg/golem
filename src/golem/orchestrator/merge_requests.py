@@ -9,18 +9,32 @@ target record, read at the branch's head commit, is its report, and then the bra
 (ADR 0017).
 """
 
+import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from golem.orchestrator.proposals import OpenedMergeRequest, PendingMergeRequest, Transition
-from golem.orchestrator.reconcile import Settlement, SucceededRun, idle_detail
+from golem.orchestrator.reconcile import (
+    REPORTED,
+    Pushed,
+    Settlement,
+    SucceededRun,
+    idle_detail,
+    report_record,
+)
 
 BRANCH_PREFIX = "golem"
+# A comment the closer wrote up to this long after closing still explains the close.
+CLOSING_COMMENT_GRACE = timedelta(minutes=1)
+MAX_REASON_CHARS = 4000
+# The newest notes are enough: the closer's explanation is one of the last things said.
+NOTES_PER_PAGE = "50"
 
 
 class GitLabError(RuntimeError):
@@ -90,8 +104,23 @@ class GitLabMergeRequests:
         return await self._get(agent, f"merge_requests/{iid}", {})
 
     async def head_commit(self, agent: str, branch: str) -> str:
+        return str((await self._head(agent, branch))["id"])
+
+    async def head_message(self, agent: str, branch: str) -> str:
+        message = (await self._head(agent, branch)).get("message")
+        return message if isinstance(message, str) else ""
+
+    async def _head(self, agent: str, branch: str) -> Any:
         found = await self._get(agent, f"repository/branches/{quote(branch, safe='')}", {})
-        return str(found["commit"]["id"])
+        return found["commit"]
+
+    async def notes(self, agent: str, iid: int) -> Any:
+        params = {"sort": "desc", "order_by": "created_at", "per_page": NOTES_PER_PAGE}
+        return await self._get(agent, f"merge_requests/{iid}/notes", params)
+
+    async def close(self, agent: str, iid: int) -> None:
+        url = self._url(self._project(agent), f"merge_requests/{iid}")
+        await self._request("PUT", url, json={"state_event": "close"})
 
     async def raw_file(self, agent: str, path: str, commit: str) -> str:
         url = self._url(self._project(agent), f"repository/files/{quote(path, safe='')}/raw")
@@ -163,12 +192,76 @@ async def check_merge_request(
     return merge_request_transition(await gitlab.merge_request(pending.agent, pending.iid))
 
 
-async def has_proposal(gitlab: GitLabMergeRequests, run: SucceededRun) -> bool:
-    """Whether the run pushed its branch; raises GitLabError when GitLab cannot say."""
+async def pushed_branch(gitlab: GitLabMergeRequests, run: SucceededRun) -> Pushed | None:
+    """The run's branch, None when it pushed none; raises GitLabError when GitLab cannot say.
+
+    A goal run's head commit carries ``Outcome:`` and, when it reported, ``Record:`` trailers
+    (ADR 0017), so a run whose Job is gone is still told apart: a report, or a proposal.
+    """
     try:
-        return await gitlab.find_branch(run.agent, run.run_id) is not None
+        branch = await gitlab.find_branch(run.agent, run.run_id)
+        if branch is None:
+            return None
+        trailers = commit_trailers(await gitlab.head_message(run.agent, branch))
     except ProjectNotConfigured:
-        return False
+        return None
+    if trailers.get("Outcome") != REPORTED:
+        return Pushed()
+    report = json.dumps({"outcome": REPORTED, "record": trailers.get("Record")})
+    # The record is the branch's claim: a path outside the repository is no report at all.
+    return Pushed(report=report if report_record(report) is not None else None)
+
+
+def commit_trailers(message: str) -> dict[str, str]:
+    """``Key: value`` lines of the message's last paragraph."""
+    paragraphs = [p for p in message.strip().split("\n\n") if p.strip()]
+    if not paragraphs:
+        return {}
+    trailers: dict[str, str] = {}
+    for line in paragraphs[-1].splitlines():
+        key, sep, value = line.partition(": ")
+        if sep and key and " " not in key:
+            trailers[key] = value.strip()
+    return trailers
+
+
+async def closing_reason(gitlab: GitLabMergeRequests, agent: str, iid: int) -> str | None:
+    """Why a person closed a merge request, in their own words (ADR 0019): the newest comment
+    they wrote, not a system note, by a minute after closing; None when they wrote none."""
+    merge_request = await gitlab.merge_request(agent, iid)
+    closer = merge_request.get("closed_by")
+    closer = closer.get("username") if isinstance(closer, dict) else None
+    closed_at = _time(merge_request.get("closed_at"))
+    if merge_request.get("state") != "closed" or not closer or closed_at is None:
+        return None
+    for note in await gitlab.notes(agent, iid):
+        author = note.get("author")
+        created = _time(note.get("created_at"))
+        body = note.get("body")
+        if (
+            not note.get("system")
+            and isinstance(author, dict)
+            and author.get("username") == closer
+            and created is not None
+            and created <= closed_at + CLOSING_COMMENT_GRACE
+            and isinstance(body, str)
+            and body.strip()
+        ):
+            return body.strip()[:MAX_REASON_CHARS]
+    return None
+
+
+def _time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+async def close_merge_request(gitlab: GitLabMergeRequests, agent: str, iid: int) -> None:
+    await gitlab.close(agent, iid)
 
 
 async def propose_merge_request(gitlab: GitLabMergeRequests, run: SucceededRun) -> Settlement:

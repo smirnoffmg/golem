@@ -9,6 +9,12 @@ from psycopg import AsyncConnection
 
 from golem.metrics import ReconcilerMetrics
 from golem.orchestrator.jobs import JobLauncher, JobStatus
+from golem.orchestrator.process_runs import (
+    NotifyProcess,
+    ProcessPorts,
+    advance_processes,
+    deliver_views,
+)
 from golem.orchestrator.proposals import (
     MR_POLL_SECONDS,
     OpenedMergeRequest,
@@ -49,11 +55,20 @@ class Settlement:
     merge_request: OpenedMergeRequest | None = None
 
 
+@dataclass(frozen=True)
+class Pushed:
+    """A vanished run's branch: what survives of a run whose Job is gone."""
+
+    # The report its head commit carries, for a goal run that reported (ADR 0017); a goal
+    # run's report is otherwise lost with its Job, and a report is what tells the two apart.
+    report: str | None = None
+
+
 Notify = Callable[[TaskOutcome], Awaitable[bool]]
 # Raises when the proposal could not be made.
 Propose = Callable[[SucceededRun], Awaitable[Settlement]]
-# Whether the run pushed its proposal branch; raises when that cannot be known now.
-Proposed = Callable[[SucceededRun], Awaitable[bool]]
+# The run's pushed branch, None when it pushed none; raises when that cannot be known now.
+Proposed = Callable[[SucceededRun], Awaitable[Pushed | None]]
 # The decision GitLab holds for a pending merge request, None while there is none; raises when
 # GitLab cannot say.
 Check = Callable[[PendingMergeRequest], Awaitable[Transition | None]]
@@ -153,13 +168,16 @@ async def reconcile_once(
     notify_proposal: NotifyProposal | None = None,
     poll_seconds: float = MR_POLL_SECONDS,
     report: Reporter | None = None,
+    processes: ProcessPorts | None = None,
+    notify_process: NotifyProcess | None = None,
 ) -> None:
     """Move finished Jobs' runs to their final status, settle what succeeded runs propose,
-    deliver pending task outcomes, then follow open merge requests and deliver the changes."""
+    deliver pending task outcomes, then follow open merge requests and deliver the changes;
+    last, take each process a step on what its stage shows (ADR 0019)."""
     metrics = ReconcilerMetrics() if metrics is None else metrics
     cursor = await conn.execute(
         "SELECT id, agent, created_at < now() - make_interval(secs => %s) FROM runs"
-        " WHERE status = 'running'",
+        " WHERE status = 'running' AND kind = 'run'",
         (LAUNCH_GRACE_SECONDS,),
     )
     for run_id, agent, launched in await cursor.fetchall():
@@ -177,6 +195,14 @@ async def reconcile_once(
         await _check_merge_requests(conn, check, poll_seconds)
     if notify_proposal is not None:
         await _deliver_proposal_states(conn, notify_proposal)
+    if processes is not None:
+        await advance_processes(conn, processes, launcher)
+        # A process that ended, or a stage the platform withdrew, is told in this pass.
+        await _deliver(conn, notify)
+        if notify_proposal is not None:
+            await _deliver_proposal_states(conn, notify_proposal)
+    if notify_process is not None:
+        await deliver_views(conn, notify_process)
     await _count_pending(conn, metrics)
 
 
@@ -192,15 +218,22 @@ async def _reconcile_run(
     job: JobStatus | None = await asyncio.to_thread(launcher.status, run.run_id)
     if job is JobStatus.MISSING and not launched:
         return
+    report = None
     if job is JobStatus.MISSING and proposed is not None:
-        job = await _vanished(run, proposed)
+        try:
+            pushed = await proposed(run)
+        except Exception:
+            log.exception("could not tell whether vanished run %s pushed a branch", run.run_id)
+            return
+        # A finished Job is deleted by its TTL; a reconciler that was down longer finds it
+        # gone. The runtime pushes a branch only when it succeeded, so the branch is what
+        # survives, and its head commit what is left of the report.
+        if pushed is not None:
+            job, report = JobStatus.SUCCEEDED, pushed.report
+    elif job in FINAL_STATUS and job is not JobStatus.MISSING:
+        report = await asyncio.to_thread(launcher.termination_message, run.run_id)
     if job is None or job not in FINAL_STATUS:
         return
-    report = (
-        None
-        if job is JobStatus.MISSING
-        else await asyncio.to_thread(launcher.termination_message, run.run_id)
-    )
     outcome = run_outcome(job, report)
     ended = await _finish(
         conn,
@@ -212,16 +245,6 @@ async def _reconcile_run(
     )
     if ended is not None:
         metrics.runs.run_ended(ended.agent, outcome, ended.seconds)
-
-
-async def _vanished(run: SucceededRun, proposed: Proposed) -> JobStatus | None:
-    # A finished Job is deleted by its TTL; a reconciler that was down longer finds it gone.
-    # The runtime pushes a branch only when it succeeded, so the branch is what survives.
-    try:
-        return JobStatus.SUCCEEDED if await proposed(run) else JobStatus.MISSING
-    except Exception:
-        log.exception("could not tell whether vanished run %s pushed a branch", run.run_id)
-        return None
 
 
 async def _finish(

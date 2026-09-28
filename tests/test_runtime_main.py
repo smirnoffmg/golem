@@ -578,6 +578,11 @@ async def test_a_goal_run_opens_its_target_record_and_reports_without_a_proposal
     assert "Work the discovery backlog" in pushed
     assert "## Evidence" in pushed and "## Problem" in pushed
     assert EVIDENCE.strip() in pushed
+    # What survives of the report if the Job is gone before the reconciler reads it.
+    head = sh(
+        "log", "-1", "--format=%B", "golem/alert-0a1b2c3d4e5f/run-1", cwd=goal_remotes.context
+    )
+    assert head.rstrip().endswith("Outcome: reported\nRecord: hypotheses/alert-0a1b2c3d4e5f.md")
 
 
 async def test_a_goal_run_that_found_something_proposes(goal_remotes, tmp_path):
@@ -588,6 +593,10 @@ async def test_a_goal_run_that_found_something_proposes(goal_remotes, tmp_path):
         "golem/alert-0a1b2c3d4e5f/run-1",
     )
     assert remote_golem_branches(goal_remotes.context) == ["golem/alert-0a1b2c3d4e5f/run-1"]
+    head = sh(
+        "log", "-1", "--format=%B", "golem/alert-0a1b2c3d4e5f/run-1", cwd=goal_remotes.context
+    )
+    assert head.rstrip().endswith("Outcome: proposed")
 
 
 def push_record(remotes: Remotes, tmp_path: Path, relative: str, text: str) -> None:

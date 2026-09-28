@@ -1252,3 +1252,49 @@ async def test_every_edge_response_carries_the_security_headers(edge: httpx.Asyn
     for response in responses:
         assert_security_headers(response)
         assert response.headers["cache-control"] == "no-store"
+
+
+# A process owner's resolution (ADR 0019): audited before it is served, and fails closed.
+
+
+async def resolve(client: httpx.AsyncClient, body: Any, task_id: str = "t-1") -> httpx.Response:
+    return await client.post(
+        f"/processes/{task_id}/resolution",
+        json=body,
+        headers={"Authorization": "Bearer alice-token"},
+    )
+
+
+async def test_a_resolution_without_the_audit_log_is_refused_and_not_forwarded(
+    tasks: TaskService,
+) -> None:
+    async with edge_client(tasks, UNREACHABLE_DSN) as client:
+        response = await resolve(client, {"action": "end"})
+
+    assert response.status_code == 503
+    assert tasks.received == []
+
+
+async def test_a_malformed_resolution_is_refused_and_audited(
+    edge: httpx.AsyncClient, tasks: TaskService, audit_admin_dsn: str
+) -> None:
+    response = await resolve(edge, {"action": "restart"})
+
+    assert (response.status_code, response.json()["error"]) == (400, "malformed")
+    assert tasks.received == []
+    assert await audit_rows(audit_admin_dsn) == [
+        ("user:alice", "processes", "ResolveProcess", "deny: malformed", "10.0.0.7")
+    ]
+
+
+async def test_a_resolution_for_no_task_id_is_not_found(edge: httpx.AsyncClient) -> None:
+    response = await resolve(edge, {"action": "end"}, task_id="..%2F..")
+
+    assert response.status_code == 404
+
+
+async def test_a_resolution_needs_a_token(edge: httpx.AsyncClient, tasks: TaskService) -> None:
+    response = await edge.post("/processes/t-1/resolution", json={"action": "end"})
+
+    assert response.status_code == 401
+    assert tasks.received == []

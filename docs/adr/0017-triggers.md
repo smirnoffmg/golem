@@ -152,10 +152,13 @@ with and without a finding, so the evaluation measures both false alarms and mis
 - **A starter names the target in the message.** `golemTarget` in the message's metadata is
   the one hook: the Alertmanager adapter, the scheduler and a process stage
   ([ADR 0019](0019-processes.md)) each set it on their `SendMessage`.
-- **A vanished Job is not read as a report.** When a Job is gone before the reconciler saw it
-  (its TTL passed while the reconciler was down), the run is judged by its branch as before, so
-  a goal run that reported gets a merge request a person closes. Keeping the report's outcome
-  past the Job's TTL is left for later.
+- **A vanished Job's branch says what it was.** A goal run's last commit carries two more
+  trailers next to `Run`, `Role` and `Target`: `Outcome: reported` or `Outcome: proposed`, and
+  for a report `Record: <path>`. When a Job is gone before the reconciler saw it (its TTL passed
+  while the reconciler was down), the reconciler reads the branch's head commit
+  (`GET /repository/branches/:branch`, whose `commit` has the `message`): `Outcome: reported`
+  settles the run as a report of that record, anything else as before, a branch to propose.
+  The trailers are the run's claim like its report, and the record is checked the same way.
 
 ### The Alertmanager adapter
 

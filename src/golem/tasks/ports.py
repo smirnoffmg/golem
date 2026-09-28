@@ -1,5 +1,6 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,8 @@ class RunOutcome:
     proposal: ProposalView | None = None
     # A goal run that found nothing to propose: its target record, the task's `report`.
     report: str | None = None
+    # A stage of a canceled process, withdrawn by the platform (ADR 0019).
+    canceled: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,23 @@ class TaskRun:
     outcome: RunOutcome | None
 
 
+@dataclass(frozen=True)
+class ProcessRecord:
+    """What a process task shows of its process, as ``metadata.golemProcess`` (ADR 0019)."""
+
+    view: Mapping[str, Any]
+    # Who owns the process task and which process it addresses in the task store.
+    caller: str
+    agent: str
+    task_ids: tuple[str, ...]
+
+
+# How a process's owner resolved it while it waited for a reason (ADR 0019).
+RESOLVED = "resolved"
+NOT_WAITING = "not_waiting"
+NOT_FOUND = "not_found"
+
+
 class Orchestrator(Protocol):
     async def start(self, run: RunStart) -> Started | Refused: ...
 
@@ -86,3 +106,9 @@ class Orchestrator(Protocol):
     async def proposal(self, proposal_id: str) -> ProposalRecord | None: ...
 
     async def agents_of_tasks(self, task_ids: tuple[str, ...]) -> dict[str, str]: ...
+
+    async def process(self, process_run_id: str) -> ProcessRecord | None: ...
+
+    async def resolve_process(
+        self, task_id: str, caller: str, action: str, reason: str | None
+    ) -> str: ...

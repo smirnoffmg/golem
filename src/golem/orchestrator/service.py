@@ -10,9 +10,11 @@ from psycopg import AsyncConnection
 
 from golem import call_token
 from golem.call_token import CallClaims
+from golem.catalog import ProcessCatalog
 from golem.metrics import Metrics
 from golem.orchestrator.admission import Limits, Rejected
 from golem.orchestrator.jobs import CatalogRef, JobLauncher, JobSpec
+from golem.orchestrator.process_runs import process_record, resolve_process
 from golem.orchestrator.proposals import proposal_record
 from golem.orchestrator.runs import (
     RunCreated,
@@ -23,10 +25,19 @@ from golem.orchestrator.runs import (
     fail_run,
     run_of_task,
     run_status,
+    start_process,
     start_run,
 )
 from golem.run_token import RunClaims, SigningKey, issue
-from golem.tasks.ports import ProposalRecord, Refused, RunOutcome, RunStart, Started, TaskRun
+from golem.tasks.ports import (
+    ProcessRecord,
+    ProposalRecord,
+    Refused,
+    RunOutcome,
+    RunStart,
+    Started,
+    TaskRun,
+)
 
 # The token outlives the Job's deadline by this much, so a call made in the run's last second
 # is not refused on clock skew between the orchestrator and an MCP server.
@@ -128,8 +139,13 @@ class PostgresOrchestrator:
     grants: Mapping[str, tuple[str, ...]]
     clock: Callable[[], float] = field(default=time.time)
     metrics: Metrics = field(default_factory=lambda: Metrics("tasks"))
+    # The pinned processes (ADR 0019): a task for one of them is a process, not a run.
+    processes: Mapping[str, ProcessCatalog] = field(default_factory=dict)
 
     async def start(self, run: RunStart) -> Started | Refused:
+        process = self.processes.get(run.agent)
+        if process is not None:
+            return await self._start_process(run, process)
         catalog = self.catalogs.get(run.agent)
         if catalog is None:
             self.metrics.admission_rejected(UNKNOWN_AGENT)
@@ -183,6 +199,27 @@ class PostgresOrchestrator:
                 await self._delete_job(outcome.run_id)
         return Started(run_id=outcome.run_id)
 
+    async def _start_process(self, run: RunStart, process: ProcessCatalog) -> Started | Refused:
+        if run.chain:
+            # A process is where a chain starts, never a step of one.
+            return Refused(reason=f"Process {run.agent!r} is started by a person, not an agent.")
+        request = StartRequest(
+            caller=run.caller,
+            message_id=run.message_id,
+            task_id=run.task_id,
+            agent=run.agent,
+            estimated_cost=Decimal(0),
+        )
+        async with await AsyncConnection.connect(
+            self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        ) as conn:
+            outcome = await start_process(conn, request, process.model_dump(mode="json"), run.goal)
+        if isinstance(outcome, RunReused) and outcome.status != "running":
+            return Refused(
+                reason=f"Process run {outcome.run_id} for this message is already {outcome.status}."
+            )
+        return Started(run_id=outcome.run_id)
+
     async def _delete_job(self, run_id: str) -> None:
         try:
             await asyncio.to_thread(self.launcher.delete, run_id)
@@ -210,6 +247,7 @@ class PostgresOrchestrator:
                 detail=run.detail or f"Run {run.run_id} {run.status}.",
                 proposal=run.proposal,
                 report=run.report,
+                canceled=run.withdrawn,
             )
         return TaskRun(run.run_id, run.caller, run.agent, outcome)
 
@@ -218,6 +256,20 @@ class PostgresOrchestrator:
             self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
         ) as conn:
             return await proposal_record(conn, proposal_id)
+
+    async def process(self, process_run_id: str) -> ProcessRecord | None:
+        async with await AsyncConnection.connect(
+            self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        ) as conn:
+            return await process_record(conn, process_run_id)
+
+    async def resolve_process(
+        self, task_id: str, caller: str, action: str, reason: str | None
+    ) -> str:
+        async with await AsyncConnection.connect(
+            self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        ) as conn:
+            return await resolve_process(conn, task_id, caller, action, reason)
 
     async def agents_of_tasks(self, task_ids: tuple[str, ...]) -> dict[str, str]:
         async with await AsyncConnection.connect(
@@ -230,7 +282,8 @@ class PostgresOrchestrator:
             self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
         ) as conn:
             ended = await cancel_run_of_task(conn, task_id)
-        if ended is not None:
+        # A process has no Job; the reconciler withdraws its current stage (ADR 0019).
+        if ended is not None and ended.agent not in self.processes:
             self.metrics.run_ended(ended.agent, "canceled", ended.seconds)
             await self._delete_job(ended.run_id)
 

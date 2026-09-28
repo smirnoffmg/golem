@@ -273,13 +273,15 @@ async def propose(
         violations = unbuilt_kind(catalog)
     if violations:
         return replace(report, outcome=Outcome.INVALID, reasons=violations, summary=result.summary)
-    commit_all(repo, commit_message(settings.run_id, command, result.summary), env)
-    push_branch(repo, branch, env)
-    done = replace(report, branch=branch, summary=result.summary)
+    outcome, record = Outcome.PROPOSED, None
     if brief.goal_mode and not result.proposed:
-        record = brief.target_path.relative_to(repo).as_posix()
-        return replace(done, outcome=Outcome.REPORTED, record=record)
-    return replace(done, outcome=Outcome.PROPOSED)
+        outcome, record = Outcome.REPORTED, brief.target_path.relative_to(repo).as_posix()
+    # A goal run's outcome goes on its branch too: if its Job is gone before the reconciler
+    # reads the report, the branch is all that says whether it reported or proposed.
+    trailers = {"Outcome": outcome.value, "Record": record} if brief.goal_mode else {}
+    commit_all(repo, commit_message(settings.run_id, command, result.summary, trailers), env)
+    push_branch(repo, branch, env)
+    return replace(report, branch=branch, summary=result.summary, outcome=outcome, record=record)
 
 
 def unbuilt_kind(catalog: AgentCatalog) -> tuple[str, ...]:
@@ -290,9 +292,12 @@ def unbuilt_kind(catalog: AgentCatalog) -> tuple[str, ...]:
     return (f"proposals of kind {catalog.proposal!r} are not built yet; only merge_request is",)
 
 
-def commit_message(run_id: str, command: Command, summary: str) -> str:
+def commit_message(
+    run_id: str, command: Command, summary: str, extra: Mapping[str, str | None] | None = None
+) -> str:
     subject = f"golem: {command.role} on {command.target_id}"
     trailer = f"Run: {run_id}\nRole: {command.role}\nTarget: {command.target_id}\n"
+    trailer += "".join(f"{key}: {value}\n" for key, value in (extra or {}).items() if value)
     return "\n\n".join(part for part in (subject, summary.strip(), trailer) if part)
 
 

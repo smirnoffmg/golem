@@ -109,6 +109,21 @@ class TaskServiceSettings:
     push_config_key: str | None = field(default=None, repr=False)
     # Scraped from the monitoring namespace only; no caller of the service reaches it (ADR 0013).
     metrics_port: int = DEFAULT_METRICS_PORT
+    # The pinned catalogs the processes come from (ADR 0019), as the edge's; None: no processes.
+    catalogs_dir: Path | None = None
+
+
+@dataclass(frozen=True)
+class StageSettings:
+    """How the reconciler starts processes' stages (ADR 0019): through the edge, with call
+    tokens signed by the orchestrator's run-token key."""
+
+    edge_url: str
+    run_token_key_file: Path
+    run_token_kid: str
+
+
+PROCESS_STAGE_VARIABLES = ("GOLEM_EDGE_URL", "GOLEM_RUN_TOKEN_KEY_FILE", "GOLEM_RUN_TOKEN_KID")
 
 
 @dataclass(frozen=True)
@@ -123,6 +138,8 @@ class ReconcilerSettings:
     kubernetes: Kubernetes
     metrics_port: int = DEFAULT_METRICS_PORT
     mr_poll_seconds: float = MR_POLL_SECONDS
+    # None: processes are not run, their stages never start.
+    stages: StageSettings | None = None
 
 
 def edge_settings(env: Env) -> EdgeSettings:
@@ -285,6 +302,7 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
         push_allowed_prefixes=_push_prefixes(env),
         push_config_key=_push_config_key(env),
         metrics_port=metrics_port,
+        catalogs_dir=_optional_path(env, "GOLEM_CATALOGS_DIR"),
     )
 
 
@@ -322,7 +340,25 @@ def reconciler_settings(env: Env) -> ReconcilerSettings:
         kubernetes=_kubernetes(v),
         metrics_port=metrics_port_setting(env),
         mr_poll_seconds=mr_poll_seconds,
+        stages=_stage_settings(env),
     )
+
+
+def _stage_settings(env: Env) -> StageSettings | None:
+    given = [name for name in PROCESS_STAGE_VARIABLES if env.get(name, "").strip()]
+    if not given:
+        return None
+    v = _values(env, *PROCESS_STAGE_VARIABLES)
+    return StageSettings(
+        edge_url=_base_url(v, "GOLEM_EDGE_URL"),
+        run_token_key_file=Path(v["GOLEM_RUN_TOKEN_KEY_FILE"]),
+        run_token_kid=v["GOLEM_RUN_TOKEN_KID"],
+    )
+
+
+def _optional_path(env: Env, name: str) -> Path | None:
+    value = env.get(name, "").strip()
+    return Path(value) if value else None
 
 
 def parse_registry(text: str) -> Registry:

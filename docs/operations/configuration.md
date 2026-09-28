@@ -87,15 +87,16 @@ A2A tasks, run admission, Job launch, run tokens. Three listeners, one per kind 
 | `GOLEM_PUSH_ALLOWED_PREFIXES` | none: push notifications off | comma-separated URL prefixes, each ending with `/`, a push may go to (the adapters' Services) |
 | `GOLEM_PUSH_CONFIG_KEY` | required with `GOLEM_PUSH_ALLOWED_PREFIXES` | Fernet key that encrypts push configs (they hold the adapters' push tokens) in `golem_tasks` |
 | `GOLEM_MCP_REGISTRY_CONFIGMAP` | none | a ConfigMap in the Jobs namespace mounted into every run as the [MCP registry](#mcp-registry) |
-| `GOLEM_PORT` | `8000` | `a2a`: agent card and `/a2a`, for the edge |
+| `GOLEM_CATALOGS_DIR` | none: no processes | the edge's directory of pinned catalogs; a task for one of its `process.yaml` is a process, not a run ([ADR 0019](../adr/0019-processes.md)), checked with its stage agents at start |
+| `GOLEM_PORT` | `8000` | `a2a`: agent card, `/a2a` and `/processes/{task}/resolution`, for the edge |
 | `GOLEM_INTERNAL_READ_PORT` | `8001` | `internal-read`: `/internal/run-keys`, `/internal/runs/{run_id}`, for the MCP servers |
-| `GOLEM_INTERNAL_WRITE_PORT` | `8002` | `internal-write`: `/internal/run-outcome`, for the reconciler |
+| `GOLEM_INTERNAL_WRITE_PORT` | `8002` | `internal-write`: `/internal/run-outcome`, `/internal/proposal-state` and `/internal/process-state`, for the reconciler |
 | `GOLEM_METRICS_PORT` | `9090` | metrics |
 
 ### Reconciler: `python -m golem.orchestrator.reconciler`
 
 Every interval: finished Jobs to run outcomes, merge requests for succeeded runs, outcomes to
-the task service.
+the task service, and a step for every process, whose stages it starts through the edge.
 
 <!-- settings: reconciler -->
 | Setting | Required or default | Meaning |
@@ -109,6 +110,9 @@ the task service.
 | `GOLEM_KUBERNETES_NAMESPACE` | required | the Jobs namespace |
 | `GOLEM_KUBERNETES` | required | as for the task service |
 | `GOLEM_MR_POLL_SECONDS` | `300` | how often one open merge request is read back from GitLab for its proposal's state; at most 50 per pass (positive number) |
+| `GOLEM_EDGE_URL` | none: processes' stages never start | the edge's a2a port (`http://edge.golem-system.svc:8000`), where stages start as calls of their process ([ADR 0019](../adr/0019-processes.md)); needs the two below |
+| `GOLEM_RUN_TOKEN_KEY_FILE` | required with `GOLEM_EDGE_URL` | the task service's run token key: stages' call tokens are signed with it |
+| `GOLEM_RUN_TOKEN_KID` | required with `GOLEM_EDGE_URL` | its key id, the task service's |
 | `GOLEM_METRICS_PORT` | `9090` | metrics, its only listener |
 
 ### Jira adapter: `python -m golem.adapters jira`
@@ -254,7 +258,7 @@ process only when its pod restarts.
 | --- | --- | --- | --- |
 | golem-system | `golem-edge` | `GOLEM_AUDIT_DSN` (role `golem_edge`), `GOLEM_EDGE_TOKEN` | edge |
 | golem-system | `golem-tasks` | `GOLEM_RUNS_DSN`, `GOLEM_TASKS_DB_URL`, `GOLEM_PUSH_CONFIG_KEY`, `GOLEM_EDGE_TOKEN` | task service |
-| golem-system | `golem-run-token-key` | `key.pem`, mounted at `/var/run/golem/run-token/` | task service |
+| golem-system | `golem-run-token-key` | `key.pem`, mounted at `/var/run/golem/run-token/` | task service, reconciler |
 | golem-system | `golem-card-signing-key` | `key.pem`, mounted at `/var/run/golem/card-signing/` | edge |
 | golem-system | `golem-reconciler` | `GOLEM_RUNS_DSN`, `GOLEM_GITLAB_TOKEN` | reconciler |
 | golem-system | `golem-jira-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_JIRA_TOKEN`, `GOLEM_JIRA_WEBHOOK_SECRET`, `GOLEM_PUSH_TOKEN_SECRET` | Jira adapter |

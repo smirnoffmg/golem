@@ -8,6 +8,8 @@ https://docs.gitlab.com/api/merge_requests/#get-single-mr
 https://docs.gitlab.com/api/branches/#get-single-repository-branch
 https://docs.gitlab.com/api/branches/#delete-repository-branch
 https://docs.gitlab.com/api/repository_files/#get-raw-file-from-repository
+https://docs.gitlab.com/api/notes/#list-all-merge-request-notes
+https://docs.gitlab.com/api/merge_requests/#update-mr
 """
 
 import json
@@ -25,14 +27,17 @@ from golem.orchestrator.merge_requests import (
     GitLabError,
     GitLabMergeRequests,
     GitLabProject,
+    close_merge_request,
+    closing_reason,
     discard_branch,
-    has_proposal,
     propose_merge_request,
+    pushed_branch,
     read_report,
     run_branch,
 )
 from golem.orchestrator.reconcile import (
     LAUNCH_GRACE_SECONDS,
+    Pushed,
     Reporter,
     Settlement,
     SucceededRun,
@@ -54,6 +59,10 @@ class FakeGitLab:
     down: bool = False
     # Merge requests GitLab fails to read (a 500), while it answers for the others.
     broken: set[int] = field(default_factory=set)
+    # iid -> the merge request's notes, oldest first.
+    notes: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    # branch -> its head commit's message.
+    messages: dict[str, str] = field(default_factory=dict)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -69,8 +78,12 @@ class FakeGitLab:
             return httpx.Response(200, json=self._merge_requests(request.url.params))
         if path == f"{prefix}/merge_requests" and request.method == "POST":
             return self._create(json.loads(request.content))
+        if path.startswith(f"{prefix}/merge_requests/") and path.endswith("/notes"):
+            return self._notes(int(path.split("/")[-2]), request.url.params)
         if path.startswith(f"{prefix}/merge_requests/") and request.method == "GET":
             return self._single(int(path.rsplit("/", 1)[1]))
+        if path.startswith(f"{prefix}/merge_requests/") and request.method == "PUT":
+            return self._update(int(path.rsplit("/", 1)[1]), json.loads(request.content))
         if path.startswith(f"{prefix}/repository/branches/"):
             return self._branch(request.method, unquote(path.rsplit("/", 1)[1]))
         if path.startswith(f"{prefix}/repository/files/") and path.endswith("/raw"):
@@ -87,7 +100,8 @@ class FakeGitLab:
         if method == "DELETE":
             self.branches.remove(name)
             return httpx.Response(204)
-        return httpx.Response(200, json={"name": name, "commit": {"id": f"sha-{name}"}})
+        commit = {"id": f"sha-{name}", "message": self.messages.get(name, "golem: a change\n")}
+        return httpx.Response(200, json={"name": name, "commit": commit})
 
     def _branches(self, search: str) -> list[dict[str, Any]]:
         begins, ends = search.startswith("^"), search.endswith("$")
@@ -118,6 +132,22 @@ class FakeGitLab:
             return httpx.Response(500, json={"message": "500 Internal Server Error"})
         for mr in self.merge_requests:
             if mr["iid"] == iid:
+                return httpx.Response(200, json=mr)
+        return httpx.Response(404, json={"message": "404 Not found"})
+
+    def _notes(self, iid: int, params: httpx.QueryParams) -> httpx.Response:
+        notes = sorted(
+            self.notes.get(iid, []),
+            key=lambda note: note[params.get("order_by", "created_at")],
+            reverse=params.get("sort", "desc") == "desc",
+        )
+        return httpx.Response(200, json=notes[: int(params.get("per_page", "20"))])
+
+    def _update(self, iid: int, body: dict[str, Any]) -> httpx.Response:
+        for mr in self.merge_requests:
+            if mr["iid"] == iid:
+                if body.get("state_event") == "close" and mr["state"] == "opened":
+                    mr.update(state="closed", closed_by={"username": "golem"})
                 return httpx.Response(200, json=mr)
         return httpx.Response(404, json={"message": "404 Not found"})
 
@@ -286,8 +316,8 @@ async def reconcile(dsn: str, board: StatusBoard, inbox: Inbox, gitlab: GitLabMe
     async def propose(run: SucceededRun) -> Settlement:
         return await propose_merge_request(gitlab, run)
 
-    async def proposed(run: SucceededRun) -> bool:
-        return await has_proposal(gitlab, run)
+    async def proposed(run: SucceededRun) -> Pushed | None:
+        return await pushed_branch(gitlab, run)
 
     async with await connect(dsn) as conn:
         await reconcile_once(conn, board, inbox.notify, propose, proposed=proposed)
@@ -350,7 +380,143 @@ async def test_a_job_gone_while_gitlab_is_down_stays_running_until_gitlab_answer
 async def test_an_agent_without_a_project_has_no_proposal(
     merge_requests: GitLabMergeRequests,
 ) -> None:
-    assert not await has_proposal(merge_requests, SucceededRun("run-1", "unconfigured"))
+    assert await pushed_branch(merge_requests, SucceededRun("run-1", "unconfigured")) is None
+
+
+# A goal run's report is lost with its Job; its branch's head commit says what it was.
+
+
+def goal_commit(outcome: str, record: str | None = None) -> str:
+    trailers = f"Run: r\nRole: investigator\nTarget: t-1\nOutcome: {outcome}\n"
+    return f"golem: investigator on t-1\n\nFound it.\n\n{trailers}" + (
+        f"Record: {record}\n" if record else ""
+    )
+
+
+async def test_a_vanished_goal_run_that_reported_is_reported_not_proposed(
+    runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    board, inbox = StatusBoard(), Inbox()
+    run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
+    branch = f"golem/t-1/{run_id}"
+    gitlab.branches = [branch]
+    gitlab.messages[branch] = goal_commit("reported", "findings/t-1.md")
+    board.statuses[run_id] = JobStatus.MISSING
+
+    await reconcile(runs_db, board, inbox, merge_requests)
+
+    assert gitlab.merge_requests == []
+    async with await connect(runs_db) as conn:
+        row = await (
+            await conn.execute("SELECT status, outcome, record FROM runs WHERE id = %s", (run_id,))
+        ).fetchone()
+    assert row == ("succeeded", "reported", "findings/t-1.md")
+
+
+async def test_a_vanished_goal_run_that_proposed_gets_its_merge_request(
+    runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    board, inbox = StatusBoard(), Inbox()
+    run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
+    branch = f"golem/t-1/{run_id}"
+    gitlab.branches = [branch]
+    gitlab.messages[branch] = goal_commit("proposed")
+    board.statuses[run_id] = JobStatus.MISSING
+
+    await reconcile(runs_db, board, inbox, merge_requests)
+
+    [mr] = gitlab.merge_requests
+    assert mr["source_branch"] == branch
+
+
+async def test_a_vanished_run_claiming_a_record_outside_the_repository_is_not_trusted(
+    merge_requests: GitLabMergeRequests, gitlab: FakeGitLab
+) -> None:
+    gitlab.branches = ["golem/t-1/run-1"]
+    gitlab.messages["golem/t-1/run-1"] = goal_commit("reported", "../../etc/passwd.md")
+
+    pushed = await pushed_branch(merge_requests, SucceededRun("run-1", "discovery"))
+
+    assert pushed == Pushed(report=None)
+
+
+# A merge request closed without a word: the reason is the closer's own comment (ADR 0019).
+
+
+def closed(iid: int = 1, closer: str = "bob", at: str = "2026-09-28T10:00:00Z") -> dict[str, Any]:
+    return {
+        "iid": iid,
+        "state": "closed",
+        "closed_by": {"username": closer},
+        "closed_at": at,
+        "source_branch": "golem/t/r",
+        "web_url": f"https://gitlab.example.test/{PROJECT}/-/merge_requests/{iid}",
+    }
+
+
+def note(author: str, at: str, body: str, system: bool = False) -> dict[str, Any]:
+    return {"author": {"username": author}, "created_at": at, "body": body, "system": system}
+
+
+async def test_the_reason_is_the_closers_newest_comment_by_the_time_of_closing(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    gitlab.merge_requests = [closed()]
+    gitlab.notes[1] = [
+        note("bob", "2026-09-28T09:50:00Z", "First thought."),
+        note("carol", "2026-09-28T09:59:00Z", "Not the closer."),
+        note("bob", "2026-09-28T09:59:30Z", "The design ignores the topic contract."),
+        note("bob", "2026-09-28T10:00:00Z", "closed", system=True),
+        note("bob", "2026-09-28T10:05:00Z", "Much later."),
+    ]
+
+    reason = await closing_reason(merge_requests, "discovery", 1)
+
+    assert reason == "The design ignores the topic contract."
+    [asked] = [r for r in gitlab.requests if r.url.path.endswith("/notes")]
+    assert (asked.url.params["sort"], asked.url.params["order_by"]) == ("desc", "created_at")
+
+
+async def test_a_comment_within_a_minute_after_closing_counts(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    gitlab.merge_requests = [closed()]
+    gitlab.notes[1] = [note("bob", "2026-09-28T10:00:45Z", "Wrong approach.")]
+
+    assert await closing_reason(merge_requests, "discovery", 1) == "Wrong approach."
+
+
+async def test_no_comment_by_the_closer_means_no_reason(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    gitlab.merge_requests = [closed()]
+    gitlab.notes[1] = [note("carol", "2026-09-28T09:59:00Z", "Someone else's word.")]
+
+    assert await closing_reason(merge_requests, "discovery", 1) is None
+
+
+async def test_a_reason_is_cut_at_4000_characters(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    gitlab.merge_requests = [closed()]
+    gitlab.notes[1] = [note("bob", "2026-09-28T09:59:00Z", "x" * 5000)]
+
+    assert await closing_reason(merge_requests, "discovery", 1) == "x" * 4000
+
+
+async def test_closing_a_merge_request_sets_its_state_event(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    await merge_requests.open("discovery", "run-1", "golem/H-7/run-1", "t", "d")
+
+    await close_merge_request(merge_requests, "discovery", 1)
+
+    [mr] = gitlab.merge_requests
+    assert mr["state"] == "closed"
+    [put] = [r for r in gitlab.requests if r.method == "PUT"]
+    assert json.loads(put.content) == {"state_event": "close"}
 
 
 async def test_a_succeeded_run_notifies_its_task_with_the_merge_request_url(

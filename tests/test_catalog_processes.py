@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 from pydantic import ValidationError
+from test_settings import TASKS_ENV
 
 from golem.catalog import (
     DELEGATE_GROUP,
@@ -15,6 +16,8 @@ from golem.catalog import (
     load_catalogs,
     render_goal,
 )
+from golem.settings import SettingsError, task_service_settings
+from golem.tasks.__main__ import pinned_processes
 
 CONTEXT = {"url": "https://git.example.com/corsar/context.git", "branch": "main"}
 KINDS = [{"name": "change", "initial": "open", "statuses": ["open", "done"]}]
@@ -252,3 +255,29 @@ def test_the_example_catalogs_load():
     catalogs = load_catalogs(Path(__file__).parents[1] / "examples")
 
     assert "discovery" in catalogs.agents
+
+
+# The task service knows the pinned processes as the edge does (ADR 0019).
+
+
+def write_catalog(root: Path, name: str, file: str, catalog: dict[str, object]) -> None:
+    (root / name).mkdir()
+    (root / name / file).write_text(yaml.safe_dump(catalog))
+
+
+def test_the_task_service_pins_the_processes_of_its_catalogs_directory(tmp_path: Path) -> None:
+    write_catalog(tmp_path, "analyst", "agent.yaml", goal_agent("analyst"))
+    write_catalog(tmp_path, "designer", "agent.yaml", goal_agent("designer"))
+    write_catalog(tmp_path, "corsar-feature", "process.yaml", process())
+    settings = task_service_settings({**TASKS_ENV, "GOLEM_CATALOGS_DIR": str(tmp_path)})
+
+    assert list(pinned_processes(settings)) == ["corsar-feature"]
+    assert pinned_processes(task_service_settings(TASKS_ENV)) == {}
+
+
+def test_the_task_service_refuses_a_process_its_stage_agents_cannot_run(tmp_path: Path) -> None:
+    write_catalog(tmp_path, "corsar-feature", "process.yaml", process())
+    settings = task_service_settings({**TASKS_ENV, "GOLEM_CATALOGS_DIR": str(tmp_path)})
+
+    with pytest.raises(SettingsError, match="GOLEM_CATALOGS_DIR"):
+        pinned_processes(settings)

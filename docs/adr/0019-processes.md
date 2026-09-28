@@ -298,6 +298,53 @@ loader's checks above are what a process's merge request must pass.
   as its transport and a placeholder call token, since no edge checks it.
 - **A stage agent names its proposal kind explicitly.** `proposal` defaults to
   `merge_request` for today's catalogs; the loader's check reads whether the catalog wrote it.
+- **One `process_stages` row per process, not per stage.** It holds where the process stands:
+  the current stage, its attempt, its stale reruns, its run and task, the last rejection. The
+  stages already run are the runs under the process run as their root. The row also pins the
+  process file as it was at the start (`definition`) and the person's message (`input`), so a
+  process that takes days runs the stages it started with, and the reconciler needs no catalog.
+- **The task service reads processes from `GOLEM_CATALOGS_DIR`,** the edge's directory of
+  pinned catalogs, not from `GOLEM_CATALOGS_FILE`: that file holds only git references for the
+  Jobs to clone, and a process has no Job. Unset, the task service knows no process.
+- **The message id counts stale reruns too:** `process-<process run id>-<stage index>-<attempt>-<stale
+  reruns>`. A stale rerun keeps its attempt, and with the ADR's id it would reach the run that
+  went stale instead of starting a new one. The reconciler finds a stage's run by that id and
+  the owner, the run's caller, before it sends anything, so a pass that dies after sending
+  adopts the run instead of starting another.
+- **Refused or unavailable.** A stage the edge refuses (the registry, a malformed call) or
+  admission rejects (the task comes back `REJECTED`, with the reason in its status) fails the
+  process with that reason, as the table says for a refused run. An edge that does not answer,
+  answers 429 or 5xx, or answers without a task is tried again on the next pass with the same
+  message id.
+- **A withdrawn stage run is told to its task.** Canceling the process cancels the current
+  stage's run with `outcome` `withdrawn` and deletes its Job; the outbox delivers `withdrawn`
+  like a final outcome, and the stage's task ends `canceled`, since nobody canceled it through
+  A2A.
+- **The reason of a rejection that is not a merge request** is the proposal row's `detail`,
+  where the decision route of [ADR 0015](0015-proposals.md) will put it; a merge request's is the
+  closer's comment as above.
+- **The process's task learns through an outbox of its own.** `process_stages.view` is the
+  `golemProcess` its task should show, recomputed every pass; `notified_view` is what the task
+  service was last told. The reconciler posts the process run's id to
+  `/internal/process-state` on the task service's internal-write port until the two match,
+  and the task service reads the view from `golem_runs`, as for proposal states. A process that
+  ended shows `state` `completed`, `failed` (with `reason`) or `canceled`.
+- **The resolution route** takes a body of at most 16 KiB. The edge checks it before the audit
+  row (a bad one is audited as `deny: malformed` or `deny: reason_required`), audits the task
+  and the action but never the reason, a person's free text, and forwards it to the task
+  service's a2a port with the principal. The task service checks the body again, the owner
+  through its task store, and makes the compare-and-set.
+- **The reconciler starts stages only when configured.** `GOLEM_EDGE_URL`,
+  `GOLEM_RUN_TOKEN_KEY_FILE` and `GOLEM_RUN_TOKEN_KID` come together or not at all; without them
+  it runs no process. The reconciler's NetworkPolicy gains egress to the edge's port 8000 and
+  the edge's ingress admits it. In compose the two processes share the dev run token key through
+  a volume.
+- **A process is started by a person or a service,** never by an agent: a delegated call to a
+  process is refused. Process runs are not in the run metrics.
+- **No example process yet.** Pinning one in `examples/` would, by the rule above, forbid people
+  the `discovery` agent that compose, the demo and the board's end-to-end tests start directly,
+  and a process needs goal agents with a shared context repository that the examples do not
+  have. `tests/test_process_runs.py` runs a three-stage process end to end instead.
 
 ## Consequences
 

@@ -72,7 +72,9 @@ async def reject(updater: TaskUpdater, reason: str) -> None:
 
 async def finish(updater: TaskUpdater, outcome: RunOutcome) -> None:
     message = updater.new_agent_message([new_text_part(outcome.detail)])
-    if outcome.succeeded:
+    if outcome.canceled:
+        await updater.cancel(message)
+    elif outcome.succeeded:
         # Merged into the task's metadata by the SDK's TaskManager, as runId is.
         metadata: dict[str, Any] | None = (
             {PROPOSAL_METADATA: asdict(outcome.proposal)} if outcome.proposal else None
