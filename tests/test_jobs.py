@@ -23,6 +23,8 @@ from golem.orchestrator.jobs import (
     job_status_of,
     token_secret_name,
 )
+from golem.orchestrator.service import JobTemplate, job_spec_for
+from golem.tasks.ports import RunStart
 
 RUN_ID = "3f2b8c1e-8d4a-4c3e-9a57-0b7f2d6e1a90"
 RUN_TOKEN = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJydW4ifQ.c2lnbmF0dXJl"
@@ -163,6 +165,38 @@ def test_run_parameters_are_passed_as_environment() -> None:
         "GOLEM_CATALOG_REF": "https://git.example/team-a/catalog.git#a1b2c3d",
         "GOLEM_GOAL": "Fix the flaky test in payments.",
     }
+
+
+def test_a_goal_runs_target_is_passed_as_environment() -> None:
+    env = env_of(build_job_manifest(spec(target="alert-0a1b2c3d4e5f")))
+
+    assert env["GOLEM_TARGET"] == "alert-0a1b2c3d4e5f"
+
+
+def test_the_target_the_starter_named_reaches_the_job_spec() -> None:
+    run = RunStart(
+        task_id="t-1",
+        context_id="c-1",
+        agent="reviewer",
+        goal="disk usage alert",
+        caller="service:alertmanager",
+        message_id="m-1",
+        target="alert-0a1b2c3d4e5f",
+    )
+    template = JobTemplate(
+        image="registry.example/golem:1.0",
+        namespace="team-a-jobs",
+        secret_name="golem-run-secrets",
+        active_deadline_seconds=1800,
+        ttl_seconds_after_finished=600,
+        cpu="500m",
+        memory="1Gi",
+    )
+    catalog = CatalogRef(url="https://git.example/catalog.git", revision="a1b2c3d")
+
+    assert job_spec_for(RUN_ID, run, catalog, template, "a.b.c", "d.e.f").target == (
+        "alert-0a1b2c3d4e5f"
+    )
 
 
 def test_secrets_come_only_by_reference_to_the_shared_and_the_per_run_secret() -> None:

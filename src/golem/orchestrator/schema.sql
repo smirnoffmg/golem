@@ -62,3 +62,9 @@ CREATE TABLE IF NOT EXISTS proposals (
 
 CREATE INDEX IF NOT EXISTS proposals_pending_merge_requests ON proposals (checked_at)
     WHERE kind = 'merge_request' AND state = 'pending';
+
+-- A goal run that found nothing to propose (ADR 0017): its outcome, the record its report is,
+-- and the report once read. The branch is deleted after the report is read.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS outcome text;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS record text;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS report text;

@@ -122,6 +122,41 @@ has seen before. But the lead does not choose. The runtime changes in `runtime/m
 (`golem_runs_total{outcome="reported"}`). A goal agent's golden set ([ADR 0006](0006-evaluation-in-ci-first.md)) holds cases
 with and without a finding, so the evaluation measures both false alarms and misses.
 
+### Goal agents as first built
+
+- **A target starts with a letter.** The runtime and the task service accept
+  `^[a-z][a-z0-9-]{0,63}$`, not the leading digit allowed above: the target becomes a record's
+  id, and a record id starts with a letter. Both alert and schedule targets fit. A missing or
+  malformed target becomes `run-<run id>`, since a run id may start with a digit. The task
+  service drops a malformed `golemTarget` before the orchestrator sees it; the Job gets
+  `GOLEM_TARGET` only when there is one.
+- **The record the runtime opens** lies at `<the goal role's writes>/<target>.md`, in the
+  kind's `initial` status (the step above says `open`; a record born in another status would
+  skip a human decision, the validator's rule), with the goal quoted (`> `) so a `## ` line in
+  an alert's text cannot become a section, and the kind's sections empty. It is committed on the
+  run's branch before the role runs, so the validators judge the role's change alone.
+- **The role says it found something** by calling `submit_proposal(reason)`, a tool the runner
+  serves to goal runs only and that no MCP tool may shadow. Without the call the run is
+  `reported`. The runtime's report names the record (`record`), and the reconciler reads only a
+  relative `.md` path without `..` from it.
+- **Only `merge_request` goal agents may propose.** A goal run that proposes another kind is
+  `invalid` until the platform applies that kind ([ADR 0015](0015-proposals.md)); otherwise it
+  would land as a merge request nobody asked for. A `merge_request` goal run writes no
+  `golem-proposal.json`: its report's outcome, `proposed` or `reported`, tells the reconciler
+  whether to open a merge request.
+- **`golem_runs.runs` gains `outcome`, `record` and `report`.** The reconciler stores the report
+  (cut at 20 000 characters) before it deletes the branch, so a failed delete is retried without
+  reading again, and settles the run only after the delete. A branch or record already gone
+  leaves a report that says so. The task gets `golemOutcome: reported` and one artifact
+  `report` (id `report-<run id>`), and no `golemProposal`.
+- **A starter names the target in the message.** `golemTarget` in the message's metadata is
+  the one hook: the Alertmanager adapter, the scheduler and a process stage
+  ([ADR 0019](0019-processes.md)) each set it on their `SendMessage`.
+- **A vanished Job is not read as a report.** When a Job is gone before the reconciler saw it
+  (its TTL passed while the reconciler was down), the run is judged by its branch as before, so
+  a goal run that reported gets a merge request a person closes. Keeping the report's outcome
+  past the Job's TTL is left for later.
+
 ### The Alertmanager adapter
 
 **Routing stays in Alertmanager.** Operators already route alerts by labels there. The

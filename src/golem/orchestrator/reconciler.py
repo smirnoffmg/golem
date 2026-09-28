@@ -1,7 +1,8 @@
 """The reconciler process: ``python -m golem.orchestrator.reconciler``.
 
-Every interval it reconciles finished Jobs, opens merge requests for succeeded runs, delivers
-task outcomes, and follows open merge requests to their proposals' state (ADR 0015). A failed
+Every interval it reconciles finished Jobs, opens merge requests for succeeded runs, reads the
+reports of goal runs that proposed nothing and deletes their branches (ADR 0017), delivers task
+outcomes, and follows open merge requests to their proposals' state (ADR 0015). A failed
 pass, or one that runs past its timeout, is logged and the next one runs; SIGTERM stops the
 loop between passes. Its metrics are served on ``GOLEM_METRICS_PORT``, the only port it
 listens on.
@@ -25,12 +26,14 @@ from golem.orchestrator.launchers import launcher_for
 from golem.orchestrator.merge_requests import (
     GitLabMergeRequests,
     check_merge_request,
+    discard_branch,
     has_proposal,
     propose_merge_request,
+    read_report,
 )
 from golem.orchestrator.notify import TaskServiceNotifier
 from golem.orchestrator.proposals import PendingMergeRequest, Transition
-from golem.orchestrator.reconcile import Settlement, SucceededRun, reconcile_once
+from golem.orchestrator.reconcile import Reporter, Settlement, SucceededRun, reconcile_once
 from golem.orchestrator.runs import apply_schema
 from golem.orchestrator.service import CONNECT_TIMEOUT_SECONDS
 from golem.serving import listener
@@ -99,6 +102,12 @@ def pass_for(
     async def check(pending: PendingMergeRequest) -> Transition | None:
         return await check_merge_request(gitlab, pending)
 
+    async def read(run: SucceededRun) -> str | None:
+        return await read_report(gitlab, run)
+
+    async def discard(run: SucceededRun) -> None:
+        await discard_branch(gitlab, run)
+
     async def reconcile_pass() -> None:
         async with await AsyncConnection.connect(
             settings.runs_dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
@@ -113,6 +122,7 @@ def pass_for(
                 check=check,
                 notify_proposal=notifier.notify_proposal,
                 poll_seconds=settings.mr_poll_seconds,
+                report=Reporter(read, discard),
             )
 
     return reconcile_pass

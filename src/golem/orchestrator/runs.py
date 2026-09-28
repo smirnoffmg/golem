@@ -72,6 +72,8 @@ class RecordedRun:
     detail: str | None
     final: bool
     proposal: ProposalView | None = None
+    # A goal run that found nothing to propose: the report its task shows (ADR 0017).
+    report: str | None = None
 
 
 async def apply_schema(conn: AsyncConnection) -> None:
@@ -155,7 +157,7 @@ async def run_status(conn: AsyncConnection, run_id: str) -> str | None:
 async def run_of_task(conn: AsyncConnection, task_id: str) -> RecordedRun | None:
     cursor = await conn.execute(
         "SELECT r.id, r.caller, r.agent, r.status, r.detail, " + FINAL_OUTCOME + " AS final,"
-        " p.id, p.kind, p.state, p.url"
+        " p.id, p.kind, p.state, p.url, CASE WHEN r.outcome = 'reported' THEN r.report END"
         " FROM run_tasks t JOIN runs r ON r.id = t.run_id"
         " LEFT JOIN proposals p ON p.run_id = r.id WHERE t.task_id = %s",
         (task_id,),
@@ -163,11 +165,11 @@ async def run_of_task(conn: AsyncConnection, task_id: str) -> RecordedRun | None
     row = await cursor.fetchone()
     if row is None:
         return None
-    run_id, caller, agent, status, detail, final, proposal_id, kind, state, url = row
+    run_id, caller, agent, status, detail, final, proposal_id, kind, state, url, report = row
     proposal = (
         None if proposal_id is None else ProposalView(str(proposal_id), kind, state, url or "")
     )
-    return RecordedRun(str(run_id), caller, agent, status, detail, final, proposal)
+    return RecordedRun(str(run_id), caller, agent, status, detail, final, proposal, report)
 
 
 async def agents_of_tasks(conn: AsyncConnection, task_ids: tuple[str, ...]) -> dict[str, str]:

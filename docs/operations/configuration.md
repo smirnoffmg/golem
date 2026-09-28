@@ -215,6 +215,7 @@ The task service writes the first group into every Job; the rest comes from the 
 | `GOLEM_AGENT` | required | the agent; the catalog's `name` must match |
 | `GOLEM_CATALOG_REF` | required | `<git url>#<revision>` from the catalogs file |
 | `GOLEM_GOAL` | required | the caller's text |
+| `GOLEM_TARGET` | none: the target is `run-<run id>` | a goal agent's target record, from the message's `golemTarget` metadata when it matches `^[a-z][a-z0-9-]{0,63}$` ([ADR 0017](../adr/0017-triggers.md)); a record agent ignores it |
 | `GOLEM_RUN_TOKEN` | none | the run token, from Secret `golem-run-<run id>-token`; a role with tools fails without it |
 | `GOLEM_CALL_TOKEN` | none | the call token, from the same Secret; a role naming `agents.delegate` fails without it ([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)) |
 | `GOLEM_MCP_REGISTRY` | none | path of the mounted MCP registry; without it a role naming tools fails |

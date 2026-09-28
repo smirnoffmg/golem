@@ -4,7 +4,9 @@ The runtime pushes a run's result to branch ``golem/<target_id>/<run_id>`` of th
 context repository; the orchestrator does not know the target id, so it finds the branch by
 the run id suffix, then opens the merge request idempotently per source branch. The merge
 request is the run's proposal (ADR 0015): a person decides it in GitLab, and the reconciler reads
-the decision back from there.
+the decision back from there. A goal run that found nothing to propose has no merge request: its
+target record, read at the branch's head commit, is its report, and then the branch goes
+(ADR 0017).
 """
 
 import re
@@ -27,6 +29,10 @@ class GitLabError(RuntimeError):
 
 class ProjectNotConfigured(GitLabError):
     """Configuration, not an outage: retrying would fail the same way every pass."""
+
+
+class NotFound(GitLabError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,19 @@ class GitLabMergeRequests:
     async def merge_request(self, agent: str, iid: int) -> Any:
         return await self._get(agent, f"merge_requests/{iid}", {})
 
+    async def head_commit(self, agent: str, branch: str) -> str:
+        found = await self._get(agent, f"repository/branches/{quote(branch, safe='')}", {})
+        return str(found["commit"]["id"])
+
+    async def raw_file(self, agent: str, path: str, commit: str) -> str:
+        url = self._url(self._project(agent), f"repository/files/{quote(path, safe='')}/raw")
+        response = await self._send("GET", url, params={"ref": commit})
+        return response.text
+
+    async def delete_branch(self, agent: str, branch: str) -> None:
+        url = self._url(self._project(agent), f"repository/branches/{quote(branch, safe='')}")
+        await self._send("DELETE", url)
+
     def _project(self, agent: str) -> GitLabProject:
         project = self.project_for_agent.get(agent)
         if project is None:
@@ -96,13 +115,17 @@ class GitLabMergeRequests:
         return await self._request("GET", self._url(self._project(agent), resource), params=params)
 
     async def _request(self, method: str, url: str, **kwargs: Any) -> Any:
+        return (await self._send(method, url, **kwargs)).json()
+
+    async def _send(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         try:
             response = await self.client.request(method, url, **kwargs)
         except httpx.HTTPError as error:
             raise GitLabError(f"{method} {url}: {error}") from error
         if not response.is_success:
-            raise GitLabError(f"{method} {url}: {response.status_code} {response.text[:200]}")
-        return response.json()
+            error_type = NotFound if response.status_code == 404 else GitLabError
+            raise error_type(f"{method} {url}: {response.status_code} {response.text[:200]}")
+        return response
 
 
 def opened(merge_request: Mapping[str, Any], branch: str) -> OpenedMergeRequest:
@@ -166,3 +189,27 @@ async def propose_merge_request(gitlab: GitLabMergeRequests, run: SucceededRun) 
     return Settlement(
         f"Run {run.run_id} succeeded; merge request: {merge_request.url}", merge_request
     )
+
+
+async def read_report(gitlab: GitLabMergeRequests, run: SucceededRun) -> str | None:
+    """A reported run's record at its branch's head commit, never by the branch name, so the
+    report is what the run pushed; None when the branch or the record is gone."""
+    if run.record is None:
+        return None
+    try:
+        branch = await gitlab.find_branch(run.agent, run.run_id)
+        if branch is None:
+            return None
+        commit = await gitlab.head_commit(run.agent, branch)
+        return await gitlab.raw_file(run.agent, run.record, commit)
+    except (NotFound, ProjectNotConfigured):
+        return None
+
+
+async def discard_branch(gitlab: GitLabMergeRequests, run: SucceededRun) -> None:
+    try:
+        branch = await gitlab.find_branch(run.agent, run.run_id)
+        if branch is not None:
+            await gitlab.delete_branch(run.agent, branch)
+    except (NotFound, ProjectNotConfigured):
+        return

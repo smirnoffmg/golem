@@ -106,6 +106,7 @@ def job_spec_for(
         traceparent=run.traceparent,
         tracestate=run.tracestate,
         mcp_registry_configmap=template.mcp_registry_configmap,
+        target=run.target,
     )
 
 
@@ -208,6 +209,7 @@ class PostgresOrchestrator:
                 succeeded=run.status == "succeeded",
                 detail=run.detail or f"Run {run.run_id} {run.status}.",
                 proposal=run.proposal,
+                report=run.report,
             )
         return TaskRun(run.run_id, run.caller, run.agent, outcome)
 

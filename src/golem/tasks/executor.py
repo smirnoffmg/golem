@@ -1,12 +1,14 @@
 from dataclasses import asdict
+from typing import Any
 
 from a2a.helpers.proto_helpers import new_task_from_user_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.context import ServerCallContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
-from a2a.types.a2a_pb2 import TaskState
+from a2a.types.a2a_pb2 import Message, TaskState
 
+from golem.catalog import GOAL_TARGET
 from golem.tasks.ports import Orchestrator, Refused, RunOutcome, RunStart, Started
 
 MISSING_AGENT = "no agent named: the request carries no tenant"
@@ -15,6 +17,9 @@ MISSING_AGENT = "no agent named: the request carries no tenant"
 RUN_OUTCOME = "golem.run_outcome"
 AGENT_METADATA = "golemAgent"
 PROPOSAL_METADATA = "golemProposal"
+OUTCOME_METADATA = "golemOutcome"
+TARGET_METADATA = "golemTarget"
+REPORT_ARTIFACT = "report"
 CHAIN_HEADER = "x-golem-chain"
 ROOT_RUN_HEADER = "x-golem-root-run"
 
@@ -39,7 +44,16 @@ def run_start_of(context: RequestContext) -> RunStart:
         tracestate=header_of(context.call_context, "tracestate"),
         root_run_id=header_of(context.call_context, ROOT_RUN_HEADER),
         chain=chain_of(header_of(context.call_context, CHAIN_HEADER)),
+        target=target_of(context.message),
     )
+
+
+def target_of(message: Message | None) -> str:
+    # The caller's claim, used only as a record name in the caller's own run: it must be one.
+    if message is None or TARGET_METADATA not in message.metadata:
+        return ""
+    target = message.metadata[TARGET_METADATA]
+    return target if isinstance(target, str) and GOAL_TARGET.fullmatch(target) else ""
 
 
 def chain_of(header: str) -> tuple[str, ...]:
@@ -60,9 +74,19 @@ async def finish(updater: TaskUpdater, outcome: RunOutcome) -> None:
     message = updater.new_agent_message([new_text_part(outcome.detail)])
     if outcome.succeeded:
         # Merged into the task's metadata by the SDK's TaskManager, as runId is.
-        proposal = {PROPOSAL_METADATA: asdict(outcome.proposal)} if outcome.proposal else None
+        metadata: dict[str, Any] | None = (
+            {PROPOSAL_METADATA: asdict(outcome.proposal)} if outcome.proposal else None
+        )
+        if outcome.report is not None:
+            # One id per run, so a delivery repeated before the task ended adds no second one.
+            await updater.add_artifact(
+                [new_text_part(outcome.report)],
+                artifact_id=f"{REPORT_ARTIFACT}-{outcome.run_id}",
+                name=REPORT_ARTIFACT,
+            )
+            metadata = {OUTCOME_METADATA: "reported"}
         await updater.update_status(
-            TaskState.TASK_STATE_COMPLETED, message=message, metadata=proposal
+            TaskState.TASK_STATE_COMPLETED, message=message, metadata=metadata
         )
     else:
         await updater.failed(message)

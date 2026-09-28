@@ -5,12 +5,16 @@ https://docs.gitlab.com/api/branches/#list-repository-branches
 https://docs.gitlab.com/api/merge_requests/#list-project-merge-requests
 https://docs.gitlab.com/api/merge_requests/#create-a-merge-request
 https://docs.gitlab.com/api/merge_requests/#get-single-mr
+https://docs.gitlab.com/api/branches/#get-single-repository-branch
+https://docs.gitlab.com/api/branches/#delete-repository-branch
+https://docs.gitlab.com/api/repository_files/#get-raw-file-from-repository
 """
 
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -21,12 +25,15 @@ from golem.orchestrator.merge_requests import (
     GitLabError,
     GitLabMergeRequests,
     GitLabProject,
+    discard_branch,
     has_proposal,
     propose_merge_request,
+    read_report,
     run_branch,
 )
 from golem.orchestrator.reconcile import (
     LAUNCH_GRACE_SECONDS,
+    Reporter,
     Settlement,
     SucceededRun,
     reconcile_once,
@@ -41,6 +48,8 @@ TOKEN = "glpat-test"
 class FakeGitLab:
     branches: list[str] = field(default_factory=list)
     merge_requests: list[dict[str, Any]] = field(default_factory=list)
+    # (commit sha, path) -> text; a branch's head commit is `sha-<branch>`.
+    files: dict[tuple[str, str], str] = field(default_factory=dict)
     requests: list[httpx.Request] = field(default_factory=list)
     down: bool = False
     # Merge requests GitLab fails to read (a 500), while it answers for the others.
@@ -62,7 +71,23 @@ class FakeGitLab:
             return self._create(json.loads(request.content))
         if path.startswith(f"{prefix}/merge_requests/") and request.method == "GET":
             return self._single(int(path.rsplit("/", 1)[1]))
+        if path.startswith(f"{prefix}/repository/branches/"):
+            return self._branch(request.method, unquote(path.rsplit("/", 1)[1]))
+        if path.startswith(f"{prefix}/repository/files/") and path.endswith("/raw"):
+            name = unquote(path.removeprefix(f"{prefix}/repository/files/").removesuffix("/raw"))
+            text = self.files.get((request.url.params.get("ref", ""), name))
+            if text is None:
+                return httpx.Response(404, json={"message": "404 File Not Found"})
+            return httpx.Response(200, text=text)
         return httpx.Response(404, json={"message": "404 Not Found"})
+
+    def _branch(self, method: str, name: str) -> httpx.Response:
+        if name not in self.branches:
+            return httpx.Response(404, json={"message": "404 Branch Not Found"})
+        if method == "DELETE":
+            self.branches.remove(name)
+            return httpx.Response(204)
+        return httpx.Response(200, json={"name": name, "commit": {"id": f"sha-{name}"}})
 
     def _branches(self, search: str) -> list[dict[str, Any]]:
         begins, ends = search.startswith("^"), search.endswith("$")
@@ -440,3 +465,86 @@ async def test_an_idle_run_keeps_the_reasons_from_its_report(
     assert (await recorded(runs_db, outcome.task_id)).detail == (
         f"Run {run_id} succeeded and proposed no changes: researcher: all pending."
     )
+
+
+# A goal run that found nothing to propose (ADR 0017): its record is the report, its branch goes
+
+BRANCH = "golem/alert-0a1b2c3d4e5f/run-1"
+RECORD = "hypotheses/alert-0a1b2c3d4e5f.md"
+REPORTED_RUN = SucceededRun("run-1", "discovery", record=RECORD)
+
+
+async def test_the_report_is_the_record_at_the_branch_head_commit(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    gitlab.branches = [BRANCH]
+    gitlab.files[(f"sha-{BRANCH}", RECORD)] = "# Seen\n\nA deploy."
+    gitlab.files[(BRANCH, RECORD)] = "read by the branch name"
+
+    assert await read_report(merge_requests, REPORTED_RUN) == "# Seen\n\nA deploy."
+
+
+async def test_no_report_when_the_branch_or_the_record_is_gone(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    assert await read_report(merge_requests, REPORTED_RUN) is None
+    gitlab.branches = [BRANCH]
+    assert await read_report(merge_requests, REPORTED_RUN) is None
+
+
+async def test_discarding_deletes_the_branch_and_tolerates_it_gone(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    gitlab.branches = [BRANCH, "golem/H-2/run-7"]
+
+    await discard_branch(merge_requests, REPORTED_RUN)
+    await discard_branch(merge_requests, REPORTED_RUN)
+
+    assert gitlab.branches == ["golem/H-2/run-7"]
+
+
+async def test_an_agent_without_a_project_has_no_report_and_no_branch_to_discard(
+    merge_requests: GitLabMergeRequests,
+) -> None:
+    run = SucceededRun("run-1", "other", record=RECORD)
+
+    assert await read_report(merge_requests, run) is None
+    await discard_branch(merge_requests, run)
+
+
+async def test_discarding_fails_loudly_when_gitlab_is_down(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    gitlab.branches = [BRANCH]
+    gitlab.down = True
+
+    with pytest.raises(GitLabError):
+        await discard_branch(merge_requests, REPORTED_RUN)
+
+
+async def test_a_reported_run_opens_no_merge_request_and_leaves_no_branch(
+    runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    run_id = await new_run(runs_db, "m-1")
+    branch = f"golem/alert-0a1b2c3d4e5f/{run_id}"
+    gitlab.branches = [branch]
+    gitlab.files[(f"sha-{branch}", RECORD)] = "# Seen\n\nA deploy."
+    board, inbox = StatusBoard(), Inbox()
+    board.statuses[run_id] = JobStatus.SUCCEEDED
+    board.messages[run_id] = json.dumps({"outcome": "reported", "record": RECORD})
+
+    async def propose(run: SucceededRun) -> Settlement:
+        return await propose_merge_request(merge_requests, run)
+
+    async def read(run: SucceededRun) -> str | None:
+        return await read_report(merge_requests, run)
+
+    async def discard(run: SucceededRun) -> None:
+        await discard_branch(merge_requests, run)
+
+    async with await connect(runs_db) as conn:
+        await reconcile_once(conn, board, inbox.notify, propose, report=Reporter(read, discard))
+
+    assert gitlab.merge_requests == []
+    assert gitlab.branches == []
+    assert (await recorded(runs_db, "task-m-1")).report == "# Seen\n\nA deploy."

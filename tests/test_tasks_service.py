@@ -55,9 +55,10 @@ class FakeOrchestrator:
         succeeded: bool,
         detail: str,
         proposal: ProposalView | None = None,
+        report: str | None = None,
     ) -> None:
         run = self.runs[task_id]
-        outcome = RunOutcome(run.run_id, succeeded, detail, proposal)
+        outcome = RunOutcome(run.run_id, succeeded, detail, proposal, report)
         self.runs[task_id] = replace(run, outcome=outcome)
 
     async def run_of_task(self, task_id: str) -> TaskRun | None:
@@ -196,6 +197,39 @@ def test_admitted_run_stays_working_and_records_run_id(
             message_id="m1",
         )
     ]
+
+
+def send_with_target(client: TestClient, target: Any) -> None:
+    rpc(
+        client,
+        "SendMessage",
+        {
+            "tenant": "reviewer",
+            "message": {
+                "role": "ROLE_USER",
+                "messageId": "m1",
+                "parts": [{"text": "disk usage alert"}],
+                "metadata": {"golemTarget": target},
+            },
+        },
+    )
+
+
+def test_the_starter_names_a_goal_runs_target_in_the_message(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    send_with_target(client, "alert-0a1b2c3d4e5f")
+
+    assert orchestrator.started[0].target == "alert-0a1b2c3d4e5f"
+
+
+@pytest.mark.parametrize("target", ["../etc", "Alert-1", 42, "a" * 65])
+def test_a_malformed_target_is_dropped(
+    client: TestClient, orchestrator: FakeOrchestrator, target: Any
+) -> None:
+    send_with_target(client, target)
+
+    assert orchestrator.started[0].target == ""
 
 
 def test_a_new_task_records_the_agent_the_edge_forwarded(client: TestClient) -> None:
@@ -421,6 +455,25 @@ def test_a_succeeded_run_shows_its_proposal_on_the_task(
         "state": "pending",
         "url": "https://gitlab.example.test/p/-/merge_requests/7",
     }
+
+
+def test_a_reported_run_completes_its_task_with_the_report(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task = send(client, "disk usage alert on node-3")
+    orchestrator.finish(
+        task["id"], succeeded=True, detail="Run run-1 reported.", report="# Seen\n\nA deploy."
+    )
+
+    assert notify(client, task["id"]).status_code == 200
+
+    done = get_task(client, task["id"])
+    assert done["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert done["metadata"]["golemOutcome"] == "reported"
+    assert "golemProposal" not in done["metadata"]
+    [artifact] = done["artifacts"]
+    assert artifact["name"] == "report"
+    assert artifact["parts"] == [{"text": "# Seen\n\nA deploy."}]
 
 
 def test_a_proposal_state_change_rewrites_the_task_without_moving_its_status(

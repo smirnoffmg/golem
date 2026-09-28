@@ -19,6 +19,8 @@ class RunStart:
     # chain, which the run is admitted under. Empty for a run a person or a service started.
     root_run_id: str = ""
     chain: tuple[str, ...] = ()
+    # The record a goal agent's run works on, as its starter named it (ADR 0017); "" if none.
+    target: str = ""
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,8 @@ class RunOutcome:
     succeeded: bool
     detail: str
     proposal: ProposalView | None = None
+    # A goal run that found nothing to propose: its target record, the task's `report`.
+    report: str | None = None
 
 
 @dataclass(frozen=True)
