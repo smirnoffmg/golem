@@ -48,7 +48,7 @@ export function ProposalLink(props: { proposal: Proposal; inProcess?: boolean })
           Merge request
         </a>{" "}
         <span className="muted">
-          {status}. Review and merge it in GitLab.
+          {status}.{proposal.state === "pending" && <> Review and merge it in GitLab.</>}
           {/* The process reruns the stage with the closing comment as its reason (ADR 0019). */}
           {props.inProcess && proposal.state === "pending" && (
             <> To reject it, close it with a comment saying why.</>
