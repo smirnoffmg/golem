@@ -25,7 +25,7 @@ page needs. a2a-sdk 1.1.5 implements A2A 1.0's `ListTasks` (JSON-RPC method `Lis
 on_list_tasks` calls `TaskStore.list(params, context)`, and both `InMemoryTaskStore` and
 `DatabaseTaskStore` filter by the owner that `resolve_user_scope` takes from the call
 context's user, which the task service builds from the edge's principal header. The tenant is
-not a filter.
+not a filter (since [ADR 0018](0018-board.md) it is).
 
 Sources:
 
@@ -129,7 +129,9 @@ submit is one message id and the orchestrator starts one run for it. "My tasks" 
 `CancelTask`. A merge request URL in a task's outcome becomes a link only if it is `http` or
 `https` with a host. The agent a task was started for is kept in the message's metadata
 (`golemAgent`), since a task does not keep its tenant; it is the caller's own claim, used only
-to address the caller's own task at the edge.
+to address the caller's own task at the edge. Since [ADR 0018](0018-board.md) a React board
+over a JSON API replaces these pages and the logout refresh page; sign-in, sessions, CSRF tokens
+and headers stand as decided here.
 
 **CSRF.** Every state-changing request is a `POST` carrying the session's CSRF token (256 bits,
 compared in constant time); a missing or wrong token is a 403 before anything else happens.

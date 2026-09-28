@@ -35,6 +35,8 @@ is the catalog, and the figure is stopped by the platform, not by the model.
 | Web UI | `golem_ui` | sign-in, agents, starting, listing and canceling one's own tasks; calls the edge with the user's own token |
 | Channel adapters | none | Jira and GitLab webhooks, chat bot, all as A2A clients |
 | Platform MCP servers | none | Jira, Confluence and GitLab tools; accept run tokens only; hold their own secrets; audit every decision |
+| Board (proposed, [ADR 0018](docs/adr/0018-board.md)) | none | static React client served by nginx; talks only to the web UI's JSON API on the same origin |
+| Write MCP servers (proposed, [ADR 0015](docs/adr/0015-proposals.md)) | none | apply accepted proposals to Confluence, the service desk and Jira; accept proposal tokens from the task service only |
 | Postgres cluster | `golem_tasks`, `golem_runs`, `golem_audit`, `golem_ui` | one cluster, one owner per database |
 
 Details and diagrams: [docs/architecture.md](docs/architecture.md). Decisions:

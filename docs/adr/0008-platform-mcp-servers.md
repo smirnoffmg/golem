@@ -67,7 +67,10 @@ request before the SDK sees it.
   `/rest/api/content/search`, the only CQL search on both deployments; a page is read by
   `id = <digits>` through the same endpoint. Answers carry key fields only; bodies become plain
   text cut at 8 000 characters; limits are held to 1..50. An upstream error or timeout becomes a
-  tool error result, not a failed request.
+  tool error result, not a failed request. Since [ADR 0015](0015-proposals.md) write groups
+  exist on servers of their own that accept only proposal tokens from the task service, and
+  `wiki.read` gains `get_page_source`; [ADR 0016](0016-observability-tools.md) adds metrics and
+  logs groups per environment and makes each server check its own canonical URI as the audience.
 - **Every decision audited.** Each request writes one `audit_log` row as the `golem_mcp` role
   before it is served: account = the token's `caller` (`unauthenticated` when the token did not
   verify), source `mcp:<group>`, target `jira:<host>` or `confluence:<host>`, operation = the
