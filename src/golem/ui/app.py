@@ -41,8 +41,10 @@ from golem.ui.edge import (
     TASK_NOT_FOUND,
     EdgeError,
     EdgeLimited,
+    EdgeRefused,
     EdgeUnauthorized,
     directory,
+    resolve,
     rpc,
 )
 from golem.ui.oidc import (
@@ -87,6 +89,13 @@ DIRECTORY_SECONDS = 60
 # a2a-sdk's page token is the base64 of a task id; anything else never came from the edge.
 PAGE_TOKEN = re.compile(r"^[A-Za-z0-9+/=_-]{1,256}$")
 NONCE = re.compile(r"^[A-Za-z0-9_-]{22,64}$")
+RESOLUTION_ACTIONS = frozenset({"rerun", "end"})
+# The edge's refusals of a resolution, in words the board shows as they are.
+RESOLUTION_MESSAGES = {
+    "reason_required": "Say why the stage should run again.",
+    "not_waiting": "The process no longer waits for a reason. Reload the board.",
+    "malformed": "The answer is not one the process takes.",
+}
 
 Read = Callable[[Request, Session], Awaitable[Response]]
 Write = Callable[[Request, Session, dict[str, Any]], Awaitable[Response]]
@@ -562,6 +571,22 @@ def create_ui_app(
             raise edge_failed(error) from error
         return JSONResponse({"task": task_of({"task": result})})
 
+    async def resolution(request: Request, session: Session, body: dict[str, Any]) -> Response:
+        # A rerun starts a run, so it counts against the same limit as starting one.
+        take_start(session)
+        action, reason = body.get("action"), body.get("reason")
+        if action not in RESOLUTION_ACTIONS or not isinstance(reason, str | None):
+            raise malformed("action must be rerun or end, and reason text.")
+        task_id = str(request.path_params["task_id"])
+        try:
+            await resolve(edge, session.access_token, task_id, str(action), reason)
+        except EdgeRefused as refusal:
+            if refusal.status == 404:
+                raise not_found() from refusal
+            message = RESOLUTION_MESSAGES.get(refusal.error, "The process refused the answer.")
+            raise Refusal(refusal.status, refusal.error, message) from refusal
+        return JSONResponse({"taskId": task_id, "action": action})
+
     async def unmatched(request: Request, exc: Exception) -> Response:
         return refused(not_found())
 
@@ -583,6 +608,7 @@ def create_ui_app(
             Route(f"{tasks}/{{task_id}}", reading(task_detail), methods=["GET"]),
             Route(f"{tasks}/{{task_id}}/messages", writing(reply), methods=["POST"]),
             Route(f"{tasks}/{{task_id}}/cancel", writing(cancel), methods=["POST"]),
+            Route("/api/processes/{task_id}/resolution", writing(resolution), methods=["POST"]),
         ],
         exception_handlers={404: unmatched, 405: wrong_method},
     )

@@ -52,8 +52,20 @@ from golem.orchestrator.admission import Limits
 from golem.orchestrator.service import PostgresOrchestrator
 from golem.ratelimit import Limiter, Rate, parse_networks
 from golem.settings import SettingsError, ui_settings
-from golem.tasks.app import OUTCOME_PATH, PROPOSAL_STATE_PATH, create_listeners
-from golem.tasks.ports import Orchestrator, ProposalRecord, ProposalView
+from golem.tasks.app import (
+    OUTCOME_PATH,
+    PROCESS_STATE_PATH,
+    PROPOSAL_STATE_PATH,
+    create_listeners,
+)
+from golem.tasks.ports import (
+    NOT_WAITING,
+    RESOLVED,
+    Orchestrator,
+    ProcessRecord,
+    ProposalRecord,
+    ProposalView,
+)
 from golem.tasks.store import tasks_engine, tasks_store
 from golem.ui.__main__ import prepare
 from golem.ui.app import CSRF_HEADER, SESSION_COOKIE, create_ui_app
@@ -200,9 +212,27 @@ def build_stack(
     return Stack(app, idp, clock, orchestrator, ui_dsn, recording, internal)
 
 
+@dataclass
+class ProcessOrchestrator(FakeOrchestrator):
+    """Also the processes' records, and what their owners resolved (ADR 0019)."""
+
+    processes: dict[str, ProcessRecord] = field(default_factory=dict)
+    resolutions: list[tuple[str, str, str, str | None]] = field(default_factory=list)
+    answer: str = RESOLVED
+
+    async def process(self, process_run_id: str) -> ProcessRecord | None:
+        return self.processes.get(process_run_id)
+
+    async def resolve_process(
+        self, task_id: str, caller: str, action: str, reason: str | None
+    ) -> str:
+        self.resolutions.append((task_id, caller, action, reason))
+        return self.answer
+
+
 @pytest.fixture
 async def stack(audit_dsn: str, audit_admin_dsn: str, ui_db: str, engine: AsyncEngine) -> Stack:
-    return build_stack(audit_dsn, ui_db, FakeOrchestrator(), engine)
+    return build_stack(audit_dsn, ui_db, ProcessOrchestrator(), engine)
 
 
 @pytest.fixture
@@ -1283,6 +1313,152 @@ async def test_the_health_check_needs_no_session(browser: httpx.AsyncClient) -> 
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+# --- Processes (ADR 0019) --------------------------------------------------------------------
+
+
+def process_view(state: str = "needs_reason", **fields: Any) -> dict[str, Any]:
+    return {
+        "state": state,
+        "stage": "design",
+        "index": 1,
+        "count": 3,
+        "attempt": 1,
+        "maxAttempts": 3,
+        "staleReruns": 0,
+        "stageTaskId": None,
+        "proposal": None,
+    } | fields
+
+
+async def show_process(stack: Stack, task_id: str, view: dict[str, Any]) -> None:
+    """The reconciler moved the process; the task service writes it onto the process task."""
+    stack.orchestrator.processes["process-run-1"] = ProcessRecord(
+        view=view, caller="user:alice", agent="discovery", task_ids=(task_id,)
+    )
+    response = await stack.internal.post(
+        PROCESS_STATE_PATH, json={"process_run_id": "process-run-1"}
+    )
+    assert response.status_code == 200, response.text
+
+
+async def resolve(browser: httpx.AsyncClient, task_id: str, body: Any, **options: Any) -> Any:
+    return await post(browser, f"/api/processes/{task_id}/resolution", body, **options)
+
+
+async def test_a_process_that_needs_a_reason_waits_for_me_with_its_stage(
+    stack: Stack, browser: httpx.AsyncClient
+) -> None:
+    await login(stack, browser)
+    task_id = await started_id(browser)
+    await show_process(stack, task_id, process_view())
+
+    [task] = (await board(browser))["tasks"]
+
+    assert task["column"] == "waiting"
+    assert task["process"] == {
+        "state": "needs_reason",
+        "stage": "design",
+        "index": 1,
+        "count": 3,
+        "attempt": 1,
+        "maxAttempts": 3,
+        "staleReruns": 0,
+        "reason": None,
+    }
+
+
+async def test_a_running_process_with_an_open_stage_proposal_is_to_review(
+    stack: Stack, browser: httpx.AsyncClient
+) -> None:
+    await login(stack, browser)
+    task_id = await started_id(browser)
+    pending = {"id": "p-1", "kind": "merge_request", "state": "pending", "url": MR_URL}
+    await show_process(stack, task_id, process_view("running", proposal=pending))
+
+    [task] = (await board(browser))["tasks"]
+
+    assert (task["state"], task["column"], task["proposal"]) == ("working", "review", pending)
+
+
+async def test_rerunning_a_stage_goes_through_the_edge_as_the_owner(
+    stack: Stack, browser: httpx.AsyncClient
+) -> None:
+    await login(stack, browser)
+    task_id = await started_id(browser)
+
+    response = await resolve(browser, task_id, {"action": "rerun", "reason": "Cover the API."})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"taskId": task_id, "action": "rerun"}
+    assert stack.orchestrator.resolutions == [(task_id, "user:alice", "rerun", "Cover the API.")]
+    assert stack.edge.calls[-1] == f"/processes/{task_id}/resolution"
+
+
+async def test_ending_a_process_needs_no_reason(stack: Stack, browser: httpx.AsyncClient) -> None:
+    await login(stack, browser)
+    task_id = await started_id(browser)
+
+    response = await resolve(browser, task_id, {"action": "end"})
+
+    assert response.status_code == 200, response.text
+    assert stack.orchestrator.resolutions == [(task_id, "user:alice", "end", None)]
+
+
+async def test_a_rerun_without_a_reason_is_refused(
+    stack: Stack, browser: httpx.AsyncClient
+) -> None:
+    await login(stack, browser)
+    task_id = await started_id(browser)
+
+    response = await resolve(browser, task_id, {"action": "rerun", "reason": ""})
+
+    assert (response.status_code, response.json()["error"]) == (400, "reason_required")
+    assert stack.orchestrator.resolutions == []
+
+
+async def test_an_unknown_action_is_malformed(stack: Stack, browser: httpx.AsyncClient) -> None:
+    await login(stack, browser)
+    task_id = await started_id(browser)
+
+    response = await resolve(browser, task_id, {"action": "approve"})
+
+    assert (response.status_code, response.json()["error"]) == (400, "malformed")
+
+
+async def test_a_process_that_no_longer_waits_is_a_conflict(
+    stack: Stack, browser: httpx.AsyncClient
+) -> None:
+    await login(stack, browser)
+    task_id = await started_id(browser)
+    stack.orchestrator.answer = NOT_WAITING
+
+    response = await resolve(browser, task_id, {"action": "end"})
+
+    assert (response.status_code, response.json()["error"]) == (409, "not_waiting")
+
+
+async def test_another_users_process_cannot_be_resolved(stack: Stack) -> None:
+    async with stack.browser() as alice, stack.browser() as bob:
+        await login(stack, alice, "alice")
+        await login(stack, bob, "bob")
+        task_id = await started_id(alice)
+
+        response = await resolve(bob, task_id, {"action": "end"})
+
+    assert (response.status_code, response.json()["error"]) == (404, "not_found")
+    assert stack.orchestrator.resolutions == []
+
+
+async def test_resolving_needs_the_csrf_token(stack: Stack, browser: httpx.AsyncClient) -> None:
+    await login(stack, browser)
+    task_id = await started_id(browser)
+
+    response = await resolve(browser, task_id, {"action": "end"}, csrf=None)
+
+    assert response.status_code == 403
+    assert stack.orchestrator.resolutions == []
 
 
 # --- Settings ------------------------------------------------------------------------------------

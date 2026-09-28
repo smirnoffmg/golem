@@ -89,6 +89,7 @@ def test_a_card_shows_the_goal_the_status_message_and_the_proposal() -> None:
         "message": "Run 1 succeeded",
         "updated": "2026-09-28T10:00:00.123456Z",
         "proposal": proposal(),
+        "process": None,
     }
 
 
@@ -191,3 +192,104 @@ def test_the_cursor_never_moves_back() -> None:
 )
 def test_only_a_cursor_the_board_issued_is_accepted(text: str, parsed: datetime | None) -> None:
     assert parse_cursor(text) == parsed
+
+
+# A process task is one card for the whole process (ADR 0019).
+
+
+def process_view(
+    state: str = "running", proposal_state: str | None = "pending", **fields: Any
+) -> dict[str, Any]:
+    return {
+        "state": state,
+        "stage": "design",
+        "index": 1,
+        "count": 3,
+        "attempt": 1,
+        "maxAttempts": 3,
+        "staleReruns": 0,
+        "stageTaskId": "stage-task-1",
+        "proposal": proposal(proposal_state) if proposal_state else None,
+    } | fields
+
+
+def process_card(view: Any, state: str = "TASK_STATE_WORKING", **metadata: Any) -> Any:
+    shown = card(task(state, metadata={"golemProcess": view} | metadata))
+    assert shown is not None
+    return shown
+
+
+def test_a_process_card_shows_the_stage_the_attempt_and_the_stages_proposal() -> None:
+    shown = process_card(process_view())
+
+    assert shown["process"] == {
+        "state": "running",
+        "stage": "design",
+        "index": 1,
+        "count": 3,
+        "attempt": 1,
+        "maxAttempts": 3,
+        "staleReruns": 0,
+        "reason": None,
+    }
+    assert shown["proposal"] == proposal("pending")
+
+
+def test_process_counts_read_back_as_floats_are_counts() -> None:
+    # Task metadata is a protobuf Struct: every number in it comes back as a double.
+    view = process_view(index=1.0, count=3.0, attempt=1.0, maxAttempts=3.0, staleReruns=0.0)
+
+    shown = process_card(view)["process"]
+
+    assert (shown["index"], shown["count"], shown["attempt"]) == (1, 3, 1)
+    assert all(type(shown[name]) is int for name in ("index", "count", "staleReruns"))
+
+
+def test_a_process_waiting_for_a_reason_waits_for_me() -> None:
+    shown = process_card(process_view("needs_reason", proposal_state=None))
+
+    assert shown["column"] == "waiting"
+
+
+def test_a_running_process_whose_stage_proposal_is_open_is_to_review() -> None:
+    assert process_card(process_view(proposal_state="pending"))["column"] == "review"
+
+
+def test_a_running_process_without_an_open_proposal_is_in_progress() -> None:
+    assert process_card(process_view(proposal_state=None))["column"] == "in_progress"
+    assert process_card(process_view(proposal_state="applied"))["column"] == "in_progress"
+
+
+def test_the_process_view_wins_over_a_stale_task_proposal() -> None:
+    # The task service leaves golemProposal behind when the next stage starts.
+    shown = process_card(process_view(proposal_state=None), golemProposal=proposal("pending"))
+
+    assert shown["proposal"] is None
+    assert shown["column"] == "in_progress"
+
+
+def test_a_finished_process_goes_by_its_task_state() -> None:
+    done = process_card(process_view("completed", None), "TASK_STATE_COMPLETED")
+    failed = process_card(process_view("failed", None, reason="return_limit"), "TASK_STATE_FAILED")
+
+    assert done["column"] == "archive"
+    assert (failed["column"], failed["process"]["reason"]) == ("failed", "return_limit")
+
+
+@pytest.mark.parametrize(
+    "view",
+    [
+        "running",
+        {"state": "running"},
+        process_view(index="1"),
+        process_view(index=1.5),
+        process_view(count=True),
+        process_view(stage=7),
+        process_view(reason=3),
+    ],
+)
+def test_a_malformed_process_view_is_no_process(view: Any) -> None:
+    shown = card(task(metadata={"golemProcess": view}))
+
+    assert shown is not None
+    assert shown["process"] is None

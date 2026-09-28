@@ -9,6 +9,10 @@ from urllib.parse import urlsplit
 GOAL_CHARS = 280
 MESSAGE_CHARS = 500
 PROPOSAL_METADATA = "golemProposal"
+PROCESS_METADATA = "golemProcess"
+NEEDS_REASON = "needs_reason"
+PROCESS_TEXTS = ("state", "stage")
+PROCESS_COUNTS = ("index", "count", "attempt", "maxAttempts", "staleReruns")
 # Open proposals wait for a person: pending, being applied, or refused by the target.
 OPEN_PROPOSAL_STATES = frozenset({"pending", "accepted", "failed"})
 # A poll that read the list just before a task's update committed still sees it next time.
@@ -27,7 +31,13 @@ COLUMNS = {
 }
 
 
-def column(state: str, proposal_state: str | None) -> str:
+def column(state: str, proposal_state: str | None, process_state: str | None = None) -> str:
+    if process_state is not None and state in ("submitted", "working"):
+        # A process's task stays working while its stages run; where it waits is the
+        # process's (ADR 0019).
+        if process_state == NEEDS_REASON:
+            return "waiting"
+        return "review" if proposal_state in OPEN_PROPOSAL_STATES else "in_progress"
     if state == "completed":
         return "review" if proposal_state in OPEN_PROPOSAL_STATES else "archive"
     # A state the board does not know yet is shown as still going, not hidden.
@@ -48,16 +58,29 @@ def card(task: Any) -> dict[str, Any] | None:
     raw_state = status.get("state")
     state = state_name(raw_state) if isinstance(raw_state, str) and raw_state else "unknown"
     metadata = task.get("metadata")
-    shown_proposal = proposal_of(metadata if isinstance(metadata, dict) else {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    shown_process = process_of(metadata)
+    if shown_process is None:
+        shown_proposal = proposal_of(metadata)
+    else:
+        # golemProposal on a process task can outlive its stage; the process view cannot.
+        shown_proposal = proposal_of(
+            {PROPOSAL_METADATA: metadata[PROCESS_METADATA].get("proposal")}
+        )
     timestamp = status.get("timestamp")
     return {
         "id": task["id"],
         "state": state,
-        "column": column(state, shown_proposal["state"] if shown_proposal else None),
+        "column": column(
+            state,
+            shown_proposal["state"] if shown_proposal else None,
+            shown_process["state"] if shown_process else None,
+        ),
         "goal": message_text(first_user_message(task.get("history")))[:GOAL_CHARS],
         "message": message_text(status.get("message"))[:MESSAGE_CHARS],
         "updated": timestamp if isinstance(timestamp, str) else "",
         "proposal": shown_proposal,
+        "process": shown_process,
     }
 
 
@@ -96,6 +119,30 @@ def proposal_of(metadata: Mapping[str, Any]) -> dict[str, Any] | None:
     if not fields["id"] or not fields["kind"] or not fields["state"]:
         return None
     return fields | {"url": safe_link(str(fields["url"]))}
+
+
+def process_of(metadata: Mapping[str, Any]) -> dict[str, Any] | None:
+    value = metadata.get(PROCESS_METADATA)
+    if not isinstance(value, dict):
+        return None
+    texts = {name: value.get(name) for name in PROCESS_TEXTS}
+    counts = {name: count_of(value.get(name)) for name in PROCESS_COUNTS}
+    reason = value.get("reason")
+    if not all(isinstance(v, str) and v for v in texts.values()):
+        return None
+    if any(v is None for v in counts.values()):
+        return None
+    if reason is not None and not isinstance(reason, str):
+        return None
+    return texts | counts | {"reason": reason[:MESSAGE_CHARS] if reason else None}
+
+
+def count_of(value: Any) -> int | None:
+    """A whole number; task metadata is a protobuf Struct, which reads every number back as
+    a double."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return int(value) if value == int(value) else None
 
 
 def message_text(message: Any) -> str:
