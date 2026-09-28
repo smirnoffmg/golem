@@ -86,6 +86,29 @@ Wrong content, and nobody should work on the record: change its status as in
 A proposal that should not exist at all (another directory, a changed status, secrets in the
 text): validation should have stopped the first two, so tell the platform team with the run id.
 
+## A stage of a process
+
+A process's stage proposes a merge request like any run, and your decision on it drives the
+process ([ADR 0019](../adr/0019-processes.md)):
+
+- **Merge** it: the next stage starts once the platform has read the merge request's state
+  back from GitLab (every `GOLEM_MR_POLL_SECONDS`, five minutes by default), and reads what you
+  merged. After the last stage, the process is done.
+- **Close it with a comment** saying what is wrong: the same stage runs again, with your
+  comment as its brief. The platform takes the last comment you wrote on the merge request,
+  up to a minute after closing it. A stage runs at most `1 + return_limit` times (three by
+  default); after that the process fails.
+- **Close it without a comment**: the process waits. Its card goes to **Waiting for me** on the
+  board, with a field for the reason. Write it and choose **Rerun the stage**, which counts as
+  one attempt, or **End the process**, which ends it as failed.
+
+If the record under a stage changed before you decided, the stage's proposal is out of date and
+the stage runs again by itself; that does not use up your attempts, but a process gives up
+after three such reruns of one stage.
+
+Only the person who started the process answers on its card; **Cancel** stops the process and
+closes the stage's open merge request.
+
 ## Rules of thumb
 
 - One merge request per record at a time: while one is open, the agent works on other records.

@@ -81,6 +81,27 @@ Accepting is merging the merge request; rejecting is closing it and recording th
 the record. Who may do either, and how to do it so the agent does not propose the same thing
 again: [reviewing-proposals.md](reviewing-proposals.md).
 
+## A process: several agents in turn
+
+Some entries in the left column are **processes**: a fixed sequence of stages, each one an
+agent's run, set up by your platform team ([ADR 0019](../adr/0019-processes.md)). You start a
+process like an agent, with a goal; the platform runs the first stage, and each next stage
+starts once you have merged the previous stage's merge request. You see one card for the whole
+process, never the stages' own tasks.
+
+![A process's board](../images/ui/process-board.png)
+
+The card says which stage runs (**Stage 1 of 2: evidence**), and, once a stage ran again, which
+attempt it is on. It moves through the columns like a task's card: **To review** while the
+stage's merge request waits for you, **In progress** while a stage runs, **Archive** when the
+last stage is merged, **Failed** with the reason when the process gave up.
+
+To send a stage back, close its merge request **with a comment saying why**: the stage runs
+again with your comment as its brief, up to the process's limit of attempts. If you close it
+without a comment, the card goes to **Waiting for me** and asks for the reason: write it and
+choose **Rerun the stage**, or choose **End the process**. More in
+[reviewing-proposals.md](reviewing-proposals.md#a-stage-of-a-process).
+
 ## When something goes wrong
 
 A failed run says why. This one's role changed a status, which only people may do, so nothing

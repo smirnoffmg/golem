@@ -410,6 +410,16 @@ that switches to the stream changes its transport, not its model.
   backend-for-frontend.
 - **Development.** `vite` also proxies `/healthz`. Waiting for me and its answer form exist, but
   no Golem run asks for input yet, as above.
+- **A snapshot every sixth poll.** A proposal's or a process's change leaves its task's status
+  timestamp alone, so a delta never carries it, and until the edge serves the open proposals a
+  card would wait for a reload to move. A snapshot costs the edge the same one `ListTasks` as a
+  delta, so the board asks for one every sixth poll (a minute at the base interval) and at
+  once after answering a process that needs a reason.
+- **Processes.** A process's card and its column come from `golemProcess` alone: the task
+  service writes `golemProposal` only while a stage has a proposal and never removes it, so on
+  a process task it can outlive its stage. Counts in `golemProcess` read back as doubles, since
+  task metadata is a protobuf `Struct`; the BFF takes whole numbers. Stage tasks never reach a
+  person's board, since their tenant is the worker's.
 
 ### What changes elsewhere
 
