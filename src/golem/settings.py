@@ -20,6 +20,7 @@ from golem.metrics import DEFAULT_METRICS_PORT
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef
 from golem.orchestrator.merge_requests import GitLabProject
+from golem.orchestrator.proposals import MR_POLL_SECONDS
 from golem.orchestrator.service import JobTemplate
 from golem.ratelimit import (
     AUTH_FAILURE_RATE,
@@ -121,6 +122,7 @@ class ReconcilerSettings:
     namespace: str
     kubernetes: Kubernetes
     metrics_port: int = DEFAULT_METRICS_PORT
+    mr_poll_seconds: float = MR_POLL_SECONDS
 
 
 def edge_settings(env: Env) -> EdgeSettings:
@@ -301,6 +303,14 @@ def reconciler_settings(env: Env) -> ReconcilerSettings:
     interval = _parsed(v, "GOLEM_RECONCILE_INTERVAL_SECONDS", float, "a number of seconds")
     if not interval > 0:
         raise SettingsError(f"GOLEM_RECONCILE_INTERVAL_SECONDS must be positive: {interval}")
+    poll = {"GOLEM_MR_POLL_SECONDS": env.get("GOLEM_MR_POLL_SECONDS", "").strip()}
+    mr_poll_seconds = (
+        _parsed(poll, "GOLEM_MR_POLL_SECONDS", float, "a number of seconds")
+        if poll["GOLEM_MR_POLL_SECONDS"]
+        else MR_POLL_SECONDS
+    )
+    if not mr_poll_seconds > 0:
+        raise SettingsError(f"GOLEM_MR_POLL_SECONDS must be positive: {mr_poll_seconds}")
     return ReconcilerSettings(
         runs_dsn=v["GOLEM_RUNS_DSN"],
         interval_seconds=interval,
@@ -311,6 +321,7 @@ def reconciler_settings(env: Env) -> ReconcilerSettings:
         namespace=v["GOLEM_KUBERNETES_NAMESPACE"],
         kubernetes=_kubernetes(v),
         metrics_port=metrics_port_setting(env),
+        mr_poll_seconds=mr_poll_seconds,
     )
 
 

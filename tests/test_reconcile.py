@@ -9,6 +9,7 @@ from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import JobSpec, JobStatus
 from golem.orchestrator.reconcile import (
     LAUNCH_GRACE_SECONDS,
+    Settlement,
     SucceededRun,
     TaskOutcome,
     outcome_detail,
@@ -322,7 +323,7 @@ async def test_only_what_the_outbox_would_deliver_is_final(runs_db: str) -> None
         await conn.execute("UPDATE runs SET status = 'failed' WHERE id = %s", (failed,))
     inbox = Inbox()
 
-    async def cannot_propose(run: SucceededRun) -> str:
+    async def cannot_propose(run: SucceededRun) -> Settlement:
         raise RuntimeError("GitLab is down")
 
     async with await connect(runs_db) as conn:

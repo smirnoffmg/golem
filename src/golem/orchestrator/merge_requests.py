@@ -2,7 +2,9 @@
 
 The runtime pushes a run's result to branch ``golem/<target_id>/<run_id>`` of the agent's
 context repository; the orchestrator does not know the target id, so it finds the branch by
-the run id suffix, then opens the merge request idempotently per source branch.
+the run id suffix, then opens the merge request idempotently per source branch. The merge
+request is the run's proposal (ADR 0015): a person decides it in GitLab, and the reconciler reads
+the decision back from there.
 """
 
 import re
@@ -13,7 +15,8 @@ from urllib.parse import quote
 
 import httpx
 
-from golem.orchestrator.reconcile import SucceededRun, idle_detail
+from golem.orchestrator.proposals import OpenedMergeRequest, PendingMergeRequest, Transition
+from golem.orchestrator.reconcile import Settlement, SucceededRun, idle_detail
 
 BRANCH_PREFIX = "golem"
 
@@ -55,12 +58,14 @@ class GitLabMergeRequests:
         )
         return run_branch((branch["name"] for branch in branches), run_id)
 
-    async def open(self, agent: str, run_id: str, branch: str, title: str, description: str) -> str:
+    async def open(
+        self, agent: str, run_id: str, branch: str, title: str, description: str
+    ) -> OpenedMergeRequest:
         existing = await self._get(
             agent, "merge_requests", {"source_branch": branch, "state": "opened"}
         )
         if existing:
-            return existing[0]["web_url"]
+            return opened(existing[0], branch)
         project = self._project(agent)
         created = await self._request(
             "POST",
@@ -73,7 +78,10 @@ class GitLabMergeRequests:
                 "remove_source_branch": True,
             },
         )
-        return created["web_url"]
+        return opened(created, branch)
+
+    async def merge_request(self, agent: str, iid: int) -> Any:
+        return await self._get(agent, f"merge_requests/{iid}", {})
 
     def _project(self, agent: str) -> GitLabProject:
         project = self.project_for_agent.get(agent)
@@ -97,6 +105,41 @@ class GitLabMergeRequests:
         return response.json()
 
 
+def opened(merge_request: Mapping[str, Any], branch: str) -> OpenedMergeRequest:
+    return OpenedMergeRequest(
+        url=merge_request["web_url"], iid=merge_request["iid"], target=target_of(branch)
+    )
+
+
+def merge_request_transition(merge_request: Mapping[str, Any]) -> Transition | None:
+    """Where a merge request's state moves its pending proposal; None while it stays pending.
+
+    ``locked`` is "short-lived and transitional" in GitLab's words, so it waits like ``opened``.
+    Deciders are GitLab users, named as such: their GitLab name is not a Golem principal.
+    """
+    match merge_request.get("state"):
+        case "merged":
+            return Transition(
+                "applied", _user(merge_request.get("merge_user")), merge_request.get("merged_at")
+            )
+        case "closed":
+            return Transition(
+                "rejected", _user(merge_request.get("closed_by")), merge_request.get("closed_at")
+            )
+    return None
+
+
+def _user(user: Any) -> str | None:
+    name = user.get("username") if isinstance(user, dict) else None
+    return f"gitlab:{name}" if isinstance(name, str) and name else None
+
+
+async def check_merge_request(
+    gitlab: GitLabMergeRequests, pending: PendingMergeRequest
+) -> Transition | None:
+    return merge_request_transition(await gitlab.merge_request(pending.agent, pending.iid))
+
+
 async def has_proposal(gitlab: GitLabMergeRequests, run: SucceededRun) -> bool:
     """Whether the run pushed its branch; raises GitLabError when GitLab cannot say."""
     try:
@@ -105,19 +148,21 @@ async def has_proposal(gitlab: GitLabMergeRequests, run: SucceededRun) -> bool:
         return False
 
 
-async def propose_merge_request(gitlab: GitLabMergeRequests, run: SucceededRun) -> str:
+async def propose_merge_request(gitlab: GitLabMergeRequests, run: SucceededRun) -> Settlement:
     try:
         branch = await gitlab.find_branch(run.agent, run.run_id)
     except ProjectNotConfigured as error:
-        return f"Run {run.run_id} succeeded, but {error}; its branch was not proposed."
+        return Settlement(f"Run {run.run_id} succeeded, but {error}; its branch was not proposed.")
     if branch is None:
-        return idle_detail(run.run_id)
+        return Settlement(idle_detail(run.run_id))
     target = target_of(branch)
-    url = await gitlab.open(
+    merge_request = await gitlab.open(
         run.agent,
         run.run_id,
         branch,
         title=f"{run.agent}: {target}",
         description=f"Proposed by agent {run.agent} in run {run.run_id} for {target}.",
     )
-    return f"Run {run.run_id} succeeded; merge request: {url}"
+    return Settlement(
+        f"Run {run.run_id} succeeded; merge request: {merge_request.url}", merge_request
+    )

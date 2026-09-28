@@ -1,7 +1,7 @@
 import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import httpx
@@ -38,7 +38,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from golem.metrics import Instrumented, Metrics
 from golem.run_token import SigningKey, public_jwks
-from golem.tasks.executor import ANONYMOUS, RUN_OUTCOME, RunExecutor
+from golem.tasks.executor import ANONYMOUS, PROPOSAL_METADATA, RUN_OUTCOME, RunExecutor
 from golem.tasks.ports import Orchestrator
 
 RPC_PATH = "/a2a"
@@ -47,6 +47,8 @@ RPC_PATH = "/a2a"
 # The reconciler's port: the only route that changes a task without the edge, and only to the
 # outcome golem_runs holds for it.
 OUTCOME_PATH = "/internal/run-outcome"
+# Also the reconciler's: a proposal changed state, and its tasks show the state golem_runs holds.
+PROPOSAL_STATE_PATH = "/internal/proposal-state"
 # The MCP servers' port, read-only: platform MCP servers verify run tokens against these keys.
 RUN_KEYS_PATH = "/internal/run-keys"
 # Platform MCP servers ask whether a run is still running before serving its token: a canceled
@@ -209,10 +211,20 @@ def user_of(caller: str) -> User:
     return UnauthenticatedUser() if caller == ANONYMOUS else EdgePrincipal(caller)
 
 
+async def named_in_body(request: Request, key: str) -> str | None:
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    value = body.get(key) if isinstance(body, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 def internal_write_app(
     handler: DefaultRequestHandler, orchestrator: Orchestrator, metrics: Metrics
 ) -> ASGIApp:
-    """The reconciler's port: notifications that a task's run has a final outcome.
+    """The reconciler's port: notifications that a task's run has a final outcome, and that a
+    run's proposal changed state.
 
     The body only names the task. Its outcome, and the caller and agent that address it in the
     task store, are read from golem_runs, the system of record, so whoever can reach this port
@@ -220,12 +232,8 @@ def internal_write_app(
     """
 
     async def run_outcome(request: Request) -> Response:
-        try:
-            body = await request.json()
-        except ValueError:
-            body = None
-        task_id = body.get("task_id") if isinstance(body, dict) else None
-        if not isinstance(task_id, str) or not task_id:
+        task_id = await named_in_body(request, "task_id")
+        if task_id is None:
             return JSONResponse({"error": "task_id is required"}, status_code=422)
         run = await orchestrator.run_of_task(task_id)
         if run is None:
@@ -268,7 +276,30 @@ def internal_write_app(
             return JSONResponse({"error": "task not found"}, status_code=404)
         return JSONResponse({"task_id": task_id})
 
-    app = Starlette(routes=[Route(OUTCOME_PATH, run_outcome, methods=["POST"])])
+    async def proposal_state(request: Request) -> Response:
+        # As for outcomes, the body only names the proposal; its state is golem_runs'.
+        proposal_id = await named_in_body(request, "proposal_id")
+        if proposal_id is None:
+            return JSONResponse({"error": "proposal_id is required"}, status_code=422)
+        record = await orchestrator.proposal(proposal_id)
+        if record is None:
+            return JSONResponse({"error": "proposal not found"}, status_code=404)
+        context = ServerCallContext(user=user_of(record.caller), tenant=record.agent)
+        for task_id in record.task_ids:
+            task = await handler.task_store.get(task_id, context)
+            if task is None:
+                continue
+            # Saved as is otherwise: the status, and so the list's timestamp, stays put.
+            task.metadata.update({PROPOSAL_METADATA: asdict(record.view)})
+            await handler.task_store.save(task, context)
+        return JSONResponse({"proposal_id": proposal_id})
+
+    app = Starlette(
+        routes=[
+            Route(OUTCOME_PATH, run_outcome, methods=["POST"]),
+            Route(PROPOSAL_STATE_PATH, proposal_state, methods=["POST"]),
+        ]
+    )
     return Instrumented(app, routes=app.routes, metrics=metrics)
 
 

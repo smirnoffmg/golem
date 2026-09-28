@@ -141,7 +141,7 @@ async def reset(databases: Databases) -> None:
     """Empty schemas, so the seeded tasks are the only ones alice has."""
     async with await psycopg.AsyncConnection.connect(databases.runs, autocommit=True) as conn:
         await runs.apply_schema(conn)
-        await conn.execute("TRUNCATE runs, run_tasks")
+        await conn.execute("TRUNCATE runs, run_tasks, proposals")
     async with await psycopg.AsyncConnection.connect(databases.ui, autocommit=True) as conn:
         await store.apply_schema(conn)
         await conn.execute("TRUNCATE sessions, logins")

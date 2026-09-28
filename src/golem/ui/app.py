@@ -352,8 +352,8 @@ def create_ui_app(
         page = request.query_params.get("page")
         if page is not None and not PAGE_TOKEN.fullmatch(page):
             return error(400, "This page of tasks does not exist.", session)
-        # The task service lists the caller's own tasks whatever the tenant; the tenant is
-        # there for the edge's call registry.
+        # Since ADR 0018 the tenant filters: this page lists the caller's tasks of the first
+        # agent only, until the board replaces it.
         params: dict[str, Any] = {"tenant": agents[0], "pageSize": page_size}
         if page is not None:
             params["pageToken"] = page

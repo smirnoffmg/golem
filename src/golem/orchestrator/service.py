@@ -13,10 +13,12 @@ from golem.call_token import CallClaims
 from golem.metrics import Metrics
 from golem.orchestrator.admission import Limits, Rejected
 from golem.orchestrator.jobs import CatalogRef, JobLauncher, JobSpec
+from golem.orchestrator.proposals import proposal_record
 from golem.orchestrator.runs import (
     RunCreated,
     RunReused,
     StartRequest,
+    agents_of_tasks,
     cancel_run_of_task,
     fail_run,
     run_of_task,
@@ -24,7 +26,7 @@ from golem.orchestrator.runs import (
     start_run,
 )
 from golem.run_token import RunClaims, SigningKey, issue
-from golem.tasks.ports import Refused, RunOutcome, RunStart, Started, TaskRun
+from golem.tasks.ports import ProposalRecord, Refused, RunOutcome, RunStart, Started, TaskRun
 
 # The token outlives the Job's deadline by this much, so a call made in the run's last second
 # is not refused on clock skew between the orchestrator and an MCP server.
@@ -205,8 +207,21 @@ class PostgresOrchestrator:
                 run_id=run.run_id,
                 succeeded=run.status == "succeeded",
                 detail=run.detail or f"Run {run.run_id} {run.status}.",
+                proposal=run.proposal,
             )
         return TaskRun(run.run_id, run.caller, run.agent, outcome)
+
+    async def proposal(self, proposal_id: str) -> ProposalRecord | None:
+        async with await AsyncConnection.connect(
+            self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        ) as conn:
+            return await proposal_record(conn, proposal_id)
+
+    async def agents_of_tasks(self, task_ids: tuple[str, ...]) -> dict[str, str]:
+        async with await AsyncConnection.connect(
+            self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        ) as conn:
+            return await agents_of_tasks(conn, task_ids)
 
     async def cancel(self, task_id: str) -> None:
         async with await AsyncConnection.connect(

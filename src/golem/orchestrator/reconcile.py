@@ -8,6 +8,17 @@ from psycopg import AsyncConnection
 
 from golem.metrics import ReconcilerMetrics
 from golem.orchestrator.jobs import JobLauncher, JobStatus
+from golem.orchestrator.proposals import (
+    MR_POLL_SECONDS,
+    OpenedMergeRequest,
+    PendingMergeRequest,
+    Transition,
+    due_merge_requests,
+    mark_delivered,
+    record_check,
+    record_merge_request,
+    undelivered_states,
+)
 from golem.orchestrator.runs import FINAL_OUTCOME, RETURNING_ENDED, EndedRun, ended_run
 
 
@@ -27,11 +38,23 @@ class SucceededRun:
     agent: str
 
 
+@dataclass(frozen=True)
+class Settlement:
+    """What a succeeded run proposed: the outcome detail for its tasks, and its merge request."""
+
+    detail: str
+    merge_request: OpenedMergeRequest | None = None
+
+
 Notify = Callable[[TaskOutcome], Awaitable[bool]]
-# Returns the outcome detail for the run's tasks; raises when the proposal could not be made.
-Propose = Callable[[SucceededRun], Awaitable[str]]
+# Raises when the proposal could not be made.
+Propose = Callable[[SucceededRun], Awaitable[Settlement]]
 # Whether the run pushed its proposal branch; raises when that cannot be known now.
 Proposed = Callable[[SucceededRun], Awaitable[bool]]
+# The decision GitLab holds for a pending merge request, None while there is none; raises when
+# GitLab cannot say.
+Check = Callable[[PendingMergeRequest], Awaitable[Transition | None]]
+NotifyProposal = Callable[[str], Awaitable[bool]]
 
 log = logging.getLogger(__name__)
 
@@ -93,9 +116,12 @@ async def reconcile_once(
     propose: Propose | None = None,
     metrics: ReconcilerMetrics | None = None,
     proposed: Proposed | None = None,
+    check: Check | None = None,
+    notify_proposal: NotifyProposal | None = None,
+    poll_seconds: float = MR_POLL_SECONDS,
 ) -> None:
     """Move finished Jobs' runs to their final status, settle what succeeded runs propose,
-    then deliver pending task outcomes."""
+    deliver pending task outcomes, then follow open merge requests and deliver the changes."""
     metrics = ReconcilerMetrics() if metrics is None else metrics
     cursor = await conn.execute(
         "SELECT id, agent, created_at < now() - make_interval(secs => %s) FROM runs"
@@ -112,6 +138,10 @@ async def reconcile_once(
             log.exception("could not reconcile run %s", run_id)
     await _settle_proposals(conn, propose, metrics)
     await _deliver(conn, notify)
+    if check is not None:
+        await _check_merge_requests(conn, check, poll_seconds)
+    if notify_proposal is not None:
+        await _deliver_proposal_states(conn, notify_proposal)
     await _count_pending(conn, metrics)
 
 
@@ -183,6 +213,7 @@ async def _settle_proposals(
         " WHERE status = 'succeeded' AND proposal_settled_at IS NULL"
     )
     for run_id, agent, detail in await cursor.fetchall():
+        merge_request = None
         if propose is not None:
             try:
                 proposed = await propose(SucceededRun(run_id=str(run_id), agent=agent))
@@ -192,12 +223,17 @@ async def _settle_proposals(
                 log.exception("could not propose the result of run %s", run_id)
                 metrics.merge_request_failed()
                 continue
-            detail = settled_detail(str(run_id), detail, proposed)
-        settled = await conn.execute(
-            "UPDATE runs SET detail = %s, proposal_settled_at = now()"
-            " WHERE id = %s AND proposal_settled_at IS NULL",
-            (detail, run_id),
-        )
+            detail = settled_detail(str(run_id), detail, proposed.detail)
+            merge_request = proposed.merge_request
+        # A run with a proposal is settled only together with its row (ADR 0015).
+        async with conn.transaction():
+            if merge_request is not None:
+                await record_merge_request(conn, str(run_id), merge_request)
+            settled = await conn.execute(
+                "UPDATE runs SET detail = %s, proposal_settled_at = now()"
+                " WHERE id = %s AND proposal_settled_at IS NULL",
+                (detail, run_id),
+            )
         if settled.rowcount:
             metrics.proposal_settled()
 
@@ -212,6 +248,24 @@ async def _deliver(conn: AsyncConnection, notify: Notify) -> None:
             await conn.execute(
                 "UPDATE run_tasks SET notified_at = now() WHERE task_id = %s", (task_id,)
             )
+
+
+async def _check_merge_requests(conn: AsyncConnection, check: Check, poll_seconds: float) -> None:
+    for pending in await due_merge_requests(conn, poll_seconds):
+        try:
+            transition = await check(pending)
+        except Exception:
+            # Marked checked all the same: one merge request GitLab cannot read must not stay
+            # first in line and crowd out the others.
+            log.exception("could not read the merge request of proposal %s", pending.proposal_id)
+            transition = None
+        await record_check(conn, pending.proposal_id, transition)
+
+
+async def _deliver_proposal_states(conn: AsyncConnection, notify_proposal: NotifyProposal) -> None:
+    for proposal_id, state in await undelivered_states(conn):
+        if await notify_proposal(proposal_id):
+            await mark_delivered(conn, proposal_id, state)
 
 
 async def _count_pending(conn: AsyncConnection, metrics: ReconcilerMetrics) -> None:

@@ -1,3 +1,5 @@
+from dataclasses import asdict
+
 from a2a.helpers.proto_helpers import new_task_from_user_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.context import ServerCallContext
@@ -11,6 +13,8 @@ MISSING_AGENT = "no agent named: the request carries no tenant"
 # Set only by the task service's internal outcome route, never from a request body, so a
 # caller cannot finish a task by sending a message that claims the run is done.
 RUN_OUTCOME = "golem.run_outcome"
+AGENT_METADATA = "golemAgent"
+PROPOSAL_METADATA = "golemProposal"
 CHAIN_HEADER = "x-golem-chain"
 ROOT_RUN_HEADER = "x-golem-root-run"
 
@@ -55,7 +59,11 @@ async def reject(updater: TaskUpdater, reason: str) -> None:
 async def finish(updater: TaskUpdater, outcome: RunOutcome) -> None:
     message = updater.new_agent_message([new_text_part(outcome.detail)])
     if outcome.succeeded:
-        await updater.complete(message)
+        # Merged into the task's metadata by the SDK's TaskManager, as runId is.
+        proposal = {PROPOSAL_METADATA: asdict(outcome.proposal)} if outcome.proposal else None
+        await updater.update_status(
+            TaskState.TASK_STATE_COMPLETED, message=message, metadata=proposal
+        )
     else:
         await updater.failed(message)
 
@@ -81,7 +89,11 @@ class RunExecutor(AgentExecutor):
         if not context.tenant:
             await reject(updater, MISSING_AGENT)
             return
-        await updater.start_work()
+        # The tenant the edge checked against the call registry, not the caller's own claim:
+        # ListTasks filters by it (ADR 0018).
+        await updater.update_status(
+            TaskState.TASK_STATE_WORKING, metadata={AGENT_METADATA: context.tenant}
+        )
         run = run_start_of(context)
         match await self._orchestrator.start(run):
             case Refused(reason=reason):

@@ -6,6 +6,7 @@ from pathlib import Path
 from psycopg import AsyncConnection, AsyncCursor
 
 from golem.orchestrator.admission import Limits, Load, Rejected, RunRequest, admit
+from golem.tasks.ports import ProposalView
 
 SCHEMA = Path(__file__).with_name("schema.sql")
 
@@ -70,6 +71,7 @@ class RecordedRun:
     status: str
     detail: str | None
     final: bool
+    proposal: ProposalView | None = None
 
 
 async def apply_schema(conn: AsyncConnection) -> None:
@@ -152,15 +154,29 @@ async def run_status(conn: AsyncConnection, run_id: str) -> str | None:
 
 async def run_of_task(conn: AsyncConnection, task_id: str) -> RecordedRun | None:
     cursor = await conn.execute(
-        "SELECT r.id, r.caller, r.agent, r.status, r.detail, " + FINAL_OUTCOME + " AS final"
-        " FROM run_tasks t JOIN runs r ON r.id = t.run_id WHERE t.task_id = %s",
+        "SELECT r.id, r.caller, r.agent, r.status, r.detail, " + FINAL_OUTCOME + " AS final,"
+        " p.id, p.kind, p.state, p.url"
+        " FROM run_tasks t JOIN runs r ON r.id = t.run_id"
+        " LEFT JOIN proposals p ON p.run_id = r.id WHERE t.task_id = %s",
         (task_id,),
     )
     row = await cursor.fetchone()
     if row is None:
         return None
-    run_id, caller, agent, status, detail, final = row
-    return RecordedRun(str(run_id), caller, agent, status, detail, final)
+    run_id, caller, agent, status, detail, final, proposal_id, kind, state, url = row
+    proposal = (
+        None if proposal_id is None else ProposalView(str(proposal_id), kind, state, url or "")
+    )
+    return RecordedRun(str(run_id), caller, agent, status, detail, final, proposal)
+
+
+async def agents_of_tasks(conn: AsyncConnection, task_ids: tuple[str, ...]) -> dict[str, str]:
+    cursor = await conn.execute(
+        "SELECT t.task_id, r.agent FROM run_tasks t JOIN runs r ON r.id = t.run_id"
+        " WHERE t.task_id = ANY(%s)",
+        (list(task_ids),),
+    )
+    return dict(await cursor.fetchall())
 
 
 async def fail_run(conn: AsyncConnection, run_id: str) -> EndedRun | None:

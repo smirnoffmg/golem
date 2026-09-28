@@ -108,6 +108,7 @@ the task service.
 | `GOLEM_GITLAB_PROJECTS_FILE` | required | agent to context repository and target branch ([format](#gitlab-projects)) |
 | `GOLEM_KUBERNETES_NAMESPACE` | required | the Jobs namespace |
 | `GOLEM_KUBERNETES` | required | as for the task service |
+| `GOLEM_MR_POLL_SECONDS` | `300` | how often one open merge request is read back from GitLab for its proposal's state; at most 50 per pass (positive number) |
 | `GOLEM_METRICS_PORT` | `9090` | metrics, its only listener |
 
 ### Jira adapter: `python -m golem.adapters jira`

@@ -1,15 +1,21 @@
 """Tasks live in golem_tasks, so a restarted task service still knows them."""
 
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 import pytest
+from a2a.server.context import ServerCallContext
+from a2a.server.tasks import DatabaseTaskStore, TaskStore
+from a2a.types.a2a_pb2 import ListTasksRequest, Task, TaskState, TaskStatus
+from google.protobuf.timestamp_pb2 import Timestamp
 from sqlalchemy.ext.asyncio import AsyncEngine
 from test_tasks_service import FakeOrchestrator, create_app, make_card
 from testcontainers.community.postgres import PostgresContainer
 
-from golem.tasks.store import tasks_engine, tasks_store
+from golem.tasks.app import EdgePrincipal
+from golem.tasks.store import backfill_agents, tasks_engine, tasks_store
 
 
 @pytest.fixture
@@ -163,3 +169,129 @@ async def test_list_tasks_in_golem_tasks_shows_only_the_callers_tasks(engine: As
 
         assert task["id"] in await list_as(client, "user:alice")
         assert task["id"] not in await list_as(client, "user:mallory")
+
+
+# ListTasks names an agent (ADR 0018): the tenant the edge checked filters the caller's tasks.
+
+
+async def list_ids(
+    client: httpx.AsyncClient, tenant: str, principal: str = "user:alice"
+) -> list[str]:
+    body = (
+        await client.post(
+            "/a2a",
+            headers={"A2A-Version": "1.0", "X-Golem-Principal": principal},
+            json={"jsonrpc": "2.0", "id": 1, "method": "ListTasks", "params": {"tenant": tenant}},
+        )
+    ).json()
+    return [task["id"] for task in body["result"]["tasks"]]
+
+
+async def send_to(client: httpx.AsyncClient, tenant: str, message_id: str) -> str:
+    params = {
+        "tenant": tenant,
+        "message": {"role": "ROLE_USER", "messageId": message_id, "parts": [{"text": "go"}]},
+    }
+    return (await rpc(client, "SendMessage", params))["task"]["id"]
+
+
+async def test_list_tasks_naming_an_agent_lists_only_that_agents_tasks(
+    engine: AsyncEngine,
+) -> None:
+    async with service(engine, FakeOrchestrator()) as client:
+        reviewers = await send_to(client, "reviewer", "m-agent-1")
+        discovery = await send_to(client, "discovery", "m-agent-2")
+
+        listed = await list_ids(client, "reviewer")
+
+    assert reviewers in listed
+    assert discovery not in listed
+
+
+def stored_task(task_id: str, second: int, agent: str | None) -> Task:
+    task = Task(
+        id=task_id,
+        context_id=str(uuid.uuid4()),
+        status=TaskStatus(
+            state=TaskState.TASK_STATE_COMPLETED,
+            timestamp=Timestamp(seconds=1_800_000_000 + second),
+        ),
+    )
+    if agent is not None:
+        task.metadata.update({"golemAgent": agent})
+    return task
+
+
+async def pages(store: TaskStore, context: ServerCallContext, tenant: str = "") -> list[Any]:
+    seen: list[Any] = []
+    token = ""
+    while True:
+        page = await store.list(
+            ListTasksRequest(tenant=tenant, page_size=3, page_token=token), context
+        )
+        seen.append(([t.id for t in page.tasks], page.total_size, page.next_page_token))
+        if not page.next_page_token:
+            return seen
+        token = page.next_page_token
+
+
+async def saved(engine: AsyncEngine, tasks: list[Task]) -> ServerCallContext:
+    context = ServerCallContext(user=EdgePrincipal(f"user:{uuid.uuid4()}"))
+    store = tasks_store(engine)
+    for task in tasks:
+        await store.save(task, context)
+    return context
+
+
+async def test_without_an_agent_the_list_pages_exactly_as_the_sdks_list(
+    engine: AsyncEngine,
+) -> None:
+    # The override repeats the SDK's query; an upgrade that changes it must fail here.
+    ids = [str(uuid.uuid4()) for _ in range(8)]
+    # Equal timestamps exercise the id tie-break of the page token.
+    context = await saved(
+        engine,
+        [stored_task(i, n // 2, "reviewer" if n % 2 else "discovery") for n, i in enumerate(ids)],
+    )
+
+    ours = await pages(tasks_store(engine), context)
+    sdks = await pages(DatabaseTaskStore(engine), context)
+
+    assert ours == sdks
+    assert sorted(i for page, _, _ in ours for i in page) == sorted(ids)
+
+
+async def test_naming_an_agent_pages_through_that_agents_tasks_only(engine: AsyncEngine) -> None:
+    reviewers = [str(uuid.uuid4()) for _ in range(5)]
+    others = [str(uuid.uuid4()) for _ in range(4)]
+    context = await saved(
+        engine,
+        [stored_task(i, n, "reviewer") for n, i in enumerate(reviewers)]
+        + [stored_task(i, n, "discovery") for n, i in enumerate(others)],
+    )
+
+    walked = await pages(tasks_store(engine), context, tenant="reviewer")
+
+    assert [i for page, _, _ in walked for i in page] == list(reversed(reviewers))
+    assert {total for _, total, _ in walked} == {5}
+
+
+async def test_the_backfill_records_the_agent_of_tasks_that_have_a_run(
+    engine: AsyncEngine,
+) -> None:
+    with_run, without_run = str(uuid.uuid4()), str(uuid.uuid4())
+    context = await saved(
+        engine, [stored_task(with_run, 1, None), stored_task(without_run, 2, None)]
+    )
+    store = tasks_store(engine)
+
+    async def agents_of_tasks(task_ids: tuple[str, ...]) -> dict[str, str]:
+        return {with_run: "reviewer"} if with_run in task_ids else {}
+
+    await backfill_agents(engine, agents_of_tasks)
+
+    listed = await store.list(ListTasksRequest(tenant="reviewer"), context)
+    untouched = await store.get(without_run, context)
+    assert [t.id for t in listed.tasks] == [with_run]
+    assert untouched is not None
+    assert "golemAgent" not in untouched.metadata

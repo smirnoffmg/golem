@@ -1,9 +1,10 @@
 """The reconciler process: ``python -m golem.orchestrator.reconciler``.
 
-Every interval it reconciles finished Jobs, opens merge requests for succeeded runs and
-delivers task outcomes. A failed pass, or one that runs past its timeout, is logged and the
-next one runs; SIGTERM stops the loop between passes. Its metrics are served on
-``GOLEM_METRICS_PORT``, the only port it listens on.
+Every interval it reconciles finished Jobs, opens merge requests for succeeded runs, delivers
+task outcomes, and follows open merge requests to their proposals' state (ADR 0015). A failed
+pass, or one that runs past its timeout, is logged and the next one runs; SIGTERM stops the
+loop between passes. Its metrics are served on ``GOLEM_METRICS_PORT``, the only port it
+listens on.
 """
 
 import asyncio
@@ -23,11 +24,13 @@ from golem.orchestrator.jobs import JobLauncher
 from golem.orchestrator.launchers import launcher_for
 from golem.orchestrator.merge_requests import (
     GitLabMergeRequests,
+    check_merge_request,
     has_proposal,
     propose_merge_request,
 )
 from golem.orchestrator.notify import TaskServiceNotifier
-from golem.orchestrator.reconcile import SucceededRun, reconcile_once
+from golem.orchestrator.proposals import PendingMergeRequest, Transition
+from golem.orchestrator.reconcile import Settlement, SucceededRun, reconcile_once
 from golem.orchestrator.runs import apply_schema
 from golem.orchestrator.service import CONNECT_TIMEOUT_SECONDS
 from golem.serving import listener
@@ -87,17 +90,30 @@ def pass_for(
     gitlab: GitLabMergeRequests,
     metrics: ReconcilerMetrics | None = None,
 ) -> Callable[[], Awaitable[None]]:
-    async def propose(run: SucceededRun) -> str:
+    async def propose(run: SucceededRun) -> Settlement:
         return await propose_merge_request(gitlab, run)
 
     async def proposed(run: SucceededRun) -> bool:
         return await has_proposal(gitlab, run)
 
+    async def check(pending: PendingMergeRequest) -> Transition | None:
+        return await check_merge_request(gitlab, pending)
+
     async def reconcile_pass() -> None:
         async with await AsyncConnection.connect(
             settings.runs_dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
         ) as conn:
-            await reconcile_once(conn, launcher, notifier.notify, propose, metrics, proposed)
+            await reconcile_once(
+                conn,
+                launcher,
+                notifier.notify,
+                propose,
+                metrics,
+                proposed,
+                check=check,
+                notify_proposal=notifier.notify_proposal,
+                poll_seconds=settings.mr_poll_seconds,
+            )
 
     return reconcile_pass
 

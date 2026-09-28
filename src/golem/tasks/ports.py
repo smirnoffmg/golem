@@ -32,10 +32,30 @@ class Refused:
 
 
 @dataclass(frozen=True)
+class ProposalView:
+    """What a task shows of its run's proposal, as ``metadata.golemProposal`` (ADR 0015)."""
+
+    id: str
+    kind: str
+    state: str
+    url: str
+
+
+@dataclass(frozen=True)
+class ProposalRecord:
+    view: ProposalView
+    # The tasks of the proposal's run, and who and which agent address them in the task store.
+    caller: str
+    agent: str
+    task_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RunOutcome:
     run_id: str
     succeeded: bool
     detail: str
+    proposal: ProposalView | None = None
 
 
 @dataclass(frozen=True)
@@ -58,3 +78,7 @@ class Orchestrator(Protocol):
     async def status(self, run_id: str) -> str | None: ...
 
     async def run_of_task(self, task_id: str) -> TaskRun | None: ...
+
+    async def proposal(self, proposal_id: str) -> ProposalRecord | None: ...
+
+    async def agents_of_tasks(self, task_ids: tuple[str, ...]) -> dict[str, str]: ...

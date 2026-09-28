@@ -4,6 +4,7 @@ The stand-in implements only the documented shapes Golem uses:
 https://docs.gitlab.com/api/branches/#list-repository-branches
 https://docs.gitlab.com/api/merge_requests/#list-project-merge-requests
 https://docs.gitlab.com/api/merge_requests/#create-a-merge-request
+https://docs.gitlab.com/api/merge_requests/#get-single-mr
 """
 
 import json
@@ -24,7 +25,12 @@ from golem.orchestrator.merge_requests import (
     propose_merge_request,
     run_branch,
 )
-from golem.orchestrator.reconcile import LAUNCH_GRACE_SECONDS, SucceededRun, reconcile_once
+from golem.orchestrator.reconcile import (
+    LAUNCH_GRACE_SECONDS,
+    Settlement,
+    SucceededRun,
+    reconcile_once,
+)
 
 PROJECT = "product/discovery-context"
 ENCODED_PROJECT = "product%2Fdiscovery-context"
@@ -37,6 +43,8 @@ class FakeGitLab:
     merge_requests: list[dict[str, Any]] = field(default_factory=list)
     requests: list[httpx.Request] = field(default_factory=list)
     down: bool = False
+    # Merge requests GitLab fails to read (a 500), while it answers for the others.
+    broken: set[int] = field(default_factory=set)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -52,6 +60,8 @@ class FakeGitLab:
             return httpx.Response(200, json=self._merge_requests(request.url.params))
         if path == f"{prefix}/merge_requests" and request.method == "POST":
             return self._create(json.loads(request.content))
+        if path.startswith(f"{prefix}/merge_requests/") and request.method == "GET":
+            return self._single(int(path.rsplit("/", 1)[1]))
         return httpx.Response(404, json={"message": "404 Not Found"})
 
     def _branches(self, search: str) -> list[dict[str, Any]]:
@@ -78,6 +88,14 @@ class FakeGitLab:
             and state in ("all", mr["state"])
         ]
 
+    def _single(self, iid: int) -> httpx.Response:
+        if iid in self.broken:
+            return httpx.Response(500, json={"message": "500 Internal Server Error"})
+        for mr in self.merge_requests:
+            if mr["iid"] == iid:
+                return httpx.Response(200, json=mr)
+        return httpx.Response(404, json={"message": "404 Not found"})
+
     def _create(self, body: dict[str, Any]) -> httpx.Response:
         missing = [k for k in ("source_branch", "target_branch", "title") if not body.get(k)]
         if missing:
@@ -86,6 +104,10 @@ class FakeGitLab:
         mr = {
             "iid": iid,
             "state": "opened",
+            "merge_user": None,
+            "closed_by": None,
+            "merged_at": None,
+            "closed_at": None,
             "web_url": f"https://gitlab.example.test/{PROJECT}/-/merge_requests/{iid}",
             **body,
         }
@@ -134,12 +156,12 @@ async def test_no_branch_means_none(merge_requests: GitLabMergeRequests) -> None
 async def test_open_creates_a_merge_request_into_the_target_branch(
     gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
 ) -> None:
-    url = await merge_requests.open(
+    opened = await merge_requests.open(
         "discovery", "run-1", "golem/H-7/run-1", "Proposal for H-7", "From run run-1."
     )
 
     [mr] = gitlab.merge_requests
-    assert url == mr["web_url"]
+    assert (opened.url, opened.iid, opened.target) == (mr["web_url"], mr["iid"], "H-7")
     assert (mr["source_branch"], mr["target_branch"]) == ("golem/H-7/run-1", "main")
     assert (mr["title"], mr["description"]) == ("Proposal for H-7", "From run run-1.")
 
@@ -165,9 +187,9 @@ async def test_a_closed_merge_request_does_not_count_as_open(
         {"iid": 9, "state": "closed", "source_branch": "golem/H-7/run-1", "web_url": "old"}
     )
 
-    url = await merge_requests.open("discovery", "run-1", "golem/H-7/run-1", "t", "d")
+    opened = await merge_requests.open("discovery", "run-1", "golem/H-7/run-1", "t", "d")
 
-    assert url != "old"
+    assert opened.url != "old"
 
 
 async def test_gitlab_errors_become_gitlab_error(
@@ -201,18 +223,20 @@ async def test_an_agent_without_a_project_is_a_gitlab_error(
 async def test_a_run_of_an_agent_without_a_project_settles_instead_of_retrying_forever(
     merge_requests: GitLabMergeRequests,
 ) -> None:
-    detail = await propose_merge_request(merge_requests, SucceededRun("run-1", "reviewer"))
+    settled = await propose_merge_request(merge_requests, SucceededRun("run-1", "reviewer"))
 
-    assert "no GitLab project is configured for agent 'reviewer'" in detail
-    assert "not proposed" in detail
+    assert "no GitLab project is configured for agent 'reviewer'" in settled.detail
+    assert "not proposed" in settled.detail
+    assert settled.merge_request is None
 
 
 async def test_a_run_without_a_branch_proposed_nothing(
     merge_requests: GitLabMergeRequests,
 ) -> None:
-    detail = await propose_merge_request(merge_requests, SucceededRun("run-1", "discovery"))
+    settled = await propose_merge_request(merge_requests, SucceededRun("run-1", "discovery"))
 
-    assert detail == "Run run-1 succeeded and proposed no changes."
+    assert settled.detail == "Run run-1 succeeded and proposed no changes."
+    assert settled.merge_request is None
 
 
 async def test_a_run_with_a_branch_proposes_a_merge_request(
@@ -220,10 +244,12 @@ async def test_a_run_with_a_branch_proposes_a_merge_request(
 ) -> None:
     gitlab.branches = ["golem/H-7/run-1"]
 
-    detail = await propose_merge_request(merge_requests, SucceededRun("run-1", "discovery"))
+    settled = await propose_merge_request(merge_requests, SucceededRun("run-1", "discovery"))
 
     [mr] = gitlab.merge_requests
-    assert mr["web_url"] in detail
+    assert mr["web_url"] in settled.detail
+    assert settled.merge_request is not None
+    assert settled.merge_request.url == mr["web_url"]
     assert "H-7" in mr["title"]
     assert "run-1" in mr["description"]
 
@@ -232,7 +258,7 @@ async def test_a_run_with_a_branch_proposes_a_merge_request(
 
 
 async def reconcile(dsn: str, board: StatusBoard, inbox: Inbox, gitlab: GitLabMergeRequests):
-    async def propose(run: SucceededRun) -> str:
+    async def propose(run: SucceededRun) -> Settlement:
         return await propose_merge_request(gitlab, run)
 
     async def proposed(run: SucceededRun) -> bool:
@@ -370,7 +396,7 @@ async def test_one_run_failing_to_propose_does_not_hold_back_the_others(
     board.statuses |= {stuck: JobStatus.SUCCEEDED, fine: JobStatus.SUCCEEDED}
     board.statuses[failed] = JobStatus.FAILED
 
-    async def propose(run: SucceededRun) -> str:
+    async def propose(run: SucceededRun) -> Settlement:
         if run.run_id == stuck:
             raise GitLabError("merge request refused")
         return await propose_merge_request(merge_requests, run)

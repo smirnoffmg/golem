@@ -227,7 +227,7 @@ async def test_a_role_in_a_delegates_to_b_for_the_human_under_as_root(
     got = await golem.rpc(idp_token("alice"), "GetTask", {"tenant": "b", "id": task_b_id})
     task_b = got.json()["result"]
     assert task_b["status"]["state"] == "TASK_STATE_WORKING"
-    assert task_b["metadata"] == {"runId": run_b.run_id, "chain": ["a"]}
+    assert task_b["metadata"] == {"golemAgent": "b", "runId": run_b.run_id, "chain": ["a"]}
     hidden = await golem.rpc(idp_token("bob"), "GetTask", {"tenant": "b", "id": task_b_id})
     assert "error" in hidden.json()
 

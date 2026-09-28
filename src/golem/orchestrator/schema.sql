@@ -34,3 +34,31 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS proposal_settled_at timestamptz;
 CREATE INDEX IF NOT EXISTS runs_unsettled ON runs (id)
     WHERE status = 'succeeded' AND proposal_settled_at IS NULL;
 CREATE INDEX IF NOT EXISTS run_tasks_unnotified ON run_tasks (run_id) WHERE notified_at IS NULL;
+
+-- A succeeded run's result waiting for a person (ADR 0015). Only the merge_request kind is
+-- recorded so far: its decision is taken in GitLab, and the reconciler follows it there.
+CREATE TABLE IF NOT EXISTS proposals (
+    id             uuid PRIMARY KEY,
+    run_id         uuid NOT NULL UNIQUE REFERENCES runs (id),
+    task_id        text NOT NULL,
+    agent          text NOT NULL,
+    owner          text NOT NULL,
+    kind           text NOT NULL
+                   CHECK (kind IN ('merge_request', 'wiki_edit', 'desk_reply', 'tracker_issue')),
+    state          text NOT NULL DEFAULT 'pending'
+                   CHECK (state IN ('pending', 'accepted', 'applied', 'rejected', 'stale',
+                                    'failed')),
+    payload        jsonb NOT NULL DEFAULT '{}',
+    target         text,
+    url            text,
+    decided_by     text,
+    decided_at     timestamptz,
+    detail         text,
+    checked_at     timestamptz,
+    -- The outbox of state changes: the row is notified to the task service until it equals state.
+    notified_state text,
+    created_at     timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS proposals_pending_merge_requests ON proposals (checked_at)
+    WHERE kind = 'merge_request' AND state = 'pending';

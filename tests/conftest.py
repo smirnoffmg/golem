@@ -32,7 +32,7 @@ async def runs_db(runs_dsn: str) -> AsyncIterator[str]:
 
     async with await psycopg.AsyncConnection.connect(runs_dsn, autocommit=True) as conn:
         await apply_schema(conn)
-        await conn.execute("TRUNCATE runs, run_tasks")
+        await conn.execute("TRUNCATE runs, run_tasks, proposals")
     yield runs_dsn
 
 

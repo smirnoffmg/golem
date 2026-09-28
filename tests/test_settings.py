@@ -302,6 +302,18 @@ def test_reconciler_settings() -> None:
     assert settings.kubernetes is Kubernetes.KUBECONFIG
 
 
+def test_merge_requests_are_polled_every_five_minutes_unless_set() -> None:
+    assert reconciler_settings(RECONCILER_ENV).mr_poll_seconds == 300
+    assert (
+        reconciler_settings({**RECONCILER_ENV, "GOLEM_MR_POLL_SECONDS": "60"}).mr_poll_seconds == 60
+    )
+
+
+def test_a_non_positive_merge_request_poll_is_refused() -> None:
+    with pytest.raises(SettingsError, match="GOLEM_MR_POLL_SECONDS"):
+        reconciler_settings({**RECONCILER_ENV, "GOLEM_MR_POLL_SECONDS": "0"})
+
+
 def test_a_non_positive_interval_is_refused() -> None:
     with pytest.raises(SettingsError, match="GOLEM_RECONCILE_INTERVAL_SECONDS"):
         reconciler_settings({**RECONCILER_ENV, "GOLEM_RECONCILE_INTERVAL_SECONDS": "0"})
