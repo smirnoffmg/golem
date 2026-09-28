@@ -154,9 +154,13 @@ and ID tokens stay in `golem_ui`, encrypted with the UI's key; the browser holds
 session id in `__Host-golem-session` (`Secure`, `HttpOnly`, `SameSite=Lax`). Every A2A call
 carries the signed-in user's own access token, so the edge, the audit log, admission and the
 task store see `user:<name>`, not the UI; unlike the adapters, the UI has no identity of its
-own at the edge. Pages are server-rendered with autoescape, no inline script and a strict CSP;
-every `POST` carries the session's CSRF token. The edge forwards `ListTasks`, which the task
-store answers with the caller's own tasks only.
+own at the edge. Since [ADR 0018](adr/0018-board.md) it serves JSON, not pages: the board, a
+React application served as static files by its own nginx container on the same origin,
+shows each agent's tasks as a kanban and polls the API every ten seconds while its tab is
+visible. Every `POST` carries the session's CSRF token in a header and a JSON body; both
+containers send the same strict CSP, and the board has no inline script or style. The edge
+forwards `ListTasks` with the agent as tenant, which the task store answers with the caller's
+own tasks for that agent only.
 
 ```plantuml
 @startuml
@@ -173,7 +177,8 @@ System_Ext(ext_agents, "Agents of other platforms", "A2A", $tags="target")
 System_Ext(ci, "Agent catalog GitLab CI", "evaluation job is an A2A client; Pipelines must succeed")
 
 System_Boundary(platform, "Golem (orchestrator namespace)") {
-  Container(ui, "UI", "Python, server-rendered; backend-for-frontend; OIDC login", "agents and their cards, task submission, my tasks, cancel; decision queue (target); tokens stay server-side")
+  Container(board, "Board", "React, TypeScript; static files from nginx", "agents, a kanban per agent, start, answer, cancel; polls the UI's API; holds no token")
+  Container(ui, "UI", "Python; JSON backend-for-frontend; OIDC login", "sign-in and sessions; the board's API over the edge; decision queue (target); tokens stay server-side")
   Container(adapters, "Channel adapters", "Python; A2A clients", "Jira and GitLab webhooks, Mattermost bot: event to A2A task; accepted merge request to task continuation; push to comment or message")
   Container(edge, "A2A edge", "Python; stateless; 2+ replicas", "the only door; Agent Card; authentication, token exchange; chain policy; per-caller rate limit; audit; outbound calls; fails closed")
   Container(tasks, "Task service", "Python, a2a-sdk, A2A 1.0", "task executor; task store; push notifications; resume after a human answer")
@@ -201,7 +206,8 @@ System_Ext(langfuse, "Langfuse", "traces; golden sets and experiments")
 System_Ext(keycloak, "Keycloak")
 System_Ext(vault, "Vault")
 
-Rel(customer, ui, "task, status")
+Rel(customer, board, "task, status", "browser")
+Rel(board, ui, "JSON API, same origin", "HTTPS")
 Rel(gate, gitlab, "merge request review; accept")
 Rel(author, gitlab, "merge request to an agent catalog")
 Rel(gitlab, ci, "pipeline on catalog merge request")

@@ -21,6 +21,14 @@ One run, one merge request in the agent's context repository:
 The run id leads to the run's task, trace and audit rows (ask the platform team). The role's
 summary in the commit message is its own account of what it did.
 
+## Where you find it
+
+On the board ([getting-started.md](getting-started.md)), a task whose run opened a merge
+request sits in **To review**, with a link to the merge request. The decision itself is taken
+in GitLab: the board has no merge or close button for merge requests. The platform reads the
+merge request's state back from GitLab every few minutes (`GOLEM_MR_POLL_SECONDS`, five by
+default); once it is merged or closed, the card moves to the archive.
+
 ## What validation already guarantees
 
 Before the branch was pushed, the change passed every check of

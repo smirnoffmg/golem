@@ -195,6 +195,14 @@ One process per tool group ([ADR 0008](../adr/0008-platform-mcp-servers.md)).
 | `GOLEM_RATE_START_PER_MINUTE`, `GOLEM_RATE_START_BURST` | `10`, `5` | per session, starting tasks |
 | `GOLEM_TRUSTED_PROXIES` | none | the ingress controller's pods |
 
+### Board: the `golem-board` image
+
+The board's nginx has no settings: its configuration (`board/nginx.conf`) is baked into the
+image, and nothing is templated at start ([ADR 0018](../adr/0018-board.md)). It needs no Secret,
+no ConfigMap and no network access. What it answers is fixed by the image: `index.html` for
+every path but `/assets/`, the security headers of ADR 0018 on every answer, and caching by
+path. A change to either means a new image.
+
 ### Runtime Job: `python -m golem.runtime`
 
 The task service writes the first group into every Job; the rest comes from the run Secret
@@ -271,8 +279,8 @@ it reads at `/etc/golem/`. `golem-mcp-registry` lives in `golem-jobs`, because r
 
 Adding an agent touches five of them: the call registry, catalogs, agent tools, GitLab projects
 and, if Jira should start it, the labels; plus the agent cards below, and
-`GOLEM_MATTERMOST_AGENTS` if people should reach it there. The UI lists what the call registry
-lets each person call.
+`GOLEM_MATTERMOST_AGENTS` if people should reach it there. The board lists what the call
+registry lets each person call, from the edge's directory.
 
 ### Call registry
 
@@ -380,8 +388,8 @@ patches:
         value: {name: cards, mountPath: /etc/golem/cards, readOnly: true}
 ```
 
-An agent without a card is still callable if the registry allows it; the UI shows it as
-unavailable.
+An agent without a card is still callable over A2A if the registry allows it, but the edge's
+directory leaves it out, so the board does not list it.
 
 Every card is signed at start with the card key (`GOLEM_CARD_SIGNING_KEY_FILE`, kid
 `GOLEM_CARD_SIGNING_KID`) as A2A 1.0 specifies (a JWS over the card's RFC 8785 canonical form),
@@ -400,6 +408,7 @@ call registry lets them call to an authenticated one. How a caller uses both:
 | reconciler | 9090 | none: a crash ends the process and the kubelet restarts it |
 | jira-adapter, mattermost-adapter, mcp-* | 8000, 9090 | TCP on 8000 |
 | ui | 8000, 9090 | readiness `GET /healthz`, liveness TCP |
+| board | 8080 | readiness `GET /`, liveness TCP |
 
 Moving a port means changing the setting, the container port, the Service and the network
 policies together ([deploy/k8s/README.md](../../deploy/k8s/README.md#what-runs-where)).

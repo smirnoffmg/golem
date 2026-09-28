@@ -6,7 +6,7 @@ Rolling out a new Golem image, what happens to the database schema, and how to g
 
 | Part | How it changes | What keeps working meanwhile |
 | --- | --- | --- |
-| the eight Deployments | a rolling update per Deployment when the image or the pod template changes | the edge and the UI have two replicas; the others one, with a new pod started before the old one stops |
+| the nine Deployments | a rolling update per Deployment when the image or the pod template changes | the edge, the UI and the board have two replicas; the others one, with a new pod started before the old one stops |
 | runs in flight | not at all: a Job keeps the image it was created with | they finish on the old image; the new reconciler reads their report |
 | new runs | use `GOLEM_JOB_IMAGE` of the task service that launches them | nothing |
 | `golem_runs`, `golem_ui` tables | additive changes applied by the new processes at start | old processes ignore new columns |
@@ -56,16 +56,18 @@ the database owner, after a backup.
 1. **Back up** ([backup-and-restore.md](backup-and-restore.md#back-up)), and read the changes
    since your version: new settings (a process refuses to start without a required one,
    [configuration.md](configuration.md)), changed policies, new ADRs.
-2. **Build and push** the image under a new tag (never reuse a tag: nodes cache images):
+2. **Build and push** both images under a new tag (never reuse a tag: nodes cache images):
 
 ```sh
 docker build --tag registry.internal/golem:0.1.1 .
-docker push registry.internal/golem:0.1.1     # environment-specific
+docker build --tag registry.internal/golem-board:0.1.1 board
+docker push registry.internal/golem:0.1.1           # environment-specific
+docker push registry.internal/golem-board:0.1.1     # environment-specific
 ```
 
-3. **Change both references** in your overlay: `newTag` under `images` in
+3. **Change every reference** in your overlay: both `newTag`s under `images` in
    `kustomization.yaml`, and `GOLEM_JOB_IMAGE` in `config.yaml`. kustomize does not rewrite
-   environment values, so forgetting the second keeps new runs on the old image.
+   environment values, so forgetting the last keeps new runs on the old image.
 4. **Review** what will change. `kubectl diff` exits with 1 when there are differences:
 
 <!-- run: upgrade-diff -->
@@ -106,6 +108,7 @@ kubectl -n golem-system get configmap golem-tasks-env -o jsonpath='{.data.GOLEM_
 
 ```
 NAME                 IMAGE
+board                registry.internal/golem-board:0.1.1
 edge                 registry.internal/golem:0.1.1
 jira-adapter         registry.internal/golem:0.1.1
 mattermost-adapter   registry.internal/golem:0.1.1
@@ -117,7 +120,7 @@ ui                   registry.internal/golem:0.1.1
 registry.internal/golem:0.1.1
 ```
 
-   Then start a run (UI or [A2A](install.md#10-first-run)) and check its Job's image:
+   Then start a run (the board or [A2A](install.md#10-first-run)) and check its Job's image:
    `kubectl -n golem-jobs get jobs -l app.kubernetes.io/name=golem-run -o custom-columns='NAME:.metadata.name,IMAGE:.spec.template.spec.containers[0].image'`.
    Watch `golem_http_requests_total{status_class="5xx"}` and the alerts of
    [alerts.md](alerts.md) for the next hour.
@@ -136,7 +139,28 @@ database backup to roll back code. Restore data only when data is wrong, and the
 of the overlay brings the new image back; fix the overlay as soon as possible.
 
 Runs started on the new image keep it until they end. If the new runtime itself is the
-problem, cancel them (the UI's **Cancel**, or A2A `CancelTask`) after the rollback.
+problem, cancel them (**Cancel** on the board, or A2A `CancelTask`) after the rollback.
+
+## Upgrading to the board
+
+The release that brings the board ([ADR 0018](../adr/0018-board.md)) replaces the UI's pages
+with a JSON API and a second image. Roll it out as one change:
+
+1. **Build and push both images** (step 2 above) and add the board's image to `images` in
+   your overlay; the base adds the `board` Deployment, Service, service account and network
+   policy.
+2. **Change the ingress in the same change window** as the new `ui` image: the UI's host is
+   now routed by path, `/api/` and `/login`, `/callback`, `/logout`, `/healthz` to `ui`, the
+   rest to `board` ([install.md, step 7](install.md#7-write-your-overlay)). The new `ui` serves
+   no pages, so the old routing shows people errors until it changes; the old `ui` knows none
+   of the board's `/api/` paths, so routing first breaks the pages the other way.
+3. **Remove `GOLEM_UI_AGENTS`** from `golem-ui-env`. The board lists the agents the edge's
+   directory lets each person call; the setting is no longer read.
+4. **Nothing to run for the tasks' agents.** The task service records each task's agent and,
+   when it starts, fills it in for existing tasks from `golem_runs`. Tasks without a run (never
+   admitted before the upgrade) appear on no board; they are still readable over A2A.
+
+Rolling back this release means rolling back the ingress change with it.
 
 ## Upgrading Kubernetes, the CNI, Postgres
 
@@ -154,4 +178,6 @@ The run-marked blocks were executed on the k3s cluster of
 [install.md](install.md#how-this-guide-was-checked) after the first run: a second tag of the
 same build imported into the cluster, both references changed in the overlay, the diff, the
 apply and the check above, a run on the new image, and the rollback to the first tag with the
-same apply block.
+same apply block. The board's lines (its image in steps 2, 3 and 7, and
+[Upgrading to the board](#upgrading-to-the-board)) were added after that run and were not
+executed on a cluster.

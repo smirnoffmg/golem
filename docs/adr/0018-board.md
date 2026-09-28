@@ -392,6 +392,25 @@ that switches to the stream changes its transport, not its model.
   test of [ADR 0011](0011-web-ui.md) runs against the built image behind the same routing, so the policy is
   checked where it applies.
 
+### The board as first built
+
+- **Column order.** The board shows Waiting for me first, then To review, In progress and
+  Failed, with the archive folded below: what asks for the person comes first, and it is the
+  one column drawn in the accent. The columns themselves are the table's.
+- **Caching by status.** `Cache-Control` comes from a `map` on the status and the URI: only a
+  `200` or `304` under `/assets/` is `immutable`, so a 404 for an asset asked for in the middle
+  of a deploy is not cached for a year.
+- **No egress, no scraping.** The namespace-wide `allow-dns` and `allow-metrics-scrape`
+  policies select every `part-of: golem` pod; they exclude the board with a `NotIn` expression
+  on `app.kubernetes.io/name`, and so does the Prometheus Operator overlay's ServiceMonitor, so
+  the board's pods reach nothing and admit only the ingress controller.
+- **No Ingress object.** The base has none for any Service; the path routing is in
+  `deploy/k8s/README.md` and the install guide. The browser test puts a front that routes the
+  same way (`tests/support/front.py`) before the real board image and the real
+  backend-for-frontend.
+- **Development.** `vite` also proxies `/healthz`. Waiting for me and its answer form exist, but
+  no Golem run asks for input yet, as above.
+
 ### What changes elsewhere
 
 - `golem.settings`: `GOLEM_UI_AGENTS` goes away; the UI settings otherwise stay.

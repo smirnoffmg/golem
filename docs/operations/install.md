@@ -34,14 +34,17 @@ independently of Golem (environment-specific, needs `sonobuoy`):
 sonobuoy run --e2e-focus=NetworkPolicy --wait
 ```
 
-## 2. Build and publish the image
+## 2. Build and publish the images
 
-One image runs every process and every run. Build it and push it to a registry your cluster
-pulls from (`registry.internal` stands for yours):
+One image runs every process and every run; a second one, the board, serves the web UI's
+static files from nginx ([ADR 0018](../adr/0018-board.md)). Build both with the same tag and
+push them to a registry your cluster pulls from (`registry.internal` stands for yours):
 
 ```sh
 docker build --tag registry.internal/golem:0.1.0 .
-docker push registry.internal/golem:0.1.0     # environment-specific
+docker build --tag registry.internal/golem-board:0.1.0 board
+docker push registry.internal/golem:0.1.0           # environment-specific
+docker push registry.internal/golem-board:0.1.0     # environment-specific
 ```
 
 ## 3. Create the databases and roles
@@ -320,6 +323,7 @@ fails the build rather than opening the wrong rule.
 | Value in the example | Replace with | Where |
 | --- | --- | --- |
 | `registry.internal/golem:0.1.0` | your image (twice: `images` and `GOLEM_JOB_IMAGE`) | `kustomization.yaml`, `config.yaml` |
+| `registry.internal/golem-board:0.1.0` | your board image | `kustomization.yaml` |
 | `idp.internal`, realm `golem` | your identity provider's issuer and endpoints | `config.yaml` |
 | `golem.internal`, `golem-ui.internal` | the public hosts of the edge and the UI | `config.yaml` |
 | `gitlab.internal`, `jira.internal`, `confluence.internal`, `mattermost.internal` | your hosts | `config.yaml` |
@@ -362,8 +366,16 @@ kubectl label namespace monitoring golem.dev/monitoring=true
 The base has no Ingress objects: routes and TLS depend on your controller. Route
 `https://golem.internal` to Service `edge` port 8000 (A2A, agent cards, `/agents` and
 `/.well-known/golem-card-keys.json`), the Jira webhook
-path `/jira/webhook` to `jira-adapter` port 8000, and `https://golem-ui.internal` to `ui` port
-8000. Never route `/a2a/push` of an adapter from outside: only the task service may call it.
+path `/jira/webhook` to `jira-adapter` port 8000, and the UI's host by path, since the board and
+its backend share one origin ([ADR 0018](../adr/0018-board.md)):
+
+| Path on `https://golem-ui.internal` | Service |
+| --- | --- |
+| `/api/` (prefix) | `ui` port 8000 |
+| `/login`, `/callback`, `/logout`, `/healthz` (exact) | `ui` port 8000 |
+| everything else | `board` port 8080 |
+
+Never route `/a2a/push` of an adapter from outside: only the task service may call it.
 
 ## 8. Apply
 
@@ -391,6 +403,7 @@ Expected:
 ```
 $ kubectl -n golem-system get deployments
 NAME                 READY   UP-TO-DATE   AVAILABLE   AGE
+board                2/2     2            2           7s
 edge                 2/2     2            2           7s
 jira-adapter         1/1     1            1           7s
 mattermost-adapter   1/1     1            1           7s
@@ -466,8 +479,8 @@ this run, push the content of [examples/context](../../examples/context) to
 `agents/discovery` (environment-specific). Its roles name the tool groups `tracker.read` and
 `wiki.read`, so the run also exercises the run token and both MCP servers.
 
-**From the UI.** Open `https://golem-ui.internal`, sign in, choose **New task**, pick
-`discovery`, write a goal, **Start**. The walkthrough with screenshots is
+**From the board.** Open `https://golem-ui.internal`, sign in, choose `discovery` on the left,
+write a goal in **New task for discovery**, **Start**. The walkthrough with screenshots is
 [getting-started.md](../guide/getting-started.md).
 
 **Over A2A.** The agent card is public:
@@ -602,6 +615,11 @@ changes only the `Evidence` section of `hypotheses/H-2.md`. What a gate owner do
   had no ingress. Outputs above are from that run.
 - Not executed: `sonobuoy`, `docker push`, the identity provider, GitLab, gateway and trace
   store set-up and their checks, the namespace labels and the Ingress routes.
+- Added after that run: the board ([ADR 0018](../adr/0018-board.md)): its image, Deployment,
+  Service and policy, and the UI host's path routing. The manifests are checked by rendering
+  them (`tests/test_k8s_render.py`), the image and the routing by the browser test
+  (`tests/e2e/test_ui_browser.py`, the real image behind a front that routes like the
+  ingress); the `board` line of step 8's expected output was not seen on that cluster.
 - Added after that run: the card signing key (its line in step 6, its Secret in step 8). Step
   6's line runs in `tests/test_docs.py`, which also checks that the edge's parser accepts the
   key; the Secret and its mount are checked by rendering the manifests

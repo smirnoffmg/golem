@@ -32,10 +32,10 @@ is the catalog, and the figure is stopped by the platform, not by the model.
 | Task service | `golem_tasks` | A2A task lifecycle: executor, store, push notifications, resume after a human answer |
 | Orchestrator | `golem_runs` | run admission and quotas; run, process and evaluation workflows; Jobs; merge requests |
 | Runtime Job | none (ephemeral) | one image for every agent: loads the catalog, runs the lead and roles, writes a branch, emits traces |
-| Web UI | `golem_ui` | sign-in, agents, starting, listing and canceling one's own tasks; calls the edge with the user's own token |
+| Web UI | `golem_ui` | backend-for-frontend: sign-in, sessions, and the board's JSON API over the edge with the user's own token |
+| Board | none | static React client served by nginx: the agents, a kanban of one's own tasks per agent, start, answer, cancel; talks only to the web UI's API on the same origin ([ADR 0018](docs/adr/0018-board.md)) |
 | Channel adapters | none | Jira and GitLab webhooks, chat bot, all as A2A clients |
 | Platform MCP servers | none | Jira, Confluence and GitLab tools; accept run tokens only; hold their own secrets; audit every decision |
-| Board (proposed, [ADR 0018](docs/adr/0018-board.md)) | none | static React client served by nginx; talks only to the web UI's JSON API on the same origin |
 | Write MCP servers (proposed, [ADR 0015](docs/adr/0015-proposals.md)) | none | apply accepted proposals to Confluence, the service desk and Jira; accept proposal tokens from the task service only |
 | Postgres cluster | `golem_tasks`, `golem_runs`, `golem_audit`, `golem_ui` | one cluster, one owner per database |
 
@@ -100,9 +100,11 @@ examples/
   context/                 an example context repository the discovery agent works on
   mcp-registry.yaml        an example platform MCP registry for the discovery roles
 scripts/
-  ui_demo.py               the web UI with seeded tasks on localhost, to look around
+  ui_demo.py               the board with seeded tasks on localhost, to look around
   ui_screenshots.py        the screenshots in docs/images/ui
-tests/support/             the fake identity provider and the UI demo stack, shared with scripts/
+tests/support/             the fake identity provider, the UI demo stack and its ingress-like
+                           front, shared with scripts/
+board/                     the board: React, TypeScript, Vite; its nginx.conf and Dockerfile
 docs/
   README.md                index of the guides
   architecture.md          C4 diagrams (PlantUML)
@@ -110,7 +112,7 @@ docs/
   guide/                   for users: getting started, reviewing proposals, channels, writing an agent
   operations/              for operators: install, configuration, security, backup, upgrade,
                            alerts, runbooks, troubleshooting
-  images/ui/               screenshots of the web UI
+  images/ui/               screenshots of the board
 Dockerfile                 one image; the container role is chosen by the command
 ```
 
@@ -277,53 +279,65 @@ Other settings: `GOLEM_EDGE_URL`, `GOLEM_OIDC_TOKEN_URL`, `GOLEM_OIDC_CLIENT_SEC
 
 ## Web UI
 
-`python -m golem.ui` serves pages for people: sign in, see the agents, give one a goal, see
-one's own tasks and cancel one ([ADR 0011](docs/adr/0011-web-ui.md)). It is a
-backend-for-frontend: the browser gets pages and one cookie, never a token.
+The web UI is two containers behind one host ([ADR 0018](docs/adr/0018-board.md)):
+`python -m golem.ui`, a backend-for-frontend that signs people in and answers JSON, and the
+board, a React application served as static files by nginx (`board/`). The browser talks only
+to its own origin and never holds a token ([ADR 0011](docs/adr/0011-web-ui.md)).
 
 - **Sign-in**: OpenID Connect authorization code flow with PKCE S256, the UI a confidential
   client (`client_secret_basic`). `state`, `nonce` and the verifier are used once, expire after
   ten minutes and are bound to the browser that started the sign-in. The ID token's signature,
-  issuer, audience, `azp`, expiry and nonce are checked.
+  issuer, audience, `azp`, expiry and nonce are checked. A failed sign-in comes back as
+  `/?signin=<code>`, and the board shows a fixed message for it.
 - **Sessions** live in `golem_ui` (role `golem_ui`): the row is keyed by a hash of the cookie,
   and the access, refresh and ID tokens are encrypted with `GOLEM_UI_SESSION_KEY` (a Fernet
   key). The cookie is `__Host-golem-session` with `Path=/; Secure; HttpOnly; SameSite=Lax`. The
   access token is refreshed a minute before it expires; a failed refresh ends the session, and
   every session ends twelve hours after sign-in. Signing out deletes the session and, if the
   identity provider offers one, goes through its end-session endpoint.
-- **To the edge**: `SendMessage`, `GetTask`, `ListTasks` and `CancelTask` with the user's own
-  access token, so the run's caller is `user:<name>`; the call registry must allow `user:*`
-  (or the users) for each agent in `GOLEM_UI_AGENTS`. The message id comes from a nonce in each
-  rendered form, so a double submit starts one run. The access token must carry the edge's
-  audience.
-- **In the browser**: server-rendered Jinja2 with autoescape, no scripts, no third-party
-  assets; every `POST` carries the session's CSRF token; every response has a strict
-  Content-Security-Policy, `nosniff`, `Referrer-Policy: same-origin` and, over https, HSTS.
+- **The JSON API** (`/api/`): the agents the edge's directory lets the person call, one agent's
+  board (a snapshot of the last hundred tasks, then deltas since a cursor), older tasks, one
+  task, and start, answer and cancel. Every call to the edge carries the user's own access
+  token, so the run's caller is `user:<name>`; the task service records each task's agent, and
+  `ListTasks` with the agent as tenant returns only the caller's tasks for it. A start's
+  message id comes from a nonce the board draws, so a double submit starts one run. Every
+  `POST` carries the session's CSRF token in `X-Golem-CSRF` and a JSON body; `/api/` answers
+  401, never a redirect.
+- **The board**: the agents on the left, and per agent the columns Waiting for me, To review,
+  In progress, Failed and a folded Archive, which the backend assigns. It polls every ten
+  seconds while its tab is visible, waits as long as a 429 asks, and renders every payload as
+  text: a lint rule fails the build on `dangerouslySetInnerHTML` or a `style` attribute. The
+  build has no inline script and no `data:` asset, so both containers send the same strict
+  Content-Security-Policy, with `nosniff`, `Referrer-Policy: same-origin`,
+  `Cross-Origin-Opener-Policy: same-origin` and HSTS; the board's nginx caches hashed assets
+  for a year and revalidates everything else.
 
-To look at it, `uv run python scripts/ui_demo.py` starts Postgres (testcontainers), the real
-UI, edge and task service with a fake Job launcher, and a fake identity provider that signs in
-`alice` without a password, then seeds a task in every state; open `http://localhost:8090`
-(`--port` to change it). `uv run python scripts/ui_screenshots.py` runs the same stack with ids
-and timestamps frozen and writes the screenshots below to `docs/images/ui/` (headless Chromium,
-1280x800, the task list also 390x844; the same bytes on every run).
+To look at it, `uv run python scripts/ui_demo.py` builds the board's image and starts it and
+Postgres (testcontainers), the real backend-for-frontend, edge and task service with a fake Job
+launcher, and a fake identity provider that signs in `alice` without a password, all behind a
+front that routes like the ingress; it seeds a task in every state. Open
+`http://localhost:8090` (`--port` to change it). `uv run python scripts/ui_screenshots.py` runs
+the same stack with ids and timestamps frozen and writes the screenshots below to
+`docs/images/ui/` (headless Chromium, 1280x800, the board also 390x844). To work on the board
+itself, `npm run dev` in `board/` serves it with Vite and proxies the API to a local UI
+(`GOLEM_BFF_URL`, default `http://127.0.0.1:8000`); `npm run check` runs its type check, lint,
+unit tests and build.
 
 | | |
 |---|---|
-| ![Sign in](docs/images/ui/sign-in.png) | ![Agents](docs/images/ui/agents.png) |
-| ![New task](docs/images/ui/new-task.png) | ![My tasks](docs/images/ui/tasks.png) |
-| ![Working](docs/images/ui/task-working.png) | ![Completed, with a merge request](docs/images/ui/task-completed.png) |
-| ![Failed validation](docs/images/ui/task-failed.png) | ![Rejected by admission](docs/images/ui/task-rejected.png) |
-| ![Canceled](docs/images/ui/task-canceled.png) | ![Rate limited](docs/images/ui/error-rate-limited.png) |
-
-![My tasks on a phone](docs/images/ui/tasks-narrow.png)
+| ![Sign in](docs/images/ui/sign-in.png) | ![An agent's board](docs/images/ui/board.png) |
+| ![New task](docs/images/ui/new-task.png) | ![Working](docs/images/ui/task-working.png) |
+| ![Completed, with a merge request](docs/images/ui/task-completed.png) | ![Failed validation](docs/images/ui/task-failed.png) |
+| ![Refused by admission](docs/images/ui/task-rejected.png) | ![Canceled](docs/images/ui/task-canceled.png) |
+| ![Rate limited](docs/images/ui/error-rate-limited.png) | ![The board on a phone](docs/images/ui/board-narrow.png) |
 
 At the identity provider, register `GOLEM_OIDC_REDIRECT_URL` (`GOLEM_PUBLIC_BASE_URL` +
 `/callback`) and `GOLEM_PUBLIC_BASE_URL` + `/` as the post-logout redirect URL.
 Settings: `GOLEM_OIDC_ISSUER`, `GOLEM_OIDC_DISCOVERY_URL`, `GOLEM_OIDC_CLIENT_ID`,
 `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_OIDC_REDIRECT_URL`, `GOLEM_EDGE_URL`, `GOLEM_UI_DSN`,
 `GOLEM_UI_SESSION_KEY` (`python -c "from cryptography.fernet import Fernet;
-print(Fernet.generate_key().decode())"`), `GOLEM_UI_AGENTS`, `GOLEM_PUBLIC_BASE_URL` (https, or
-http on localhost), `GOLEM_PORT`.
+print(Fernet.generate_key().decode())"`), `GOLEM_PUBLIC_BASE_URL` (https, or http on localhost),
+`GOLEM_PORT`. The board has none: its nginx configuration is baked into its image.
 
 ## Rate limits
 

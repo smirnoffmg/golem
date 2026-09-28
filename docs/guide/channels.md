@@ -1,6 +1,6 @@
 # Starting runs from Jira and Mattermost
 
-Besides the [web UI](getting-started.md), an agent can be started where the work is discussed:
+Besides the [board](getting-started.md), an agent can be started where the work is discussed:
 a label on a Jira issue, or `/golem` in a Mattermost channel. The outcome comes back to the
 same place. Which agents each channel may start is the platform team's configuration.
 
@@ -95,6 +95,6 @@ run's goal and, for Mattermost, the task's metadata, as the channel reported it.
 - every user of a channel shares the adapter's quota: one busy channel can make others' starts
   `rejected` until runs end;
 - the audit log records the adapter as the caller;
-- your runs from a channel do not appear in **My tasks** in the UI.
+- your runs from a channel do not appear on your board.
 
-The UI starts runs as you, with your own quota and audit trail. Use it when that matters.
+The board starts runs as you, with your own quota and audit trail. Use it when that matters.
