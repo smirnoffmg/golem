@@ -1,8 +1,11 @@
+import string
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 SLUG = r"^[a-z][a-z0-9-]*$"
 TOOL_GROUP = r"^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)*$"
@@ -12,6 +15,19 @@ WRITES_DIR = r"^[A-Za-z0-9_][A-Za-z0-9._-]*(/[A-Za-z0-9_][A-Za-z0-9._-]*)*/?$"
 # The one tool group the runtime serves itself, not an MCP server: `delegate_to_agent`, which
 # asks another agent for work through the edge (ADR 0014). Like every group, deny by default.
 DELEGATE_GROUP = "agents.delegate"
+AGENT_FILE = "agent.yaml"
+PROCESS_FILE = "process.yaml"
+# A handful the model can tell apart from their `when` (ADR 0019), not a directory to search.
+MAX_DELEGATES = 7
+MAX_STAGES = 10
+MAX_GOAL_CHARS = 4000
+GOAL_INPUT = "input"
+
+ProposalKind = Literal["merge_request", "wiki_edit", "desk_reply", "tracker_issue"]
+
+
+class CatalogError(ValueError):
+    pass
 
 
 class _Frozen(BaseModel):
@@ -88,6 +104,18 @@ class ContextRepo(_Frozen):
     branch: str = "main"
 
 
+class Goal(_Frozen):
+    """What a goal agent's run executes: one role, on a record of one kind it creates."""
+
+    role: str
+    kind: str
+
+
+class Neighbour(_Frozen):
+    agent: str = Field(pattern=SLUG)
+    when: str = Field(min_length=1, max_length=300)
+
+
 class AgentCatalog(_Frozen):
     name: str = Field(pattern=SLUG)
     description: str
@@ -98,6 +126,10 @@ class AgentCatalog(_Frozen):
     roles: tuple[Role, ...] = ()
     # Order is priority: the lead takes the first rule that has a target.
     rules: tuple[Rule, ...] = ()
+    mode: Literal["records", "goal"] = "records"
+    goal: Goal | None = None
+    proposal: ProposalKind = "merge_request"
+    delegates: tuple[Neighbour, ...] = Field(default=(), max_length=MAX_DELEGATES)
 
     @model_validator(mode="after")
     def _rules_use_declared_names(self) -> "AgentCatalog":
@@ -120,6 +152,81 @@ class AgentCatalog(_Frozen):
                         _check_statuses(_declared_kind(kinds, linked), statuses)
         return self
 
+    @model_validator(mode="after")
+    def _goal_runs(self) -> "AgentCatalog":
+        if self.mode == "records":
+            if self.goal is not None:
+                raise ValueError("only an agent with mode: goal names a goal")
+            return self
+        if self.goal is None:
+            raise ValueError(f"goal agent {self.name!r} names no goal")
+        if self.context is None:
+            raise ValueError(f"goal agent {self.name!r} declares no context repository")
+        if self.goal.role not in {role.name for role in self.roles}:
+            raise ValueError(f"goal refers to undeclared role {self.goal.role!r}")
+        if self.goal.kind not in {kind.name for kind in self.kinds}:
+            raise ValueError(f"goal refers to undeclared kind {self.goal.kind!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _delegates_go_with_the_group(self) -> "AgentCatalog":
+        # The list is what the tool offers: a group without it offers nothing, a list without
+        # the group is dead text a reviewer would take for a grant.
+        names = [neighbour.agent for neighbour in self.delegates]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(f"neighbour {repeated[0]!r} is listed twice")
+        if self.name in names:
+            raise ValueError(f"agent {self.name!r} lists itself as a neighbour")
+        delegating = any(DELEGATE_GROUP in role.tools for role in self.roles)
+        if names and not delegating:
+            raise ValueError(
+                f"agent {self.name!r} lists delegates, but no role holds {DELEGATE_GROUP}"
+            )
+        if delegating and not names:
+            raise ValueError(
+                f"a role of {self.name!r} holds {DELEGATE_GROUP},"
+                " but the agent declares no delegates"
+            )
+        return self
+
+
+class Stage(_Frozen):
+    name: str = Field(pattern=SLUG)
+    agent: str = Field(pattern=SLUG)
+    goal: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _goal_is_a_template_of_the_input(self) -> "Stage":
+        for _, field_name, spec, conversion in string.Formatter().parse(self.goal):
+            if field_name is not None and (field_name != GOAL_INPUT or spec or conversion):
+                raise ValueError(
+                    f"stage {self.name!r}: a goal may use only {{{GOAL_INPUT}}},"
+                    f" not {{{field_name}}}"
+                )
+        if len(self.goal.format(input="")) > MAX_GOAL_CHARS:
+            raise ValueError(f"stage {self.name!r}: the goal is over {MAX_GOAL_CHARS} characters")
+        return self
+
+
+class ProcessCatalog(_Frozen):
+    """A process (ADR 0019): stages the platform runs in turn, each a goal agent's run."""
+
+    name: str = Field(pattern=SLUG)
+    description: str
+    version: str
+    skills: tuple[Skill, ...] = ()
+    return_limit: int = Field(default=2, ge=0, le=5)
+    stages: tuple[Stage, ...] = Field(min_length=1, max_length=MAX_STAGES)
+
+    @model_validator(mode="after")
+    def _stages_named_once(self) -> "ProcessCatalog":
+        names = [stage.name for stage in self.stages]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(f"stage {repeated[0]!r} is named twice")
+        return self
+
 
 def _declared_kind(kinds: dict[str, Kind], name: str) -> Kind:
     if name not in kinds:
@@ -135,3 +242,91 @@ def _check_statuses(kind: Kind, statuses: frozenset[str]) -> None:
 
 def load_catalog(path: Path) -> AgentCatalog:
     return AgentCatalog.model_validate(yaml.safe_load(path.read_text()))
+
+
+def render_goal(stage: Stage, message: str) -> str:
+    goal = stage.goal.format(input=message)
+    if not goal.strip():
+        raise ValueError(f"stage {stage.name!r}: the goal is empty")
+    if len(goal) > MAX_GOAL_CHARS:
+        raise ValueError(f"stage {stage.name!r}: the goal is over {MAX_GOAL_CHARS} characters")
+    return goal
+
+
+@dataclass(frozen=True)
+class Catalogs:
+    agents: Mapping[str, AgentCatalog] = field(default_factory=dict)
+    processes: Mapping[str, ProcessCatalog] = field(default_factory=dict)
+
+
+def load_catalogs(root: Path) -> Catalogs:
+    """Every ``<dir>/agent.yaml`` and ``<dir>/process.yaml`` under ``root``, checked together."""
+    agents: dict[str, AgentCatalog] = {}
+    processes: dict[str, ProcessCatalog] = {}
+    for directory in sorted(path for path in root.iterdir() if path.is_dir()):
+        agent_file, process_file = directory / AGENT_FILE, directory / PROCESS_FILE
+        if agent_file.is_file() and process_file.is_file():
+            raise CatalogError(
+                f"{directory}: both {AGENT_FILE} and {PROCESS_FILE}; a catalog is one"
+            )
+        if agent_file.is_file():
+            agent = _parsed(AgentCatalog, agent_file)
+            _check_new(agent.name, agents, processes)
+            agents[agent.name] = agent
+        elif process_file.is_file():
+            process = _parsed(ProcessCatalog, process_file)
+            _check_new(process.name, agents, processes)
+            processes[process.name] = process
+    check_catalogs(agents, processes)
+    return Catalogs(agents=agents, processes=processes)
+
+
+def _parsed[C: (AgentCatalog, ProcessCatalog)](model: type[C], path: Path) -> C:
+    try:
+        return model.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+    except (ValidationError, yaml.YAMLError) as error:
+        raise CatalogError(f"{path}: {error}") from error
+
+
+def _check_new(name: str, *taken: Mapping[str, object]) -> None:
+    if any(name in names for names in taken):
+        raise CatalogError(f"{name!r} is defined twice")
+
+
+def check_catalogs(
+    agents: Mapping[str, AgentCatalog], processes: Mapping[str, ProcessCatalog]
+) -> None:
+    """What no single catalog can check: names across catalogs, and processes' stages."""
+    for name in sorted(agents.keys() & processes.keys()):
+        raise CatalogError(f"{name!r} is both an agent and a process")
+    for agent in agents.values():
+        for neighbour in agent.delegates:
+            _pinned_agent(agents, processes, neighbour.agent, f"agent {agent.name!r} neighbour")
+    for process in processes.values():
+        contexts = set()
+        for stage in process.stages:
+            where = f"process {process.name!r} stage {stage.name!r} names agent"
+            worker = _pinned_agent(agents, processes, stage.agent, where)
+            if worker.mode != "goal":
+                raise CatalogError(f"{where} {worker.name!r}, which is not a goal agent")
+            if "proposal" not in worker.model_fields_set:
+                raise CatalogError(f"{where} {worker.name!r}, which names no proposal kind")
+            contexts.add(worker.context)
+        if len(contexts) > 1:
+            # Stages hand over through the context repository's main branch alone.
+            raise CatalogError(
+                f"process {process.name!r}: its stage agents must share one context repository"
+            )
+
+
+def _pinned_agent(
+    agents: Mapping[str, AgentCatalog],
+    processes: Mapping[str, ProcessCatalog],
+    name: str,
+    where: str,
+) -> AgentCatalog:
+    if name in processes:
+        raise CatalogError(f"{where} {name!r}, which is a process, not an agent")
+    if name not in agents:
+        raise CatalogError(f"{where} {name!r}, which no pinned catalog defines")
+    return agents[name]

@@ -1,10 +1,12 @@
 import base64
 import copy
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from a2a.server.request_handlers.response_helpers import agent_card_to_dict
 from test_edge_cards import card
 
@@ -196,3 +198,39 @@ def test_the_edge_signs_every_card_it_loads_from_the_catalogs() -> None:
         assert len(loaded.signatures) == 1
         assert verify_card(agent_card_to_dict(loaded), card_keys([KEY])) == CardVerified("cards-1")
         assert protected_header(agent_card_to_dict(loaded))["jku"] == JKU
+
+
+def test_the_edge_signs_process_cards_too(tmp_path: Path) -> None:
+    shutil.copytree(EXAMPLES / "discovery", tmp_path / "discovery")
+    worker = yaml.safe_load((EXAMPLES / "discovery" / "agent.yaml").read_text())
+    worker |= {
+        "name": "analyst",
+        "mode": "goal",
+        "goal": {"role": "researcher", "kind": "hypothesis"},
+        "proposal": "merge_request",
+    }
+    (tmp_path / "analyst").mkdir()
+    (tmp_path / "analyst" / "agent.yaml").write_text(yaml.safe_dump(worker))
+    (tmp_path / "feature").mkdir()
+    (tmp_path / "feature" / "process.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "feature",
+                "description": "A change from analysis on.",
+                "version": "0.1.0",
+                "stages": [{"name": "analysis", "agent": "analyst", "goal": "{input}"}],
+            }
+        )
+    )
+
+    cards = load_public_cards(
+        tmp_path,
+        base_url="https://golem.example.test",
+        oidc_discovery_url="https://idp.example.test/.well-known/openid-configuration",
+        signing_key=KEY,
+    )
+
+    assert sorted(cards) == ["analyst", "discovery", "feature"]
+    assert verify_card(agent_card_to_dict(cards["feature"]), card_keys([KEY])) == CardVerified(
+        "cards-1"
+    )

@@ -43,7 +43,7 @@ registry, rate limits, audit, forwarding to the task service ([ADR 0002](../adr/
 | `GOLEM_MAX_CHAIN_DEPTH` | required | the deepest agent-to-agent chain allowed (positive integer) |
 | `GOLEM_AUDIT_DSN` | required | libpq connection string to `golem_audit` as `golem_edge` |
 | `GOLEM_TASK_SERVICE_URL` | required | the task service's `a2a` listener (`http://tasks.golem-system.svc:8000`) |
-| `GOLEM_CATALOGS_DIR` | required | a directory of `<agent>/agent.yaml` the agent cards are built from ([cards](#agent-cards)) |
+| `GOLEM_CATALOGS_DIR` | required | a directory of `<agent>/agent.yaml` and `<process>/process.yaml` the cards and the agents' part of the call registry are built from ([cards](#agent-cards)) |
 | `GOLEM_PUBLIC_BASE_URL` | required | the edge's public address, written into the agent cards |
 | `GOLEM_EDGE_TOKEN` | required | shared secret sent with every forwarded request |
 | `GOLEM_CARD_SIGNING_KEY_FILE` | required | the key that signs every agent card: an unencrypted EC P-256 private key in PEM, its own, never the run token key ([signed cards](#agent-cards)) |
@@ -284,25 +284,26 @@ registry lets each person call, from the edge's directory.
 
 ### Call registry
 
-Callee agent to the callers allowed to call it. A caller is `user:<name>`,
-`service:<client id>` or `agent:<name>`; `<kind>:*` allows every caller of that kind. An agent
-missing here is refused at the edge (`unknown_agent`).
+Callee to the people and services allowed to call it. A caller is `user:<name>` or
+`service:<client id>`; `<kind>:*` allows every caller of that kind. A callee missing here is
+refused at the edge (`unknown_agent`).
 
 ```yaml
 discovery: ["user:*", "service:golem-jira-adapter", "service:golem-mattermost-adapter"]
 ```
 
-`agent:<name>` is a run of that agent delegating with its call token
-([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)): this file is what lets one agent start
-another. List delegating agents by name, never `agent:*`. The child runs for the person or
-service that started the first run of the chain, so an entry here gives the agent no more than
+Agents are not written here ([ADR 0019](../adr/0019-processes.md)). The edge adds them at
+start from the catalogs in `GOLEM_CATALOGS_DIR`: every agent's `delegates` may be called by
+that agent (`agent:<name>`), and every process's stage agents by that process. The child runs
+for the person or service that started the chain, so a neighbour gives an agent no more than
 that subject could start; `GOLEM_MAX_CHAIN_DEPTH` bounds how many agents one request passes
-through, and a chain never calls an agent already in it. A planner that may hand work to
-discovery:
+through, and a chain never calls an agent already in it.
 
-```yaml
-discovery: ["user:*", "agent:planner"]
-```
+The edge refuses to start when this file grants an `agent:` caller, names a callee no catalog
+in `GOLEM_CATALOGS_DIR` defines, or, once any process is pinned there, grants a `user:` caller
+(`user:*` included) anything but a process: people then start processes, and workers are the
+platform's to call. With a process pinned, `GOLEM_MAX_CHAIN_DEPTH` must be at least 3 (person,
+process, stage agent, neighbour). Services may still be granted agents.
 
 ### Catalogs
 
@@ -363,8 +364,8 @@ agents.delegate:
 
 ### Agent cards
 
-The edge builds a public agent card for each `<GOLEM_CATALOGS_DIR>/<agent>/agent.yaml` at
-start. The base points it at the example catalogs in the image (`/app/examples`). For your own
+The edge builds a public agent card for each `<GOLEM_CATALOGS_DIR>/<agent>/agent.yaml` and
+each `<GOLEM_CATALOGS_DIR>/<process>/process.yaml` at start; a directory holds one of the two. The base points it at the example catalogs in the image (`/app/examples`). For your own
 agents, mount the `agent.yaml` of each catalog, for example from a ConfigMap generated in your
 overlay (`cards/discovery/agent.yaml` next to `kustomization.yaml`):
 
@@ -388,8 +389,8 @@ patches:
         value: {name: cards, mountPath: /etc/golem/cards, readOnly: true}
 ```
 
-An agent without a card is still callable over A2A if the registry allows it, but the edge's
-directory leaves it out, so the board does not list it.
+The same catalogs feed the call registry, so every callee the registry names needs its catalog
+here; the edge refuses to start otherwise.
 
 Every card is signed at start with the card key (`GOLEM_CARD_SIGNING_KEY_FILE`, kid
 `GOLEM_CARD_SIGNING_KID`) as A2A 1.0 specifies (a JWS over the card's RFC 8785 canonical form),

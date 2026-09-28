@@ -285,6 +285,20 @@ routed right in the baseline and routes wrong now fails the merge request.
 A process has no golden set of its own in this step. Its stages are evaluated as agents, and the
 loader's checks above are what a process's merge request must pass.
 
+### As first built
+
+- **People keep agents until the first process.** The edge refuses a `user:` grant on anything
+  but a process only once `GOLEM_CATALOGS_DIR` pins at least one process, and asks for
+  `GOLEM_MAX_CHAIN_DEPTH` of at least 3 under the same condition. A deployment without a process
+  has nothing else for a person to start; the example catalogs pin none yet, because a process
+  cannot run before its stages can ([ADR 0017](0017-triggers.md)'s goal mode and the process run
+  above). `agent:` entries in the file and callees without a catalog are refused always.
+- **A case states routing under `expect`**: `expect.delegates`, next to the outcome, role and
+  target it is checked with. The evaluation's delegation tool is the runtime's, with a recorder
+  as its transport and a placeholder call token, since no edge checks it.
+- **A stage agent names its proposal kind explicitly.** `proposal` defaults to
+  `merge_request` for today's catalogs; the loader's check reads whether the catalog wrote it.
+
 ## Consequences
 
 - No model chooses among a hundred agents. The platform picks the stage, and a role picks among

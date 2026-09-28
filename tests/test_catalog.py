@@ -191,3 +191,106 @@ def test_a_role_writes_directory_is_no_dot_segment_glob_or_absolute_path(writes)
 def test_a_kinds_initial_status_is_one_of_its_statuses():
     with pytest.raises(ValidationError, match="initial"):
         Kind(name="hypothesis", initial="done", statuses=frozenset({"proposed", "validated"}))
+
+
+# Goal agents (ADR 0017) and the proposal kind (ADR 0015)
+
+CONTEXT = {"url": "https://git.example.com/ctx.git"}
+
+
+def agent(**fields: object) -> AgentCatalog:
+    return AgentCatalog.model_validate(
+        {"name": "analyst", "description": "d", "version": "0.1.0", **fields}
+    )
+
+
+def goal_agent(**fields: object) -> AgentCatalog:
+    base = {
+        "context": CONTEXT,
+        "kinds": KINDS,
+        "roles": ROLES,
+        "mode": "goal",
+        "goal": {"role": "researcher", "kind": "hypothesis"},
+    }
+    return agent(**{**base, **fields})
+
+
+def test_an_agent_works_on_records_unless_it_says_goal():
+    catalog = agent()
+
+    assert (catalog.mode, catalog.goal) == ("records", None)
+
+
+def test_a_goal_agent_names_the_role_and_the_kind_of_its_target():
+    catalog = goal_agent()
+
+    assert catalog.mode == "goal"
+    assert (catalog.goal.role, catalog.goal.kind) == ("researcher", "hypothesis")
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"goal": {"role": "ghost", "kind": "hypothesis"}}, "undeclared role 'ghost'"),
+        ({"goal": {"role": "researcher", "kind": "memo"}}, "undeclared kind 'memo'"),
+        ({"goal": None}, "names no goal"),
+        ({"context": None}, "context repository"),
+    ],
+)
+def test_a_goal_agent_is_refused_when_its_goal_cannot_run(fields, message):
+    with pytest.raises(ValidationError, match=message):
+        goal_agent(**fields)
+
+
+def test_a_records_agent_may_not_carry_a_goal():
+    with pytest.raises(ValidationError, match="mode: goal"):
+        agent(kinds=KINDS, roles=ROLES, goal={"role": "researcher", "kind": "hypothesis"})
+
+
+def test_the_proposal_kind_defaults_to_a_merge_request_and_is_one_of_four():
+    assert agent().proposal == "merge_request"
+    assert agent(proposal="tracker_issue").proposal == "tracker_issue"
+    with pytest.raises(ValidationError):
+        agent(proposal="email")
+
+
+# Neighbours (ADR 0019)
+
+DELEGATING_ROLES = [{"name": "researcher", "writes": "hypotheses/", "tools": [DELEGATE_GROUP]}]
+
+
+def neighbour(name: str, when: str = "The change touches a contract.") -> dict[str, str]:
+    return {"agent": name, "when": when}
+
+
+def test_an_agent_declares_the_neighbours_its_roles_may_delegate_to():
+    catalog = agent(roles=DELEGATING_ROLES, delegates=[neighbour("checker"), neighbour("writer")])
+
+    assert [(n.agent, n.when) for n in catalog.delegates] == [
+        ("checker", "The change touches a contract."),
+        ("writer", "The change touches a contract."),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"roles": ROLES, "delegates": [neighbour("checker")]}, "no role holds"),
+        ({"roles": DELEGATING_ROLES}, "declares no delegates"),
+        (
+            {"roles": DELEGATING_ROLES, "delegates": [neighbour(f"a{i}") for i in range(8)]},
+            "at most 7",
+        ),
+        (
+            {"roles": DELEGATING_ROLES, "delegates": [neighbour("checker")] * 2},
+            "twice",
+        ),
+        ({"roles": DELEGATING_ROLES, "delegates": [neighbour("analyst")]}, "itself"),
+        ({"roles": DELEGATING_ROLES, "delegates": [neighbour("checker", "")]}, "when"),
+        ({"roles": DELEGATING_ROLES, "delegates": [neighbour("checker", "x" * 301)]}, "when"),
+        ({"roles": DELEGATING_ROLES, "delegates": [neighbour("Checker")]}, "agent"),
+    ],
+)
+def test_neighbours_are_few_named_once_and_go_with_the_delegation_group(fields, message):
+    with pytest.raises(ValidationError, match=message):
+        agent(**fields)
