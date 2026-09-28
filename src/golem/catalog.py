@@ -1,3 +1,4 @@
+import re
 import string
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -24,6 +25,9 @@ MAX_GOAL_CHARS = 4000
 GOAL_INPUT = "input"
 
 ProposalKind = Literal["merge_request", "wiki_edit", "desk_reply", "tracker_issue"]
+# A goal run's target, named by whoever started it (ADR 0017). ADR 0017 allows a leading digit;
+# a record id may not start with one, and the target becomes a record's id.
+GOAL_TARGET = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
 class CatalogError(ValueError):
@@ -330,3 +334,8 @@ def _pinned_agent(
     if name not in agents:
         raise CatalogError(f"{where} {name!r}, which no pinned catalog defines")
     return agents[name]
+
+
+def goal_target(named: str, run_id: str) -> str:
+    """The record a goal run works on: the starter's name for it, or the run's own."""
+    return named if GOAL_TARGET.fullmatch(named) else f"run-{run_id}"

@@ -54,6 +54,12 @@ def test_a_full_case_parses_into_frozen_types(tmp_path):
     )
 
 
+def test_a_goal_agents_case_may_expect_a_report_without_a_proposal(tmp_path):
+    case = parse_case("quiet", "goal: g\nexpect:\n  outcome: reported\n", "case.yaml", tmp_path)
+
+    assert case.expect.outcome is Outcome.REPORTED
+
+
 def test_a_minimal_case_needs_only_goal_and_outcome(tmp_path):
     case = parse_case("idle", "goal: g\nexpect:\n  outcome: idle\n", "case.yaml", tmp_path)
 
@@ -69,7 +75,7 @@ def test_a_minimal_case_needs_only_goal_and_outcome(tmp_path):
         ("goal: ' '\nexpect: {outcome: idle}\n", "'goal' must be a non-empty string"),
         (
             "goal: g\nexpect: {outcome: failed}\n",
-            "'outcome' must be one of idle, invalid, proposed",
+            "'outcome' must be one of idle, invalid, proposed, reported",
         ),
         ("goal: g\nexpect: {outcome: idle, rol: x}\n", "unknown key 'rol' in 'expect'"),
         ("goal: g\ngoals: x\nexpect: {outcome: idle}\n", "unknown key 'goals'"),

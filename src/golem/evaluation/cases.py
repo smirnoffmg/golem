@@ -19,7 +19,7 @@ from golem.runtime.main import Outcome
 CASE_FILE = "case.yaml"
 CONTEXT_DIR = "context"
 CASE_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
-EXPECTED_OUTCOMES = (Outcome.IDLE, Outcome.INVALID, Outcome.PROPOSED)
+EXPECTED_OUTCOMES = (Outcome.IDLE, Outcome.INVALID, Outcome.PROPOSED, Outcome.REPORTED)
 CASE_KEYS = frozenset({"goal", "pending", "expect"})
 EXPECT_KEYS = frozenset({"outcome", "role", "target", "checks", "delegates"})
 CHECK_KEYS = frozenset(

@@ -30,7 +30,7 @@ A case id is the directory name and matches `^[a-z0-9][a-z0-9-]*$`. Every direct
 goal: Work the discovery backlog      # required: the run's goal, as a caller would send it
 pending: [H-3]                        # optional: targets that already have an open proposal
 expect:
-  outcome: proposed                   # required: proposed | idle | invalid
+  outcome: proposed                   # required: proposed | reported | idle | invalid
   role: researcher                    # optional: the role the lead must pick
   target: H-2                         # optional: the record the lead must pick
   checks:                             # optional, every key optional
@@ -44,6 +44,9 @@ expect:
   delegates: [checker]                # optional: the neighbours the role must ask; [] for none
 ```
 
+- **`reported`** is a goal agent's run that found nothing to propose (ADR 0017): its branch
+  carries only its record, the report. A goal agent's golden set holds cases with and without
+  a finding, so it measures false alarms and misses both.
 - **What the checks read.** What production would publish: the proposal branch the run pushed,
   or the unchanged base branch when it pushed nothing (`idle`, `invalid`, `failed`). A section
   is empty by the context format's rule: only whitespace and HTML comments.

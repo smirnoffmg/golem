@@ -27,11 +27,17 @@ class Brief:
     workspace: Path
     skills_dir: Path | None
     delegates: tuple[Neighbour, ...] = ()
+    # A goal agent's run (ADR 0017): it may end with a proposal or with only its record.
+    goal_mode: bool = False
+    # Proposal branches still open on the target; a goal run extends them rather than repeats.
+    open_proposals: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class RoleResult:
     summary: str
+    # Whether a goal run's role found something to act on; a record run always proposes.
+    proposed: bool = False
 
 
 class RoleRunner(Protocol):
