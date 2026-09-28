@@ -158,3 +158,38 @@ def test_no_cases_is_an_error(tmp_path):
 def test_a_missing_cases_directory_is_an_error(tmp_path):
     with pytest.raises(CaseError, match="not a directory"):
         load_cases(tmp_path / "nowhere")
+
+
+# Routing (ADR 0019): which neighbours the role must ask
+
+
+def test_a_case_may_name_the_neighbours_the_role_must_ask(tmp_path):
+    case = parse_case(
+        "routing",
+        "goal: g\nexpect:\n  outcome: proposed\n  delegates: [checker, writer]\n",
+        "case.yaml",
+        tmp_path,
+    )
+
+    assert case.expect.delegates == ("checker", "writer")
+
+
+def test_an_empty_delegates_list_means_the_role_must_ask_no_one(tmp_path):
+    case = parse_case(
+        "alone", "goal: g\nexpect:\n  outcome: proposed\n  delegates: []\n", "case.yaml", tmp_path
+    )
+
+    assert case.expect.delegates == ()
+
+
+def test_a_case_without_delegates_does_not_check_routing(tmp_path):
+    case = parse_case("any", "goal: g\nexpect:\n  outcome: idle\n", "case.yaml", tmp_path)
+
+    assert case.expect.delegates is None
+
+
+def test_delegates_must_be_a_list_of_agent_names(tmp_path):
+    with pytest.raises(CaseError, match="'delegates' must be a list of strings"):
+        parse_case(
+            "bad", "goal: g\nexpect:\n  outcome: idle\n  delegates: checker\n", "c.yaml", tmp_path
+        )

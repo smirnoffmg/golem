@@ -62,7 +62,7 @@ class DeepAgentsRunner:
     toolbox: McpToolbox = field(default_factory=McpToolbox)
 
     async def run(self, brief: Brief) -> RoleResult:
-        tools = await self.toolbox.tools_for(brief.role)
+        tools = await self.toolbox.tools_for(brief.role, brief.delegates)
         agent = build_agent(self.model, brief, self.limits, tools)
         state = await agent.ainvoke(
             {"messages": [HumanMessage(task(brief))]},

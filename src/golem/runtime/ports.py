@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from golem.catalog import Role
+from golem.catalog import Neighbour, Role
 from golem.runtime.lead import Record
 
 
@@ -26,6 +26,7 @@ class Brief:
     linked: tuple[LinkedRecord, ...]
     workspace: Path
     skills_dir: Path | None
+    delegates: tuple[Neighbour, ...] = ()
 
 
 @dataclass(frozen=True)

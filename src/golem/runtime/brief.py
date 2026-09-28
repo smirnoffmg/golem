@@ -44,6 +44,7 @@ def build_brief(
         ),
         workspace=context_dir,
         skills_dir=skills if skills.is_dir() else None,
+        delegates=catalog.delegates,
     )
 
 

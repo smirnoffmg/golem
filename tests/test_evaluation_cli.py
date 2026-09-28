@@ -51,7 +51,7 @@ def catalog(tmp_path: Path) -> Path:
 
 def cli(argv: list[str], runner: Researcher | None = None, environ=None) -> Outputs:
     out, err = io.StringIO(), io.StringIO()
-    factory = deepagents_runner if runner is None else (lambda _: runner)
+    factory = deepagents_runner if runner is None else (lambda *_: runner)
     code = main(argv, environ or {}, factory, out, err)
     return Outputs(code, out.getvalue(), err.getvalue())
 
@@ -185,3 +185,29 @@ def test_the_production_runner_gets_the_platform_tools_from_the_environment(tmp_
 
     assert [group.name for group in runner.toolbox.registry.groups] == ["tracker.read"]
     assert runner.toolbox.run_token == "run-token"
+
+
+async def test_the_production_runner_records_delegation_instead_of_calling_the_edge(tmp_path):
+    from golem.catalog import DELEGATE_GROUP, Neighbour, Role
+    from golem.evaluation.delegations import DelegationRecorder
+
+    registry = tmp_path / "mcp-registry.yaml"
+    registry.write_text(
+        f"{DELEGATE_GROUP}:\n  url: http://edge.test/a2a\n  tools: [delegate_to_agent]\n"
+    )
+    recorder = DelegationRecorder()
+    runner = deepagents_runner(
+        {
+            "GOLEM_MODEL_GATEWAY_URL": "http://gateway.test/v1",
+            "GOLEM_MODEL_KEY": "k",
+            "GOLEM_MODEL": "m",
+            "GOLEM_MCP_REGISTRY": str(registry),
+        },
+        recorder,
+    )
+    role = Role(name="planner", writes="plans/", tools=(DELEGATE_GROUP,))
+
+    [tool] = await runner.toolbox.tools_for(role, (Neighbour(agent="checker", when="w"),))
+    await tool.ainvoke({"agent": "checker", "goal": "check"})
+
+    assert recorder.take() == ("checker",)

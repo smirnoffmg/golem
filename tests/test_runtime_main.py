@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from golem.catalog import load_catalog
+from golem.catalog import Neighbour, load_catalog
 from golem.runtime.brief import BriefError, build_brief, linked_ids
 from golem.runtime.lead import Command
 from golem.runtime.main import (
@@ -200,6 +200,28 @@ def test_brief_points_at_catalog_skills_when_present(tmp_path):
     )
 
     assert brief.skills_dir == catalog_dir / "skills"
+
+
+def test_brief_carries_the_agents_neighbours_for_the_delegation_tool(tmp_path):
+    catalog_dir = example_catalog(tmp_path)
+    context_dir = example_context(tmp_path)
+    catalog = load_catalog(catalog_dir / "agent.yaml")
+    delegating = catalog.model_copy(
+        update={"delegates": (Neighbour(agent="checker", when="A contract changes."),)}
+    )
+
+    brief = build_brief(
+        run_id="run-1",
+        goal="goal",
+        catalog=delegating,
+        catalog_dir=catalog_dir,
+        context_dir=context_dir,
+        records=read_state(context_dir).records,
+        command=Command(role="researcher", target_id="H-2"),
+    )
+
+    assert brief.delegates == (Neighbour(agent="checker", when="A contract changes."),)
+    assert brief_for(tmp_path / "plain", "researcher", "H-2").delegates == ()
 
 
 def test_missing_role_instructions_are_a_clear_error(tmp_path):

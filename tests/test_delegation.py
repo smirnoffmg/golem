@@ -26,7 +26,7 @@ from test_deepagents_runner import make_brief, scripted, tool_call
 from test_tasks_service import make_card
 from test_tasks_to_runs import CATALOG, TEMPLATE, FakeLauncher
 
-from golem.catalog import DELEGATE_GROUP, Role
+from golem.catalog import DELEGATE_GROUP, Neighbour, Role
 from golem.edge.__main__ import authenticator, call_authenticator
 from golem.edge.app import create_edge_app
 from golem.edge.auth import authenticate_any
@@ -57,6 +57,8 @@ CALL_REGISTRY = Registry(
         "c": frozenset({"user:*", "agent:b"}),
     }
 )
+# The tool offers all three, so that what refuses a call in these tests is the edge.
+NEIGHBOURS = tuple(Neighbour(agent=name, when=f"ask {name}") for name in ("a", "b", "c"))
 # Budget for two runs per chain: A and one child.
 LIMITS = Limits(max_runs_per_caller=10, max_runs_per_root=10, budget_per_root=Decimal("2"))
 
@@ -118,7 +120,8 @@ class Golem:
                 call_timeout=10,
                 max_result_chars=10_000,
                 transport=self.transport,
-            )
+            ),
+            NEIGHBOURS,
         )
         return await tool.ainvoke({"agent": agent, "goal": goal})
 
@@ -211,7 +214,7 @@ async def test_a_role_in_a_delegates_to_b_for_the_human_under_as_root(
     )
 
     result = await DeepAgentsRunner(model=model, toolbox=toolbox).run(
-        replace(make_brief(tmp_path), role=planner())
+        replace(make_brief(tmp_path), role=planner(), delegates=NEIGHBOURS)
     )
 
     run_b = golem.run_of("b")

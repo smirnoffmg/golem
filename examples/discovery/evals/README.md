@@ -41,6 +41,7 @@ expect:
       H-2: [supports, refutes]
     must_not_contain:                 # record id -> phrases, case-insensitive
       H-4: [supports]
+  delegates: [checker]                # optional: the neighbours the role must ask; [] for none
 ```
 
 - **What the checks read.** What production would publish: the proposal branch the run pushed,
@@ -48,6 +49,10 @@ expect:
   is empty by the context format's rule: only whitespace and HTML comments.
 - **Phrases** are matched against the record's whole file, front matter included, so
   `"links: [H-3]"` checks a link and `"status: accepted"` a status.
+- **`delegates`** checks routing ([ADR 0019](../../../docs/adr/0019-processes.md)): which of
+  the agent's neighbours the role asked through `delegate_to_agent`, in any order and however
+  often. The calls are recorded, not sent, so no child run starts. Without the key routing is
+  not checked.
 - **`pending`** creates a branch `golem/<id>/pending` for each id, as an open merge request does.
 - **Unknown keys are errors**, and every error names the `case.yaml` it comes from: a misspelt
   check would otherwise never run and the case would pass for the wrong reason.

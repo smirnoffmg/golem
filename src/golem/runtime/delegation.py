@@ -5,16 +5,22 @@ authenticates, applies the call registry, depth and cycle checks, audits and for
 any caller's. The role does not wait: it gets the child task's id at once, and the child run
 proposes its own merge request. The message id is derived from the run, the agent and the goal,
 so a retried tool call reaches the same child run instead of starting another.
+
+The tool offers only the agent's neighbours, each with when to ask it (ADR 0019): the model
+chooses among a few it is told about, never among every agent the platform runs.
 """
 
 import asyncio
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 from langchain_core.tools import BaseTool, StructuredTool
+
+from golem.catalog import Neighbour
 
 DELEGATE_TOOL = "delegate_to_agent"
 A2A_VERSION = "1.0"
@@ -42,13 +48,36 @@ def message_id(run_id: str, agent: str, goal: str) -> str:
     return f"delegate-{digest[:40]}"
 
 
-def delegation_tool(delegation: Delegation) -> BaseTool:
+def delegation_tool(delegation: Delegation, neighbours: Sequence[Neighbour]) -> BaseTool:
+    names = [neighbour.agent for neighbour in neighbours]
+
     async def delegate_to_agent(agent: str, goal: str) -> str:
+        # The schema's enum is advice to the model, not a check: a JSON schema is not validated.
+        if agent not in names:
+            return (
+                f"{DELEGATE_TOOL}: {agent!r} is not a neighbour of this agent;"
+                f" choose one of {', '.join(names)}"
+            )
         return bounded(await send(delegation, agent, goal), delegation.max_result_chars)
 
     return StructuredTool.from_function(
-        coroutine=delegate_to_agent, name=DELEGATE_TOOL, description=DESCRIPTION
+        coroutine=delegate_to_agent,
+        name=DELEGATE_TOOL,
+        description=describe_neighbours(neighbours),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "enum": names, "description": "the neighbour to ask"},
+                "goal": {"type": "string", "description": "what it should do, self-contained"},
+            },
+            "required": ["agent", "goal"],
+        },
     )
+
+
+def describe_neighbours(neighbours: Sequence[Neighbour]) -> str:
+    listed = "\n".join(f"- {neighbour.agent}: {neighbour.when}" for neighbour in neighbours)
+    return f"{DESCRIPTION}\n\nAsk only these agents, when their case applies:\n{listed}"
 
 
 async def send(delegation: Delegation, agent: str, goal: str) -> str:

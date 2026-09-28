@@ -17,6 +17,7 @@ import yaml
 from golem.catalog import load_catalog
 from golem.evaluation.cases import Case
 from golem.evaluation.checks import Published, check
+from golem.evaluation.delegations import DelegationRecorder
 from golem.runtime.main import Outcome, RunReport, RuntimeSettings, run
 from golem.runtime.ports import RoleRunner
 from golem.runtime.validate import read_state
@@ -59,9 +60,13 @@ async def run_cases(
     runner: RoleRunner,
     workdir: Path,
     clock: Clock = time.monotonic,
+    delegations: DelegationRecorder | None = None,
 ) -> tuple[CaseResult, ...]:
     return tuple(
-        [await run_case(case, catalog_dir, runner, workdir / case.id, clock) for case in cases]
+        [
+            await run_case(case, catalog_dir, runner, workdir / case.id, clock, delegations)
+            for case in cases
+        ]
     )
 
 
@@ -71,8 +76,11 @@ async def run_case(
     runner: RoleRunner,
     workdir: Path,
     clock: Clock = time.monotonic,
+    delegations: DelegationRecorder | None = None,
 ) -> CaseResult:
     start = clock()
+    if delegations is not None:
+        delegations.take()
     try:
         report, published = await execute(case, catalog_dir, runner, workdir)
     except Exception as error:
@@ -85,9 +93,10 @@ async def run_case(
             reasons=(),
             duration=clock() - start,
         )
+    delegated = delegations.take() if delegations is not None else ()
     return CaseResult(
         case_id=case.id,
-        failures=check(case.expect, report, published),
+        failures=check(case.expect, report, published, delegated),
         outcome=report.outcome.value,
         role=report.role,
         target=report.target_id,
