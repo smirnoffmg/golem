@@ -1,6 +1,7 @@
-"""The web UI with everything behind it, on localhost ports: the real UI, edge and task service,
-the Postgres-backed orchestrator with a fake Job launcher, and the fake identity provider,
-each served by uvicorn in its own thread.
+"""The web UI with everything behind it, on localhost ports: the board's nginx and the
+backend-for-frontend behind one front that routes like the ingress (support/front.py), the real
+edge and task service, the Postgres-backed orchestrator with a fake Job launcher, and the fake
+identity provider, each served by uvicorn in its own thread.
 
 ``seed`` gives the user ``alice`` a task in every state the UI shows, through the same code
 paths as production: A2A calls to the edge, admission in golem_runs, a reconcile pass that
@@ -58,6 +59,7 @@ from golem.ui import store
 from golem.ui.app import create_ui_app
 from golem.ui.edge import rpc
 from golem.ui.oidc import OidcClient
+from support.front import Front
 from support.idp import FakeIdP, idp_app
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -71,7 +73,10 @@ EDGE_AUDIENCE = "golem-edge"
 CATALOG_URL = f"https://git.example.com/agents/{AGENT}.git"
 GITLAB_API = "https://git.example.com/api/v4"
 CONTEXT_PROJECT = "product/discovery-context"
-MERGE_REQUEST_URL = f"https://git.example.com/{CONTEXT_PROJECT}/-/merge_requests/42"
+MERGE_REQUEST_IID = 42
+MERGE_REQUEST_URL = (
+    f"https://git.example.com/{CONTEXT_PROJECT}/-/merge_requests/{MERGE_REQUEST_IID}"
+)
 # Four at once, so the fifth task of the seed is refused by admission with the real reason.
 LIMITS = Limits(max_runs_per_caller=4, max_runs_per_root=4, budget_per_root=Decimal("100"))
 # One person clicking through every page in seconds; the edge's default would refuse them.
@@ -248,15 +253,16 @@ def gitlab(request: httpx.Request) -> httpx.Response:
     if path.endswith("/merge_requests") and request.method == "GET":
         return httpx.Response(200, json=[])
     if path.endswith("/merge_requests"):
-        return httpx.Response(201, json={"web_url": MERGE_REQUEST_URL})
+        return httpx.Response(201, json={"web_url": MERGE_REQUEST_URL, "iid": MERGE_REQUEST_IID})
     return httpx.Response(404)
 
 
 @contextmanager
-def running(databases: Databases, ui_port: int = 0) -> Iterator[Demo]:
+def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[Demo]:
+    """The stack, with the board served from ``board_url`` (support.front.board_server)."""
     in_own_loop(reset(databases))
     ui_socket = bound(ui_port)
-    idp_socket, edge_socket, tasks_socket, outcome_socket = (bound() for _ in range(4))
+    idp_socket, edge_socket, tasks_socket, outcome_socket, bff_socket = (bound() for _ in range(5))
     ui_url = f"http://localhost:{port_of(ui_socket)}"
     edge_url = f"http://127.0.0.1:{port_of(edge_socket)}"
     tasks_url = f"http://127.0.0.1:{port_of(tasks_socket)}"
@@ -332,7 +338,10 @@ def running(databases: Databases, ui_port: int = 0) -> Iterator[Demo]:
             edge=httpx.AsyncClient(base_url=edge_url, timeout=10),
             public_base_url=ui_url,
         )
-        served.append(serve((ui, ui_socket)))
+        served.append(serve((ui, bff_socket)))
+        served.append(
+            serve((Front(f"http://127.0.0.1:{port_of(bff_socket)}", board_url), ui_socket))
+        )
         yield Demo(
             ui_url=ui_url,
             edge_url=edge_url,
