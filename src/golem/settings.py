@@ -622,7 +622,6 @@ class UiSettings:
     edge_url: str
     dsn: str = field(repr=False)
     session_key: str = field(repr=False)
-    agents: tuple[str, ...]
     public_base_url: str
     port: int
     login_rate: Rate = LOGIN_RATE
@@ -646,7 +645,6 @@ def ui_settings(env: Env) -> UiSettings:
         "GOLEM_EDGE_URL",
         "GOLEM_UI_DSN",
         "GOLEM_UI_SESSION_KEY",
-        "GOLEM_UI_AGENTS",
         "GOLEM_PUBLIC_BASE_URL",
     )
     public_base_url = _base_url(v, "GOLEM_PUBLIC_BASE_URL")
@@ -666,9 +664,6 @@ def ui_settings(env: Env) -> UiSettings:
             f" got {v['GOLEM_OIDC_REDIRECT_URL']!r}"
         )
     _fernet_key(v["GOLEM_UI_SESSION_KEY"], "GOLEM_UI_SESSION_KEY")
-    agents = tuple(a.strip() for a in v["GOLEM_UI_AGENTS"].split(",") if a.strip())
-    if not agents:
-        raise SettingsError("GOLEM_UI_AGENTS must list at least one name, separated by commas")
     return UiSettings(
         issuer=v["GOLEM_OIDC_ISSUER"],
         discovery_url=v["GOLEM_OIDC_DISCOVERY_URL"],
@@ -678,7 +673,6 @@ def ui_settings(env: Env) -> UiSettings:
         edge_url=_base_url(v, "GOLEM_EDGE_URL"),
         dsn=v["GOLEM_UI_DSN"],
         session_key=v["GOLEM_UI_SESSION_KEY"],
-        agents=tuple(dict.fromkeys(agents)),
         public_base_url=public_base_url,
         port=_port(env),
         login_rate=rate_setting(env, "GOLEM_RATE_LOGIN", LOGIN_RATE),

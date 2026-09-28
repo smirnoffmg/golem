@@ -273,6 +273,10 @@ since the person cannot read that task ([ADR 0015](0015-proposals.md)). A `merge
 GitLab and has no decision buttons: the decision stays there. The archive loads more with
 `GET /api/agents/{agent}/tasks?page=`, 50 at a time, on request.
 
+As first built, before the edge serves [ADR 0015](0015-proposals.md)'s routes, the answer has no
+`proposals`, and a `completed` task is in To review when its own `golemProposal.state` is open.
+A body over 16 KiB is 413 `too_large`, another content type 415 `unsupported_media_type`.
+
 Tasks older than the snapshot's 100 do not appear until the archive is paged. An active task
 older than a person's last 100 updates on one agent is not expected: a run is bounded by its
 Job's deadline. If it happens, the task is still shown by the delta when its status next changes.

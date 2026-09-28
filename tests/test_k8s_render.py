@@ -575,19 +575,6 @@ def test_the_ui_runs_its_own_module() -> None:
     assert container(deployment)["command"] == ["python", "-m", "golem.ui"]
 
 
-def test_the_call_registry_lets_users_start_every_agent_the_ui_offers() -> None:
-    objects = render(EXTERNAL_SECRETS)
-    env = env_of(find(objects, "Deployment", "ui", SYSTEM), objects, secret_keys(objects))
-    registry = parse_registry(
-        find(objects, "ConfigMap", "golem-config", SYSTEM)["data"]["call-registry.yaml"]
-    )
-
-    agents = ui_settings(env).agents
-    assert agents
-    for agent in agents:
-        assert "user:*" in registry.allowed_callers[agent], agent
-
-
 def test_the_ui_is_reached_through_the_ingress_controller_only() -> None:
     policy = find(policies(), "NetworkPolicy", "ui", SYSTEM)
 

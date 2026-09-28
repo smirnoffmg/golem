@@ -58,7 +58,6 @@ from golem.ui import store
 from golem.ui.app import create_ui_app
 from golem.ui.edge import rpc
 from golem.ui.oidc import OidcClient
-from golem.ui.views import AGENT_METADATA
 from support.idp import FakeIdP, idp_app
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -331,7 +330,6 @@ def running(databases: Databases, ui_port: int = 0) -> Iterator[Demo]:
             ),
             store=store.SessionStore(databases.ui, Fernet.generate_key().decode()),
             edge=httpx.AsyncClient(base_url=edge_url, timeout=10),
-            agents=(AGENT,),
             public_base_url=ui_url,
         )
         served.append(serve((ui, ui_socket)))
@@ -349,7 +347,7 @@ def running(databases: Databases, ui_port: int = 0) -> Iterator[Demo]:
 
 
 def seed(demo: Demo) -> dict[str, str]:
-    """alice's tasks, one per state the UI shows; returns each one's page path by state."""
+    """alice's tasks, one per state the board shows; returns each one's board path by state."""
     return in_own_loop(_seed(demo))
 
 
@@ -362,7 +360,6 @@ async def _seed(demo: Demo) -> dict[str, str]:
                 "messageId": f"seed-{state}",
                 "role": "ROLE_USER",
                 "parts": [{"text": GOALS[state]}],
-                "metadata": {AGENT_METADATA: AGENT},
             }
             result = await rpc(edge, token, "SendMessage", {"tenant": AGENT, "message": message})
             return result["task"]
@@ -385,7 +382,7 @@ async def _seed(demo: Demo) -> dict[str, str]:
             ),
         )
         await rpc(edge, token, "CancelTask", {"tenant": AGENT, "id": tasks["canceled"]["id"]})
-    return {state: f"/tasks/{AGENT}/{task['id']}" for state, task in tasks.items()}
+    return {state: f"/agents/{AGENT}/tasks/{task['id']}" for state, task in tasks.items()}
 
 
 async def _finish(

@@ -188,9 +188,8 @@ One process per tool group ([ADR 0008](../adr/0008-platform-mcp-servers.md)).
 | `GOLEM_EDGE_URL` | required | the edge's Service |
 | `GOLEM_UI_DSN` | required | libpq connection string to `golem_ui` as `golem_ui` |
 | `GOLEM_UI_SESSION_KEY` | required | Fernet key that encrypts the tokens of sessions |
-| `GOLEM_UI_AGENTS` | required | comma-separated agents the UI offers |
 | `GOLEM_PUBLIC_BASE_URL` | required | the UI's public address: `https`, or `http` on localhost only |
-| `GOLEM_PORT` | `8000` | the pages |
+| `GOLEM_PORT` | `8000` | the JSON API and sign-in |
 | `GOLEM_METRICS_PORT` | `9090` | metrics |
 | `GOLEM_RATE_LOGIN_PER_MINUTE`, `GOLEM_RATE_LOGIN_BURST` | `30`, `10` | per client address, `GET /login` |
 | `GOLEM_RATE_START_PER_MINUTE`, `GOLEM_RATE_START_BURST` | `10`, `5` | per session, starting tasks |
@@ -271,8 +270,9 @@ it reads at `/etc/golem/`. `golem-mcp-registry` lives in `golem-jobs`, because r
 | `registry.yaml` (`golem-mcp-registry`) | every run | `GOLEM_MCP_REGISTRY_CONFIGMAP` |
 
 Adding an agent touches five of them: the call registry, catalogs, agent tools, GitLab projects
-and, if Jira should start it, the labels; plus the agent cards below and `GOLEM_UI_AGENTS` or
-`GOLEM_MATTERMOST_AGENTS` if people should reach it there.
+and, if Jira should start it, the labels; plus the agent cards below, and
+`GOLEM_MATTERMOST_AGENTS` if people should reach it there. The UI lists what the call registry
+lets each person call.
 
 ### Call registry
 
@@ -399,7 +399,7 @@ call registry lets them call to an authenticated one. How a caller uses both:
 | tasks | 8000 `a2a`, 8001 `internal-read`, 8002 `internal-write`, 9090 | `GET /internal/run-keys` on 8001 |
 | reconciler | 9090 | none: a crash ends the process and the kubelet restarts it |
 | jira-adapter, mattermost-adapter, mcp-* | 8000, 9090 | TCP on 8000 |
-| ui | 8000, 9090 | readiness `GET /static/golem.css`, liveness TCP |
+| ui | 8000, 9090 | readiness `GET /healthz`, liveness TCP |
 
 Moving a port means changing the setting, the container port, the Service and the network
 policies together ([deploy/k8s/README.md](../../deploy/k8s/README.md#what-runs-where)).
