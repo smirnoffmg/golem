@@ -5,10 +5,14 @@ identity provider, each served by uvicorn in its own thread.
 
 ``seed`` gives the user ``alice`` a task in every state the UI shows, through the same code
 paths as production: A2A calls to the edge, admission in golem_runs, a reconcile pass that
-opens a merge request (GitLab faked at its HTTP boundary) and delivers the outcome.
+opens a merge request (GitLab faked at its HTTP boundary) and delivers the outcome. It also
+starts two processes (ADR 0019), whose stages the reconciler starts through the edge with call
+tokens: one waits for review of its stage's merge request, the other for a reason after its
+merge request was closed without one.
 """
 
 import asyncio
+import json
 import socket
 import threading
 import time
@@ -32,8 +36,10 @@ from cryptography.fernet import Fernet
 from starlette.types import ASGIApp
 from testcontainers.community.postgres import PostgresContainer
 
-from golem.edge.__main__ import authenticator, load_public_cards
+from golem.catalog import Catalogs, ProcessCatalog, load_catalogs
+from golem.edge.__main__ import authenticator, call_authenticator, public_cards
 from golem.edge.app import create_edge_app
+from golem.edge.auth import authenticate_any
 from golem.edge.card_signing import card_keys
 from golem.edge.policy import ChainLimits, Registry
 from golem.jwks import SigningKeys, fetch_jwks
@@ -43,17 +49,23 @@ from golem.orchestrator.jobs import CatalogRef, JobSpec, JobStatus
 from golem.orchestrator.merge_requests import (
     GitLabMergeRequests,
     GitLabProject,
+    check_merge_request,
+    close_merge_request,
+    closing_reason,
     propose_merge_request,
 )
 from golem.orchestrator.notify import TaskServiceNotifier
+from golem.orchestrator.process_runs import ProcessPorts
 from golem.orchestrator.reconcile import SucceededRun, reconcile_once
 from golem.orchestrator.service import JobTemplate, PostgresOrchestrator
+from golem.orchestrator.stages import EdgeStages
 from golem.ratelimit import Limiter, Rate
+from golem.run_status import RunStatuses
 from golem.run_token import SigningKey
 from golem.runtime.main import Outcome, RunReport, report_json
 from golem.serving import Listener
 from golem.tasks.__main__ import service_card
-from golem.tasks.app import create_listeners
+from golem.tasks.app import RUN_KEYS_PATH, create_listeners
 from golem.tasks.store import tasks_engine, tasks_store
 from golem.ui import store
 from golem.ui.app import create_ui_app
@@ -67,6 +79,18 @@ INIT_SQL = ROOT / "deploy" / "postgres" / "init.sql"
 EXAMPLES = ROOT / "examples"
 USER = "alice"
 AGENT = "discovery"
+# A process a person starts, and the worker its stages run; people cannot call the worker.
+PROCESS = "discovery-flow"
+STAGE_AGENT = "researcher"
+PROCESS_CATALOG = ProcessCatalog(
+    name=PROCESS,
+    description="From interview notes to evidenced hypotheses, then to a reviewed solution.",
+    version="0.1.0",
+    stages=(
+        {"name": "evidence", "agent": STAGE_AGENT, "goal": "Collect evidence: {input}"},
+        {"name": "solution", "agent": STAGE_AGENT, "goal": "Propose a solution for it."},
+    ),
+)
 EDGE_TOKEN = "demo-edge-token"
 CLIENT_SECRET = "demo-client-secret"
 EDGE_AUDIENCE = "golem-edge"
@@ -77,6 +101,7 @@ MERGE_REQUEST_IID = 42
 MERGE_REQUEST_URL = (
     f"https://git.example.com/{CONTEXT_PROJECT}/-/merge_requests/{MERGE_REQUEST_IID}"
 )
+GITLAB_TOKEN = "demo-gitlab-token"
 # Four at once, so the fifth task of the seed is refused by admission with the real reason.
 LIMITS = Limits(max_runs_per_caller=4, max_runs_per_root=4, budget_per_root=Decimal("100"))
 # One person clicking through every page in seconds; the edge's default would refuse them.
@@ -89,6 +114,10 @@ GOALS = {
     "canceled": "Review the proposed solution S-1 against the evidence it relies on.",
     "working": "Research hypothesis H-1: do teams re-open discussions already decided?",
     "rejected": "Draft a second solution for H-1.",
+}
+PROCESS_GOALS = {
+    "review": "Interview notes from the September round on onboarding friction.",
+    "needs_reason": "Support tickets tagged 'export' from the last quarter.",
 }
 VALIDATION_REASON = (
     "H-3 changed status from 'validated' to 'accepted'; status changes are human decisions"
@@ -235,6 +264,71 @@ def in_own_loop[T](work: Coroutine[Any, Any, T]) -> T:
 
 
 @dataclass
+class DemoGitLab:
+    """The GitLab calls the reconciler makes, with merge requests that keep their state: a run's
+    branch is found, a merge request opened, read back, closed, and its notes listed."""
+
+    merge_requests: list[dict[str, Any]] = field(default_factory=list)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        with self.lock:
+            if path.endswith("/repository/branches"):
+                run_id = request.url.params["search"].strip("/$")
+                return httpx.Response(200, json=[{"name": f"golem/H-2/{run_id}"}])
+            if path.endswith("/merge_requests") and request.method == "GET":
+                source = request.url.params.get("source_branch")
+                state = request.url.params.get("state", "all")
+                found = [
+                    mr
+                    for mr in self.merge_requests
+                    if mr["source_branch"] == source and state in ("all", mr["state"])
+                ]
+                return httpx.Response(200, json=found)
+            if path.endswith("/merge_requests"):
+                return httpx.Response(201, json=self._open(json.loads(request.content)))
+            if path.endswith("/notes"):
+                return httpx.Response(200, json=[])
+            if "/merge_requests/" in path:
+                mr = self._numbered(int(path.rsplit("/", 1)[1]))
+                if mr is None:
+                    return httpx.Response(404, json={"message": "404 Not found"})
+                if request.method == "PUT":
+                    self._close(mr)
+                return httpx.Response(200, json=mr)
+        return httpx.Response(404, json={"message": "404 Not found"})
+
+    def _open(self, body: dict[str, Any]) -> dict[str, Any]:
+        iid = MERGE_REQUEST_IID + len(self.merge_requests)
+        mr = {
+            "iid": iid,
+            "state": "opened",
+            "source_branch": body["source_branch"],
+            "web_url": f"https://git.example.com/{CONTEXT_PROJECT}/-/merge_requests/{iid}",
+        }
+        self.merge_requests.append(mr)
+        return mr
+
+    def _numbered(self, iid: int) -> dict[str, Any] | None:
+        return next((mr for mr in self.merge_requests if mr["iid"] == iid), None)
+
+    def _close(self, mr: dict[str, Any]) -> None:
+        mr.update(
+            state="closed",
+            closed_by={"username": "bob"},
+            closed_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+
+    def close_without_comment(self, source_branch_suffix: str) -> None:
+        """A person closes the stage's merge request in GitLab and writes nothing."""
+        with self.lock:
+            for mr in self.merge_requests:
+                if mr["source_branch"].endswith(source_branch_suffix):
+                    self._close(mr)
+
+
+@dataclass
 class Demo:
     ui_url: str
     edge_url: str
@@ -242,19 +336,9 @@ class Demo:
     idp: FakeIdP
     launcher: DemoLauncher
     databases: Databases
-
-
-def gitlab(request: httpx.Request) -> httpx.Response:
-    """The two GitLab calls a merge request takes: find the run's branch, open the request."""
-    path = request.url.path
-    if path.endswith("/repository/branches"):
-        run_id = request.url.params["search"].strip("/$")
-        return httpx.Response(200, json=[{"name": f"golem/H-2/{run_id}"}])
-    if path.endswith("/merge_requests") and request.method == "GET":
-        return httpx.Response(200, json=[])
-    if path.endswith("/merge_requests"):
-        return httpx.Response(201, json={"web_url": MERGE_REQUEST_URL, "iid": MERGE_REQUEST_IID})
-    return httpx.Response(404)
+    gitlab: DemoGitLab
+    # The reconciler signs the call tokens that start a process's stages at the edge.
+    run_key: SigningKey
 
 
 @contextmanager
@@ -262,7 +346,9 @@ def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[
     """The stack, with the board served from ``board_url`` (support.front.board_server)."""
     in_own_loop(reset(databases))
     ui_socket = bound(ui_port)
-    idp_socket, edge_socket, tasks_socket, outcome_socket, bff_socket = (bound() for _ in range(5))
+    idp_socket, edge_socket, tasks_socket, outcome_socket, read_socket, bff_socket = (
+        bound() for _ in range(6)
+    )
     ui_url = f"http://localhost:{port_of(ui_socket)}"
     edge_url = f"http://127.0.0.1:{port_of(edge_socket)}"
     tasks_url = f"http://127.0.0.1:{port_of(tasks_socket)}"
@@ -275,6 +361,8 @@ def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[
         expires_in=3600,
     )
     launcher = DemoLauncher()
+    run_key = SigningKey.generate(kid="demo")
+    catalog = CatalogRef(url=CATALOG_URL, revision="main")
     listeners = create_listeners(
         service_card(tasks_url),
         PostgresOrchestrator(
@@ -291,30 +379,53 @@ def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[
                 cpu="1",
                 memory="1Gi",
             ),
-            catalogs={AGENT: CatalogRef(url=CATALOG_URL, revision="main")},
-            signing_key=SigningKey.generate(kid="demo"),
+            catalogs={AGENT: catalog, STAGE_AGENT: catalog},
+            signing_key=run_key,
             grants={AGENT: ("tracker.read", "wiki.read")},
+            processes={PROCESS: PROCESS_CATALOG},
         ),
         edge_token=EDGE_TOKEN,
         task_store=tasks_store(tasks_engine(databases.tasks_url)),
+        run_keys=(run_key,),
     )
+    read_url = f"http://127.0.0.1:{port_of(read_socket)}"
     served = [
         serve((idp_app(idp, USER, post_logout_redirects=(f"{ui_url}/",)), idp_socket)),
-        serve((listeners.public, tasks_socket), (listeners.internal_write, outcome_socket)),
+        serve(
+            (listeners.public, tasks_socket),
+            (listeners.internal_write, outcome_socket),
+            (listeners.internal_read, read_socket),
+        ),
     ]
     try:
         edge_keys = SigningKeys(partial(fetch_jwks, httpx.Client(timeout=5), idp.jwks_url))
         edge_keys.refresh()
+        golem_keys = SigningKeys(
+            partial(fetch_jwks, httpx.Client(base_url=read_url, timeout=5), RUN_KEYS_PATH)
+        )
         card_key = SigningKey.generate("demo-cards")
         edge = create_edge_app(
-            authenticate=authenticator(edge_keys, issuer=idp.issuer, audience=EDGE_AUDIENCE),
-            registry=Registry(allowed_callers={AGENT: frozenset({"user:*"})}),
+            authenticate=partial(
+                authenticate_any,
+                idp=authenticator(edge_keys, issuer=idp.issuer, audience=EDGE_AUDIENCE),
+                golem=call_authenticator(golem_keys),
+            ),
+            registry=Registry(
+                allowed_callers={
+                    AGENT: frozenset({"user:*"}),
+                    PROCESS: frozenset({"user:*"}),
+                    STAGE_AGENT: frozenset({f"agent:{PROCESS}"}),
+                }
+            ),
             limits=ChainLimits(max_depth=3),
             audit_dsn=databases.audit,
             forward=httpx.AsyncClient(base_url=tasks_url, timeout=10),
             edge_token=EDGE_TOKEN,
-            cards=load_public_cards(
-                EXAMPLES,
+            cards=public_cards(
+                Catalogs(
+                    agents=load_catalogs(EXAMPLES).agents,
+                    processes={PROCESS: PROCESS_CATALOG},
+                ),
                 base_url=edge_url,
                 oidc_discovery_url=idp.discovery_url,
                 signing_key=card_key,
@@ -322,6 +433,9 @@ def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[
             card_keys=card_keys([card_key]),
             public_base_url=edge_url,
             callers=Limiter(DEMO_CALLER_RATE),
+            run_statuses=RunStatuses(
+                httpx.AsyncClient(base_url=read_url, timeout=5), ttl_seconds=0
+            ),
         )
         served.append(serve((edge, edge_socket)))
         ui = create_ui_app(
@@ -349,6 +463,8 @@ def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[
             idp=idp,
             launcher=launcher,
             databases=databases,
+            gitlab=DemoGitLab(),
+            run_key=run_key,
         )
     finally:
         for each in served:
@@ -356,7 +472,8 @@ def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[
 
 
 def seed(demo: Demo) -> dict[str, str]:
-    """alice's tasks, one per state the board shows; returns each one's board path by state."""
+    """alice's tasks, one per state the board shows, and her two processes; returns each one's
+    board path by state (a process's as ``process-<state>``)."""
     return in_own_loop(_seed(demo))
 
 
@@ -364,16 +481,12 @@ async def _seed(demo: Demo) -> dict[str, str]:
     token = demo.idp.access_token(USER)
     async with httpx.AsyncClient(base_url=demo.edge_url, timeout=10) as edge:
 
-        async def send(state: str) -> dict[str, Any]:
-            message = {
-                "messageId": f"seed-{state}",
-                "role": "ROLE_USER",
-                "parts": [{"text": GOALS[state]}],
-            }
-            result = await rpc(edge, token, "SendMessage", {"tenant": AGENT, "message": message})
+        async def send(tenant: str, key: str, text: str) -> dict[str, Any]:
+            message = {"messageId": f"seed-{key}", "role": "ROLE_USER", "parts": [{"text": text}]}
+            result = await rpc(edge, token, "SendMessage", {"tenant": tenant, "message": message})
             return result["task"]
 
-        tasks = {state: await send(state) for state in GOALS}
+        tasks = {state: await send(AGENT, state, goal) for state, goal in GOALS.items()}
         await _finish(demo, tasks["completed"], JobStatus.SUCCEEDED)
         await _finish(
             demo,
@@ -391,27 +504,88 @@ async def _seed(demo: Demo) -> dict[str, str]:
             ),
         )
         await rpc(edge, token, "CancelTask", {"tenant": AGENT, "id": tasks["canceled"]["id"]})
-    return {state: f"/agents/{AGENT}/tasks/{task['id']}" for state, task in tasks.items()}
+        processes = {
+            state: await send(PROCESS, f"process-{state}", goal)
+            for state, goal in PROCESS_GOALS.items()
+        }
+    # The reconciler starts each process's first stage at the edge, then shows it on the task.
+    await _reconcile(demo)
+    for process in processes.values():
+        await _finish(
+            demo, {"metadata": {"runId": await _stage_run(demo, process)}}, JobStatus.SUCCEEDED
+        )
+    await _reconcile(demo)
+    # A person closes the second one's merge request in GitLab without saying why.
+    demo.gitlab.close_without_comment(await _stage_run(demo, processes["needs_reason"]))
+    await _reconcile(demo)
+    paths = {state: f"/agents/{AGENT}/tasks/{task['id']}" for state, task in tasks.items()}
+    return paths | {
+        f"process-{state}": f"/agents/{PROCESS}/tasks/{task['id']}"
+        for state, task in processes.items()
+    }
+
+
+async def _stage_run(demo: Demo, process_task: dict[str, Any]) -> str:
+    async with await psycopg.AsyncConnection.connect(demo.databases.runs) as conn:
+        cursor = await conn.execute(
+            "SELECT run_id FROM process_stages WHERE process_run_id = %s",
+            (process_task["metadata"]["runId"],),
+        )
+        row = await cursor.fetchone()
+    assert row is not None and row[0] is not None, "the process's stage has not started"
+    return str(row[0])
 
 
 async def _finish(
     demo: Demo, task: dict[str, Any], status: JobStatus, report: str | None = None
 ) -> None:
-    """The Job ends; one reconcile pass records it, proposes its branch, delivers the outcome."""
+    """The Job ends; a reconcile pass records it, proposes its branch, delivers the outcome."""
     demo.launcher.finish(task["metadata"]["runId"], status, report)
+    await _reconcile(demo)
+
+
+async def _reconcile(demo: Demo) -> None:
+    """One reconcile pass as the reconciler makes it, GitLab faked at its HTTP boundary."""
     async with (
-        httpx.AsyncClient(transport=httpx.MockTransport(gitlab), base_url=GITLAB_API) as client,
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(demo.gitlab.handle),
+            base_url=GITLAB_API,
+            headers={"PRIVATE-TOKEN": GITLAB_TOKEN},
+        ) as client,
         httpx.AsyncClient(base_url=demo.outcome_url, timeout=10) as outcomes,
+        httpx.AsyncClient(base_url=demo.edge_url, timeout=10) as edge,
         await psycopg.AsyncConnection.connect(demo.databases.runs, autocommit=True) as conn,
     ):
-        merge_requests = GitLabMergeRequests(
-            client, {AGENT: GitLabProject(path=CONTEXT_PROJECT, target_branch="main")}
-        )
+        project = GitLabProject(path=CONTEXT_PROJECT, target_branch="main")
+        merge_requests = GitLabMergeRequests(client, {AGENT: project, STAGE_AGENT: project})
+        notifier = TaskServiceNotifier(outcomes)
 
-        async def propose(run: SucceededRun) -> str:
+        async def propose(run: SucceededRun) -> Any:
             return await propose_merge_request(merge_requests, run)
 
-        await reconcile_once(conn, demo.launcher, TaskServiceNotifier(outcomes).notify, propose)
+        async def check(pending: Any) -> Any:
+            return await check_merge_request(merge_requests, pending)
+
+        await reconcile_once(
+            conn,
+            demo.launcher,
+            notifier.notify,
+            propose,
+            check=check,
+            notify_proposal=notifier.notify_proposal,
+            poll_seconds=0,
+            processes=ProcessPorts(
+                start=EdgeStages(client=edge, signing_key=demo.run_key).start,
+                closing_reason=partial(closing_reason, merge_requests),
+                close_merge_request=partial(close_merge_request, merge_requests),
+            ),
+            notify_process=notifier.notify_process,
+        )
+
+
+def reconcile(demo: Demo) -> None:
+    """One reconcile pass, from a caller that may be running an event loop already."""
+    in_own_loop(_reconcile(demo))
 
 
 def run_count(demo: Demo) -> int:

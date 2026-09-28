@@ -2,8 +2,8 @@
 
 Runs the demo stack of scripts/ui_demo.py with ids and timestamps frozen, signs in as alice in
 headless Chromium with the browser's clock fixed two hours after the seed, and captures the
-board and every task state at 1280x800, the board also at 390x844. Needs Docker and
-``uv run playwright install --only-shell chromium`` once.
+board, a process's board and every task state at 1280x800, the board also at 390x844. Needs
+Docker and ``uv run playwright install --only-shell chromium`` once.
 """
 
 import sys
@@ -14,7 +14,15 @@ from playwright.sync_api import BrowserContext, Page, expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
-from support.demo import AGENT, databases_of, frozen, postgres_container, running, seed
+from support.demo import (
+    AGENT,
+    PROCESS,
+    databases_of,
+    frozen,
+    postgres_container,
+    running,
+    seed,
+)
 from support.front import board_server
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +33,7 @@ SEEDED_AT = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
 # "Updated 2 h ago" reads the same on every run.
 BROWSER_NOW = SEEDED_AT + timedelta(hours=2)
 BOARD = f"/agents/{AGENT}"
+PROCESS_BOARD = f"/agents/{PROCESS}"
 NEW_GOAL = "Collect evidence for hypothesis H-4 from the support tickets of the last quarter."
 # The backend's start limit is a burst of 5 per session; the sixth start in a row is refused.
 START_BURST = 5
@@ -64,9 +73,14 @@ def capture(ui_url: str, tasks: dict[str, str]) -> list[Path]:
         expect(page.get_by_role("link", name="Sign in")).to_be_visible()
         shots.append(shoot(page, "sign-in"))
         page.get_by_role("link", name="Sign in").click()
-        page.wait_for_url(f"{ui_url}{BOARD}")
+        page.wait_for_url(f"{ui_url}/")
+        page.goto(BOARD)
         expect(page.locator(".card").first).to_be_visible()
         shots.append(shoot(page, "board"))
+        page.goto(PROCESS_BOARD)
+        expect(page.locator(".resolution")).to_be_visible()
+        shots.append(shoot(page, "process-board"))
+        page.goto(BOARD)
         page.get_by_label(f"New task for {AGENT}").fill(NEW_GOAL)
         shots.append(shoot(page, "new-task"))
         page.get_by_label(f"New task for {AGENT}").fill("")
