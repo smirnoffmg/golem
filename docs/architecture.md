@@ -400,7 +400,7 @@ System_Ext(langfuse, "Langfuse", "experiments")
 Container_Boundary(orch, "Orchestrator") {
   Component(admit, "Run admission", "", "concurrent Jobs per caller and per root chain; estimate against budget; refusal is REJECTED with a reason")
   Component(wf_run, "Run workflow", "", "catalog version and image; limits; terminal state with a reason; retry only for infrastructure")
-  Component(wf_flow, "Process workflow", "", "stages from the process file; waits for accept; return limit; child runs")
+  Component(wf_flow, "Process workflow", "", "stages from the process file (ADR 0019); next stage when a proposal is applied; rerun with the rejection reason; return limit; stages started through the edge")
   Component(wf_eval, "Evaluation workflow", "", "branch version over the golden set; judge; compare with merged version; verdict and threshold")
   Component(wait_child, "Child task wait", "", "run ends in waiting-for-task-X; on its completion a new Job continues", $tags="target")
   Component(act_job, "Job activity", "", "create Job with image, catalog ref and hop token; watch; clean up on timeout")

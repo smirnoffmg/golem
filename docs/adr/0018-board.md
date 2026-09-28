@@ -170,9 +170,12 @@ edge failed.
 | `GET /api/agents/{agent}/reports?page=` | `GET /reports?agent=&page=` | the agent's reports without a proposal, below |
 | `GET /api/reports/{taskId}` | `GET /reports/{taskId}` | one report |
 | `POST /api/proposals/{id}/decision` | `POST /proposals/{id}/decision` | `{"decision": "accept" \| "reject", "reason"}` |
+| `POST /api/processes/{taskId}/resolution` | `POST /processes/{taskId}/resolution` | a process that needs a reason: `{"action": "rerun", "reason"}` or `{"action": "end"}` ([ADR 0019](0019-processes.md)) |
 
 The agents a person sees come from the edge's directory with their own token, so the left
-column lists exactly the agents the call registry lets them call. The BFF keeps each session's
+column lists exactly the agents the call registry lets them call. Since
+[ADR 0019](0019-processes.md) a person may call only processes, so the left column lists
+processes and each board is a process's; `{agent}` in the routes names one. The BFF keeps each session's
 directory for 60 s, the edge's `max-age` for it. It answers 404 for an `{agent}` that is not in
 that list, so a mistyped or forbidden name costs no edge call and no audit row. The edge still
 decides every call.
@@ -232,7 +235,8 @@ tenant means.
   still falls inside the next window. Tasks already seen come back and replace themselves. A
   delta that fills its page is answered as a snapshot instead.
 - **`proposals` is always the whole open set**: `GET /proposals?agent=<agent>&state=pending,
-  accepted,failed`, one page of 50. A proposal's change does not move its task's status
+  accepted,failed`, one page of 50; for a process, `process=<name>` instead of `agent=`, the
+  proposals of its stages ([ADR 0019](0019-processes.md)). A proposal's change does not move its task's status
   timestamp, so a task delta would miss it; the open set is small, so it is sent whole.
   ([ADR 0015](0015-proposals.md)'s `state` parameter takes a comma-separated list.)
 - `goal` is the first user message cut at 280 characters, `message` the status message cut at
@@ -244,11 +248,24 @@ The BFF assigns the column, as a pure function of the task, its proposal and the
 | Column | Tasks | Proposals |
 | --- | --- | --- |
 | In progress | `submitted`, `working`, and any state the BFF does not know | |
-| Waiting for me | `input-required`, `auth-required` | |
+| Waiting for me | `input-required`, `auth-required`; a process task whose `golemProcess.state` is `needs_reason` | |
 | To review | `completed` whose proposal is in the open set | every open proposal: `pending`, `accepted` (being applied), `failed` (apply refused; accept again or reject) |
 | Failed | `failed`, `rejected` | |
 | Archive (collapsed) | `canceled`; `completed` without a proposal; `completed` whose proposal is `applied`, `rejected` or `stale` | |
 | Reports (collapsed) | | none: reports without a proposal, loaded from `/api/agents/{agent}/reports` when opened (below) |
+
+A process task ([ADR 0019](0019-processes.md)) is one card for the whole process. It shows
+`golemProcess`: the current stage (`2 of 3, design`), the attempt, and the stage's proposal,
+joined to the open set by the proposal's id rather than by `taskId`, since the proposal belongs
+to the stage task. A process task in `needs_reason` goes to Waiting for me, with a reason field
+and two actions, "Rerun the stage" (the reason is required) and "End the process", both through
+`POST /api/processes/{taskId}/resolution`, which calls the edge's
+`POST /processes/{taskId}/resolution` with the same body. A `working` process task whose stage
+proposal is open goes to To review; a
+`completed` one to the archive, a `failed` one to Failed with the process's reason. Stage tasks
+are not cards: they carry a worker's tenant, and a person's board lists only a process's tasks.
+Rejecting a stage's proposal asks for a reason, and a `merge_request` stage's card says to close
+the merge request with a comment.
 
 A proposal of the person's own task and the task itself are one card, joined by `taskId`. A
 proposal the person may decide only as a reviewer is a card of its own, without a task link,
@@ -401,7 +418,9 @@ that switches to the stream changes its transport, not its model.
   tab costs nothing.
 - The board shows the last 100 updated tasks per agent at first. Older ones are in the archive's
   pages.
-- The "Waiting for me" column stays empty for Golem's own agents until a run can ask for input.
+- "Waiting for me" holds processes that need a reason after a merge request closed without a
+  comment ([ADR 0019](0019-processes.md)). Runs themselves still cannot ask for input, so
+  `input-required` stays empty for Golem's own agents until that is decided.
 - An agent's reviewers read every report its goal runs leave, including those about alerts
   from environments they do not otherwise watch. Whoever controls the catalog's `reviewers`
   controls that too, the same trust as deciding its proposals. Reports carry whatever the

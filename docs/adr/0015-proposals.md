@@ -183,6 +183,12 @@ The edge stays the only door. It serves three routes outside A2A, like `GET /age
   now (below); when the proposal's task carries a `report` artifact
   ([ADR 0017](0017-triggers.md)), that text as `report`;
 - `POST /proposals/{id}/decision` with `{"decision": "accept" | "reject", "reason"}`.
+  Rejecting a proposal of a process stage requires a `reason` of 1 to 4 000 characters (400
+  `reason_required`), since the stage reruns with it in its brief
+  ([ADR 0019](0019-processes.md)); `GET /proposals` also takes `process=<name>`, matching the
+  proposals of that process's stages. A `stale` stage proposal reruns the stage without
+  spending its return limit, and a stage's merge request closed without a comment puts the
+  process in `needs_reason` rather than failing it (both in [ADR 0019](0019-processes.md)).
 
 Only identity provider tokens: a call token (an agent) gets 403 `agents_do_not_decide`. Each
 request takes a token from the caller's `/a2a` bucket, and each is audited before it is served
