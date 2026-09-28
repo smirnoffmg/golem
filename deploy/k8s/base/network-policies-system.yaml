@@ -101,6 +101,10 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-ui
+        # The reconciler, starting processes' stages with call tokens (ADR 0019).
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-reconciler
       ports:
         - protocol: TCP
           port: 8000
@@ -240,6 +244,15 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+    # The edge's a2a port, where processes' stages start (ADR 0019). Last, so overlays that
+    # patch the placeholders above by index keep working.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-edge
+      ports:
+        - protocol: TCP
+          port: 8000
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

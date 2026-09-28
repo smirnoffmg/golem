@@ -25,7 +25,10 @@ COPY . /app
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-RUN groupadd --system golem && useradd --system --gid golem --no-create-home golem
+# /run/golem: where compose's task service and reconciler share the dev run token key; a
+# named volume mounted there takes this directory's owner.
+RUN groupadd --system golem && useradd --system --gid golem --no-create-home golem \
+    && install -d -o golem -g golem /run/golem
 USER golem
 
 # The Job's root filesystem is read-only; git and caches need a writable home.

@@ -68,6 +68,8 @@ MATRIX = {
         DNS,
         f"open:{TASKS}:8002",
         f"open:{POSTGRES}",
+        # Processes' stages start at the edge (ADR 0019).
+        "open:edge.golem-system.svc:8000",
         f"closed:{TASKS}:8000",
         f"closed:{TASKS}:8001",
     },

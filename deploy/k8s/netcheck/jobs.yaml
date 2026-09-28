@@ -261,6 +261,8 @@ spec:
             - "dns:kubernetes.default.svc.cluster.local"
             - "open:tasks.golem-system.svc:8002"
             - "open:$(NETCHECK_POSTGRES)"
+            # Processes' stages start at the edge (ADR 0019).
+            - "open:edge.golem-system.svc:8000"
             - "closed:tasks.golem-system.svc:8000"
             - "closed:tasks.golem-system.svc:8001"
           env:

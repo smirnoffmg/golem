@@ -22,6 +22,8 @@ data:
   GOLEM_JOB_MEMORY: 1Gi
   GOLEM_MCP_REGISTRY_CONFIGMAP: golem-mcp-registry
   GOLEM_CATALOGS_FILE: /etc/golem/catalogs.yaml
+  # The pinned catalogs the edge builds cards from: the processes among them (ADR 0019).
+  GOLEM_CATALOGS_DIR: /app/examples
   GOLEM_AGENT_TOOLS_FILE: /etc/golem/agent-tools.yaml
   GOLEM_RUN_TOKEN_KEY_FILE: /var/run/golem/run-token/key.pem
   GOLEM_RUN_TOKEN_KID: golem-1
