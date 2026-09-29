@@ -15,12 +15,12 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 import httpx
 from langchain_core.tools import BaseTool, StructuredTool
 
 from golem.catalog import Neighbour
+from golem.task_json import status_text
 
 DELEGATE_TOOL = "delegate_to_agent"
 A2A_VERSION = "1.0"
@@ -132,16 +132,6 @@ def describe(agent: str, response: httpx.Response) -> str:
     reply = f"Delegated to {agent}: task {task.get('id')}, state {status.get('state')}."
     reason = status_text(status)
     return f"{reply} {reason}" if reason else reply
-
-
-def status_text(status: dict[str, Any]) -> str:
-    message = status.get("message")
-    parts = message.get("parts") if isinstance(message, dict) else None
-    if not isinstance(parts, list):
-        return ""
-    return " ".join(
-        p["text"] for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str)
-    )
 
 
 def bounded(text: str, limit: int) -> str:

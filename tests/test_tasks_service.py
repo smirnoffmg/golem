@@ -476,7 +476,7 @@ def test_a_reported_run_completes_its_task_with_the_report(
     assert artifact["parts"] == [{"text": "# Seen\n\nA deploy."}]
 
 
-def test_a_proposal_state_change_rewrites_the_task_without_moving_its_status(
+def test_a_proposal_state_change_moves_only_the_status_timestamp(
     client: TestClient, orchestrator: FakeOrchestrator
 ) -> None:
     task_id = finished_with_a_proposal(client, orchestrator)
@@ -494,8 +494,24 @@ def test_a_proposal_state_change_rewrites_the_task_without_moving_its_status(
     assert response.status_code == 200
     assert after["metadata"]["golemProposal"]["state"] == "applied"
     assert after["metadata"]["runId"] == "run-1"
-    # The board's delta reads by status timestamp; a proposal's change must not move it.
-    assert after["status"] == before["status"]
+    # The board's delta reads by status timestamp, so a proposal's change must move it; the
+    # state and the message stay what the run's outcome made them.
+    assert after["status"]["timestamp"] > before["status"]["timestamp"]
+    assert {k: v for k, v in after["status"].items() if k != "timestamp"} == {
+        k: v for k, v in before["status"].items() if k != "timestamp"
+    }
+
+
+def test_a_state_change_that_changes_nothing_keeps_the_timestamp(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task_id = finished_with_a_proposal(client, orchestrator)
+    client.post(PROPOSAL_STATE_PATH, json={"proposal_id": "p-1"})
+    before = get_task(client, task_id)
+
+    client.post(PROPOSAL_STATE_PATH, json={"proposal_id": "p-1"})
+
+    assert get_task(client, task_id)["status"] == before["status"]
 
 
 def test_a_state_change_of_an_unknown_proposal_is_not_found(client: TestClient) -> None:

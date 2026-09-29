@@ -10,7 +10,7 @@ from psycopg import AsyncConnection
 
 from golem import call_token
 from golem.call_token import CallClaims
-from golem.catalog import ProcessCatalog
+from golem.catalog import ProcessCatalog, render_goal
 from golem.metrics import Metrics
 from golem.orchestrator.admission import Limits, Rejected
 from golem.orchestrator.jobs import CatalogRef, JobLauncher, JobSpec
@@ -167,7 +167,7 @@ class PostgresOrchestrator:
             outcome = await start_run(conn, request, self.limits)
             if isinstance(outcome, Rejected):
                 self.metrics.admission_rejected(outcome.reason.value)
-                return Refused(reason=outcome.detail)
+                return Refused(reason=outcome.detail, code=outcome.reason.value)
             if isinstance(outcome, RunCreated):
                 self.metrics.run_started(run.agent, self.estimated_cost)
             if isinstance(outcome, RunReused) and outcome.status != "running":
@@ -203,6 +203,12 @@ class PostgresOrchestrator:
         if run.chain:
             # A process is where a chain starts, never a step of one.
             return Refused(reason=f"Process {run.agent!r} is started by a person, not an agent.")
+        try:
+            for stage in process.stages:
+                render_goal(stage, run.goal)
+        except ValueError as error:
+            # Refused now, with the reason, rather than failed at a stage days from now.
+            return Refused(reason=f"Process {run.agent!r} cannot take this input: {error}.")
         request = StartRequest(
             caller=run.caller,
             message_id=run.message_id,

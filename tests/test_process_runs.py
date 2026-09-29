@@ -367,6 +367,54 @@ async def test_the_first_stage_starts_with_the_persons_input_on_its_own_target(
     assert rows == [("user:alice", "agent:analyst", "allow", [FEATURE])]
 
 
+async def test_a_process_whose_goal_would_be_too_long_is_refused_at_its_start(
+    golem: Golem,
+) -> None:
+    # "Analyse: " plus 4000 characters is over what a stage's goal may be.
+    task = await golem.start("alice", "x" * 4000)
+
+    assert task["status"]["state"] == "TASK_STATE_REJECTED"
+    await golem.reconcile()
+    assert golem.cluster.launched == []
+
+
+async def test_a_stage_goal_that_cannot_be_written_fails_the_process(
+    golem: Golem, runs_db: str
+) -> None:
+    task = await golem.start("alice", "Add a CSV export.")
+    async with await psycopg.AsyncConnection.connect(runs_db, autocommit=True) as conn:
+        await conn.execute(
+            "UPDATE process_stages SET input = %s WHERE process_run_id = %s",
+            ("x" * 4000, task["metadata"]["runId"]),
+        )
+
+    await golem.reconcile()
+
+    process_task = await golem.task("alice", task["id"])
+    assert process_task["status"]["state"] == "TASK_STATE_FAILED"
+    assert process_of(process_task)["reason"] == "invalid_goal"
+    assert golem.cluster.launched == []
+
+
+async def test_a_stage_held_back_by_its_owners_other_runs_starts_once_they_end(
+    golem: Golem,
+) -> None:
+    # LIMITS allow alice one running run: the first process's stage holds it.
+    first = await golem.start("alice", "Add a CSV export.", message_id="m-1")
+    second = await golem.start("alice", "Add a PDF export.", message_id="m-2")
+    await golem.reconcile()
+    [held] = golem.cluster.launched
+
+    process_task = await golem.task("alice", second["id"])
+    assert process_task["status"]["state"] == "TASK_STATE_WORKING"
+    golem.succeed(held)
+    await golem.reconcile()
+
+    assert len(golem.cluster.launched) == 2
+    assert process_of(await golem.task("alice", first["id"]))["state"] == "running"
+    assert process_of(await golem.task("alice", second["id"]))["state"] == "running"
+
+
 async def test_a_stage_takes_no_second_job_slot_for_its_process(golem: Golem) -> None:
     # LIMITS allow alice one running run: the process run must not be it.
     await golem.start("alice", "Add a CSV export.")
@@ -651,6 +699,45 @@ async def test_canceling_a_process_closes_the_merge_request_waiting_for_review(
     assert row == ("rejected", "user:alice", "process_canceled")
     # Nothing more starts under a canceled process.
     assert len(golem.cluster.launched) == 1
+
+
+async def test_a_canceled_process_proposes_nothing_its_stage_left_unsettled(
+    golem: Golem,
+) -> None:
+    # The stage succeeded while GitLab was down, so no merge request was opened yet.
+    task = await golem.start("alice", "Add a CSV export.")
+    await golem.reconcile()
+    spec = golem.stage("analyst")
+    golem.succeed(spec)
+    golem.gitlab.down = True
+    await golem.reconcile()
+
+    await golem.cancel("alice", task["id"])
+    await golem.reconcile()
+    golem.gitlab.down = False
+    await golem.reconcile()
+
+    assert golem.gitlab.merge_requests == []
+    assert process_of(await golem.task("alice", task["id"]))["state"] == "canceled"
+
+
+async def test_canceling_a_process_cancels_a_stage_run_not_yet_linked_to_it(
+    golem: Golem, runs_db: str
+) -> None:
+    task = await golem.start("alice", "Add a CSV export.")
+    await golem.reconcile()
+    spec = golem.stage("analyst")
+    # The stage's task was recorded, but the pass that would link its run did not get there.
+    async with await psycopg.AsyncConnection.connect(runs_db, autocommit=True) as conn:
+        await conn.execute(
+            "UPDATE process_stages SET run_id = NULL WHERE process_run_id = %s",
+            (task["metadata"]["runId"],),
+        )
+
+    await golem.cancel("alice", task["id"])
+    await golem.reconcile()
+
+    assert golem.cluster.deleted == [spec.run_id]
 
 
 def test_a_process_definition_survives_as_json() -> None:

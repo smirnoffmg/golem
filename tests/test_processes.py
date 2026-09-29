@@ -213,6 +213,40 @@ def test_a_stage_admission_rejects_is_refused_with_its_reason() -> None:
     assert refused == StageRefused("Caller user:alice already has 3 running runs.")
 
 
+@pytest.mark.parametrize("refusal", ["caller_concurrency", "chain_concurrency"])
+def test_a_stage_admission_holds_back_for_now_is_retried(refusal: str) -> None:
+    # The owner's other runs end, and the same start is admitted on a later pass.
+    task = {
+        "id": "t-1",
+        "status": {"state": "TASK_STATE_REJECTED"},
+        "metadata": {"golemRefusal": refusal},
+    }
+
+    with pytest.raises(StageUnavailable):
+        started(answer(200, {"result": {"task": task}}))
+
+
+def test_a_stage_over_its_chains_budget_is_refused() -> None:
+    task = {
+        "id": "t-1",
+        "status": {"state": "TASK_STATE_REJECTED"},
+        "metadata": {"golemRefusal": "chain_budget"},
+    }
+
+    assert isinstance(started(answer(200, {"result": {"task": task}})), StageRefused)
+
+
+@pytest.mark.parametrize(
+    "state", ["TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_COMPLETED"]
+)
+def test_a_stage_task_that_ended_at_its_start_is_retried(state: str) -> None:
+    # No run stands behind such a task: storing its id would wait for a run forever.
+    task = {"id": "t-1", "status": {"state": state}}
+
+    with pytest.raises(StageUnavailable):
+        started(answer(200, {"result": {"task": task}}))
+
+
 @pytest.mark.parametrize(
     "response",
     [

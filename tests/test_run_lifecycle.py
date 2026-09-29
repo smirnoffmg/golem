@@ -329,4 +329,7 @@ async def test_a_merged_merge_request_shows_as_applied_on_the_completed_task(
         **done["metadata"]["golemProposal"],
         "state": "applied",
     }
-    assert after["status"] == done["status"]
+    # The state and message stay; the timestamp moves, so the board's next delta carries it.
+    assert after["status"]["state"] == done["status"]["state"]
+    assert after["status"]["message"] == done["status"]["message"]
+    assert after["status"]["timestamp"] > done["status"]["timestamp"]

@@ -12,12 +12,12 @@ import hashlib
 from dataclasses import dataclass
 
 from golem.catalog import ProcessCatalog, render_goal
+from golem.resolution import MAX_REASON_CHARS
 
 # Reruns of one stage after a stale proposal: someone else changed the target, not the agent's
 # fault, so it does not spend the return limit, but a target that never holds still must not
 # rerun the stage forever.
 STALE_CAP = 3
-MAX_REASON_CHARS = 4000
 MAX_TARGET_CHARS = 64
 
 
@@ -55,9 +55,6 @@ class Rejection:
     decided_by: str | None
 
 
-# What the reconciler sees of the current stage.
-
-
 @dataclass(frozen=True)
 class Waiting:
     """The stage run is running, or its proposal waits for a person or for its apply."""
@@ -78,9 +75,6 @@ class Decided:
 
 
 Seen = Waiting | Ended | Decided
-
-
-# The step a process takes.
 
 
 @dataclass(frozen=True)

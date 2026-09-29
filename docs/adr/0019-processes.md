@@ -312,14 +312,27 @@ loader's checks above are what a process's merge request must pass.
   the owner, the run's caller, before it sends anything, so a pass that dies after sending
   adopts the run instead of starting another.
 - **Refused or unavailable.** A stage the edge refuses (the registry, a malformed call) or
-  admission rejects (the task comes back `REJECTED`, with the reason in its status) fails the
-  process with that reason, as the table says for a refused run. An edge that does not answer,
-  answers 429 or 5xx, or answers without a task is tried again on the next pass with the same
-  message id.
+  admission rejects for good (the task comes back `REJECTED`, with the reason in its status)
+  fails the process with that reason, as the table says for a refused run. A rejection whose
+  `golemRefusal` is `caller_concurrency` or `chain_concurrency` passes as the owner's or the
+  chain's other runs end, so it is tried again on the next pass; a spent budget stays spent,
+  so `chain_budget` fails the process. An edge that does not answer, answers
+  429 or 5xx, or answers without a task is tried again on the next pass with the same message
+  id, and so is a stage task that ended as it started (`FAILED`, `CANCELED`): no run stands
+  behind it, and its id is never kept.
+- **The input is checked at the start.** A person's message that would make any stage's goal
+  empty or longer than 4 000 characters refuses the process at once, with the stage named. A
+  goal that still cannot be written at a stage's start fails the process with `invalid_goal`.
+- **A qualifying comment** is the closer's newest non-system note written from ten minutes
+  before the close to a minute after it. A comment from the review days earlier is not a reason,
+  and the process waits for one.
 - **A withdrawn stage run is told to its task.** Canceling the process cancels the current
   stage's run with `outcome` `withdrawn` and deletes its Job; the outbox delivers `withdrawn`
   like a final outcome, and the stage's task ends `canceled`, since nobody canceled it through
-  A2A.
+  A2A. A stage run found by its message id counts too, when the pass that would link it to the
+  process did not get there. A stage run that succeeded but has no merge request yet (GitLab
+  was down) is settled with nothing proposed, so no later pass opens one that nobody would
+  close.
 - **The reason of a rejection that is not a merge request** is the proposal row's `detail`,
   where the decision route of [ADR 0015](0015-proposals.md) will put it; a merge request's is the
   closer's comment as above.

@@ -18,6 +18,8 @@ from golem import call_token
 from golem.call_token import CallClaims
 from golem.orchestrator.process_runs import StageRefused, StageStart
 from golem.run_token import SigningKey
+from golem.task_json import status_text
+from golem.tasks.ports import REFUSAL_METADATA
 
 RPC_PATH = "/a2a"
 A2A_VERSION = "1.0"
@@ -25,6 +27,10 @@ A2A_VERSION = "1.0"
 TOKEN_SECONDS = 300
 TARGET_METADATA = "golemTarget"
 REJECTED = "TASK_STATE_REJECTED"
+ENDED = frozenset({"TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_COMPLETED"})
+# Admission refusals that pass as the owner's or the chain's other runs end; a budget spent
+# stays spent, so it fails the process.
+PASSING_REFUSALS = frozenset({"caller_concurrency", "chain_concurrency"})
 # JSON-RPC errors that are the edge's verdict on the call, not an outage: the call registry or
 # the request itself. Anything else is retried on the next pass.
 REFUSING_CODES = frozenset({-32041, -32600, -32601, -32602})
@@ -96,16 +102,15 @@ def started(response: httpx.Response) -> str | StageRefused:
         raise StageUnavailable(f"the edge answered {response.status_code} without a task")
     status = task.get("status")
     status = status if isinstance(status, dict) else {}
-    if status.get("state") == REJECTED:
+    state = status.get("state")
+    if state == REJECTED:
+        metadata = task.get("metadata")
+        refusal = metadata.get(REFUSAL_METADATA) if isinstance(metadata, dict) else None
+        if refusal in PASSING_REFUSALS:
+            raise StageUnavailable(f"admission holds the stage back for now: {refusal}")
         return StageRefused(status_text(status) or "the stage was refused")
+    if state in ENDED:
+        # A task that ended as it started has no run behind it; waiting on its id would wait
+        # forever, so the start is tried again, and the run a retry finds decides.
+        raise StageUnavailable(f"the stage's task ended at its start: {state}")
     return task["id"]
-
-
-def status_text(status: dict[str, Any]) -> str:
-    message = status.get("message")
-    parts = message.get("parts") if isinstance(message, dict) else None
-    if not isinstance(parts, list):
-        return ""
-    return " ".join(
-        p["text"] for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str)
-    )

@@ -42,6 +42,8 @@ from golem.orchestrator.reconcile import (
     Settlement,
     SucceededRun,
     reconcile_once,
+    report_record,
+    run_outcome,
 )
 
 PROJECT = "product/discovery-context"
@@ -439,7 +441,31 @@ async def test_a_vanished_run_claiming_a_record_outside_the_repository_is_not_tr
 
     pushed = await pushed_branch(merge_requests, SucceededRun("run-1", "discovery"))
 
-    assert pushed == Pushed(report=None)
+    # Still a report, as when its Job is there to say so: only the record is not trusted.
+    assert pushed is not None
+    assert run_outcome(JobStatus.SUCCEEDED, pushed.report) == "reported"
+    assert report_record(pushed.report) is None
+
+
+async def test_a_vanished_run_that_reported_a_bad_record_opens_no_merge_request(
+    runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    board, inbox = StatusBoard(), Inbox()
+    run_id = await new_run(runs_db, "m-1")
+    await age(runs_db, run_id, LAUNCH_GRACE_SECONDS + 1)
+    branch = f"golem/t-1/{run_id}"
+    gitlab.branches = [branch]
+    gitlab.messages[branch] = goal_commit("reported", "../../etc/passwd.md")
+    board.statuses[run_id] = JobStatus.MISSING
+
+    await reconcile(runs_db, board, inbox, merge_requests)
+
+    assert gitlab.merge_requests == []
+    async with await connect(runs_db) as conn:
+        row = await (
+            await conn.execute("SELECT outcome, record FROM runs WHERE id = %s", (run_id,))
+        ).fetchone()
+    assert row == ("reported", None)
 
 
 # A merge request closed without a word: the reason is the closer's own comment (ADR 0019).
@@ -486,6 +512,16 @@ async def test_a_comment_within_a_minute_after_closing_counts(
     gitlab.notes[1] = [note("bob", "2026-09-28T10:00:45Z", "Wrong approach.")]
 
     assert await closing_reason(merge_requests, "discovery", 1) == "Wrong approach."
+
+
+async def test_a_comment_long_before_closing_is_not_the_reason(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    # Written in review days earlier, it says nothing about why the merge request was closed.
+    gitlab.merge_requests = [closed()]
+    gitlab.notes[1] = [note("bob", "2026-09-25T10:00:00Z", "LGTM once CI passes.")]
+
+    assert await closing_reason(merge_requests, "discovery", 1) is None
 
 
 async def test_no_comment_by_the_closer_means_no_reason(

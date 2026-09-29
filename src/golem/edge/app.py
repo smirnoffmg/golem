@@ -42,14 +42,14 @@ from golem.ratelimit import (
     address_key,
     client_address,
 )
+from golem.resolution import ACTIONS as RESOLUTION_ACTIONS
+from golem.resolution import MAX_REASON_CHARS, RERUN
 from golem.run_status import RUNNING, RunStatuses, StatusUnavailable
 
 RPC_PATH = "/a2a"
 DIRECTORY_PATH = "/agents"
 # A process's owner answers a process waiting for a reason (ADR 0019); not an A2A method.
 RESOLUTION_PATH = "/processes/{task_id}/resolution"
-RESOLUTION_ACTIONS = frozenset({"rerun", "end"})
-MAX_REASON_CHARS = 4000
 MAX_RESOLUTION_BYTES = 16 * 1024
 TASK_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 PRINCIPAL_HEADER = "X-Golem-Principal"
@@ -674,9 +674,9 @@ def resolution_of(body: bytes | None) -> tuple[str | None, str | None, str | Non
     action, reason = parsed["action"], parsed.get("reason")
     if reason is not None and not isinstance(reason, str):
         return action, None, "malformed"
-    if action == "rerun" and not (reason and len(reason) <= MAX_REASON_CHARS):
+    if action == RERUN and not (reason and len(reason) <= MAX_REASON_CHARS):
         return action, None, "reason_required"
-    return action, reason if action == "rerun" else None, None
+    return action, reason if action == RERUN else None, None
 
 
 def _rpc_id(value: Any) -> RpcId:

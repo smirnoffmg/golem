@@ -36,7 +36,9 @@ Four facts about the current code shape the answer:
   would mean walking every page of the person's tasks on every refresh.
 - **The status timestamp is the list's clock.** The store's `last_updated` column is the task
   status's `timestamp`, and `status_timestamp_after` filters with `>=`. A change that does not
-  touch the status, such as [ADR 0015](0015-proposals.md) rewriting `metadata.golemProposal`, does not move it.
+  touch the status, such as [ADR 0015](0015-proposals.md) rewriting `metadata.golemProposal`, does not move it
+  unless the writer moves the timestamp itself, which the task service does (see "The board as
+  first built").
 - **Status updates merge into the task's metadata.** `TaskManager` merges the metadata of every
   status update event into `task.metadata` (`task.metadata.MergeFrom(event.metadata)`), and the
   executor already puts `runId` there when the run starts.
@@ -410,11 +412,14 @@ that switches to the stream changes its transport, not its model.
   backend-for-frontend.
 - **Development.** `vite` also proxies `/healthz`. Waiting for me and its answer form exist, but
   no Golem run asks for input yet, as above.
-- **A snapshot every sixth poll.** A proposal's or a process's change leaves its task's status
-  timestamp alone, so a delta never carries it, and until the edge serves the open proposals a
-  card would wait for a reload to move. A snapshot costs the edge the same one `ListTasks` as a
-  delta, so the board asks for one every sixth poll (a minute at the base interval) and at
-  once after answering a process that needs a reason.
+- **A proposal's or a process's change moves its task's status timestamp.** The task service
+  rewrites `golemProposal` and `golemProcess` and, when either changed, sets the status's
+  `timestamp` to now; the state and the status message stay what the run's outcome made them.
+  The store lists by that timestamp, so the next delta carries the change, and a process task
+  older than the snapshot's 100 still comes back when its process moves. The board asks for
+  deltas after its first snapshot, and refetches at once after answering a process that needs
+  a reason. (First built, the timestamp stayed put and the board took a snapshot every sixth
+  poll to see such changes; a task outside the newest 100 then never moved.)
 - **Processes.** A process's card and its column come from `golemProcess` alone: the task
   service writes `golemProposal` only while a stage has a proposal and never removes it, so on
   a process task it can outlive its stage. Counts in `golemProcess` read back as doubles, since

@@ -34,6 +34,7 @@ from golem.ratelimit import (
     address_key,
     client_address,
 )
+from golem.resolution import ACTIONS as RESOLUTION_ACTIONS
 from golem.ui.board import CURSOR_OVERLAP, card, cursor_after, detail, format_cursor, parse_cursor
 from golem.ui.edge import (
     INVALID_PARAMS,
@@ -89,7 +90,6 @@ DIRECTORY_SECONDS = 60
 # a2a-sdk's page token is the base64 of a task id; anything else never came from the edge.
 PAGE_TOKEN = re.compile(r"^[A-Za-z0-9+/=_-]{1,256}$")
 NONCE = re.compile(r"^[A-Za-z0-9_-]{22,64}$")
-RESOLUTION_ACTIONS = frozenset({"rerun", "end"})
 # The edge's refusals of a resolution, in words the board shows as they are.
 RESOLUTION_MESSAGES = {
     "reason_required": "Say why the stage should run again.",
@@ -350,8 +350,6 @@ def create_ui_app(
                 raise not_found() from error
             raise
 
-    # --- Sign-in and sign-out ---------------------------------------------------------------
-
     async def login(request: Request) -> Response:
         # Every sign-in started stores a transaction; anonymous GETs must not fill the table.
         peer = request.client.host if request.client else None
@@ -436,8 +434,6 @@ def create_ui_app(
         response = JSONResponse({"redirect": target or "/"})
         response.headers.append("set-cookie", cleared(SESSION_COOKIE))
         return response
-
-    # --- The JSON API -----------------------------------------------------------------------
 
     async def health(request: Request) -> Response:
         return JSONResponse({"status": "ok"})

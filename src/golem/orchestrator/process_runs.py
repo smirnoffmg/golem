@@ -19,7 +19,6 @@ from psycopg.types.json import Jsonb
 from golem.catalog import ProcessCatalog
 from golem.orchestrator.jobs import JobLauncher
 from golem.orchestrator.processes import (
-    MAX_REASON_CHARS,
     Advance,
     Complete,
     Decided,
@@ -39,16 +38,17 @@ from golem.orchestrator.processes import (
     stage_text,
 )
 from golem.orchestrator.runs import WITHDRAWN
+from golem.resolution import MAX_REASON_CHARS, RERUN
 from golem.tasks.ports import NOT_FOUND, NOT_WAITING, RESOLVED, ProcessRecord
 
 log = logging.getLogger(__name__)
 
 LIVE = ("running", "needs_reason")
-RERUN = "rerun"
-END = "end"
 ENDED_BY_OWNER = "ended_by_owner"
 PROCESS_CANCELED = "process_canceled"
+INVALID_GOAL = "invalid_goal"
 MERGE_REQUEST = "merge_request"
+REPORTED = "reported"
 # A proposal in these states still waits for a person or for its apply.
 UNDECIDED = ("pending", "accepted", "failed")
 
@@ -189,15 +189,22 @@ async def _started(conn: AsyncConnection, row: Row, ports: ProcessPorts) -> Row:
     found = await _run_of_message(conn, row.owner, row.message_id)
     if found is None and row.task_id is None:
         position = row.position
+        try:
+            text = stage_text(
+                row.process, row.process_run_id, position, row.person_input, row.rejection
+            )
+        except ValueError:
+            # Checked at the process's start; a goal that still cannot be written would
+            # otherwise be tried on every pass while the process shows it is running.
+            await _take(conn, row, Fail(INVALID_GOAL))
+            return row
         start = StageStart(
             process_run_id=row.process_run_id,
             process=row.process.name,
             owner=row.owner,
             agent=row.agent,
             message_id=row.message_id,
-            text=stage_text(
-                row.process, row.process_run_id, position, row.person_input, row.rejection
-            ),
+            text=text,
             target=stage_target(row.process_run_id, row.process.stages[position.index].name),
         )
         started = await ports.start(start)
@@ -363,17 +370,38 @@ async def end_process_run(
 async def _withdraw(
     conn: AsyncConnection, row: Row, ports: ProcessPorts, launcher: JobLauncher
 ) -> None:
-    """A canceled process: its running stage run is canceled, its open proposal rejected."""
-    stage_run = None if row.run_id is None else await _stage_run(conn, row.run_id)
-    if stage_run is not None and row.run_id is not None:
+    """A canceled process: its running stage run is canceled, a result not yet proposed is
+    settled with nothing proposed, and an open proposal is rejected."""
+    run_id = row.run_id
+    if run_id is None:
+        # Started, but not yet linked: the run is still the stage's, found by its message.
+        found = await _run_of_message(conn, row.owner, row.message_id)
+        run_id = None if found is None else found[0]
+    stage_run = None if run_id is None else await _stage_run(conn, run_id)
+    if stage_run is not None and run_id is not None:
         if stage_run.status == "running":
             cursor = await conn.execute(
                 "UPDATE runs SET status = 'canceled', outcome = %s, detail = %s"
                 " WHERE id = %s AND status = 'running'",
-                (WITHDRAWN, f"Canceled with process {row.process.name}.", row.run_id),
+                (WITHDRAWN, f"Canceled with process {row.process.name}.", run_id),
             )
             if cursor.rowcount:
-                await asyncio.to_thread(launcher.delete, row.run_id)
+                await asyncio.to_thread(launcher.delete, run_id)
+        elif (
+            stage_run.status == "succeeded"
+            and not stage_run.settled
+            and stage_run.outcome != REPORTED
+        ):
+            # Settled here, so no later pass opens a merge request nobody would ever close.
+            await conn.execute(
+                "UPDATE runs SET proposal_settled_at = now(), detail = %s"
+                " WHERE id = %s AND proposal_settled_at IS NULL",
+                (
+                    f"Run {run_id} succeeded, but process {row.process.name} was canceled;"
+                    " nothing was proposed.",
+                    run_id,
+                ),
+            )
         elif stage_run.proposal_id is not None and stage_run.proposal_state in UNDECIDED:
             if stage_run.kind == MERGE_REQUEST and stage_run.iid is not None:
                 await ports.close_merge_request(stage_run.agent, stage_run.iid)
@@ -387,9 +415,6 @@ async def _withdraw(
         " WHERE process_run_id = %s AND state = ANY(%s)",
         (row.process_run_id, list(LIVE)),
     )
-
-
-# What the process's task shows, and its outbox.
 
 
 async def refresh_view(conn: AsyncConnection, process_run_id: str) -> None:

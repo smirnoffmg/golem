@@ -29,9 +29,15 @@ class Started:
     run_id: str
 
 
+# Why admission refused a run, machine-readable, in the rejected task's metadata (ADR 0017).
+REFUSAL_METADATA = "golemRefusal"
+
+
 @dataclass(frozen=True)
 class Refused:
     reason: str
+    # The admission rule that refused (``caller_concurrency``...); None for any other refusal.
+    code: str | None = None
 
 
 @dataclass(frozen=True)

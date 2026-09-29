@@ -26,13 +26,15 @@ from golem.orchestrator.reconcile import (
     Settlement,
     SucceededRun,
     idle_detail,
-    report_record,
 )
+from golem.resolution import MAX_REASON_CHARS
 
 BRANCH_PREFIX = "golem"
 # A comment the closer wrote up to this long after closing still explains the close.
 CLOSING_COMMENT_GRACE = timedelta(minutes=1)
-MAX_REASON_CHARS = 4000
+# A comment is the reason only if written as the person closed: one from the review days
+# earlier ("LGTM once CI passes") says nothing about why they closed it.
+CLOSING_COMMENT_LEAD = timedelta(minutes=10)
 # The newest notes are enough: the closer's explanation is one of the last things said.
 NOTES_PER_PAGE = "50"
 
@@ -207,9 +209,9 @@ async def pushed_branch(gitlab: GitLabMergeRequests, run: SucceededRun) -> Pushe
         return None
     if trailers.get("Outcome") != REPORTED:
         return Pushed()
-    report = json.dumps({"outcome": REPORTED, "record": trailers.get("Record")})
-    # The record is the branch's claim: a path outside the repository is no report at all.
-    return Pushed(report=report if report_record(report) is not None else None)
+    # The record is the branch's claim, checked where it is used: a path outside the repository
+    # leaves a report that could not be read, as when the Job is there to report it.
+    return Pushed(report=json.dumps({"outcome": REPORTED, "record": trailers.get("Record")}))
 
 
 def commit_trailers(message: str) -> dict[str, str]:
@@ -227,7 +229,8 @@ def commit_trailers(message: str) -> dict[str, str]:
 
 async def closing_reason(gitlab: GitLabMergeRequests, agent: str, iid: int) -> str | None:
     """Why a person closed a merge request, in their own words (ADR 0019): the newest comment
-    they wrote, not a system note, by a minute after closing; None when they wrote none."""
+    they wrote, not a system note, from ten minutes before closing to a minute after; None
+    when they wrote none."""
     merge_request = await gitlab.merge_request(agent, iid)
     closer = merge_request.get("closed_by")
     closer = closer.get("username") if isinstance(closer, dict) else None
@@ -243,7 +246,7 @@ async def closing_reason(gitlab: GitLabMergeRequests, agent: str, iid: int) -> s
             and isinstance(author, dict)
             and author.get("username") == closer
             and created is not None
-            and created <= closed_at + CLOSING_COMMENT_GRACE
+            and closed_at - CLOSING_COMMENT_LEAD <= created <= closed_at + CLOSING_COMMENT_GRACE
             and isinstance(body, str)
             and body.strip()
         ):

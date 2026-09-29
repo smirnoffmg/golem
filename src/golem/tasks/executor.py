@@ -9,7 +9,14 @@ from a2a.server.tasks import TaskUpdater
 from a2a.types.a2a_pb2 import Message, TaskState
 
 from golem.catalog import GOAL_TARGET
-from golem.tasks.ports import Orchestrator, Refused, RunOutcome, RunStart, Started
+from golem.tasks.ports import (
+    REFUSAL_METADATA,
+    Orchestrator,
+    Refused,
+    RunOutcome,
+    RunStart,
+    Started,
+)
 
 MISSING_AGENT = "no agent named: the request carries no tenant"
 # Set only by the task service's internal outcome route, never from a request body, so a
@@ -66,8 +73,12 @@ def header_of(call_context: ServerCallContext, name: str) -> str:
     return call_context.state.get("headers", {}).get(name, "")
 
 
-async def reject(updater: TaskUpdater, reason: str) -> None:
-    await updater.reject(updater.new_agent_message([new_text_part(reason)]))
+async def reject(updater: TaskUpdater, reason: str, code: str | None = None) -> None:
+    await updater.update_status(
+        TaskState.TASK_STATE_REJECTED,
+        message=updater.new_agent_message([new_text_part(reason)]),
+        metadata={REFUSAL_METADATA: code} if code else None,
+    )
 
 
 async def finish(updater: TaskUpdater, outcome: RunOutcome) -> None:
@@ -122,8 +133,8 @@ class RunExecutor(AgentExecutor):
         )
         run = run_start_of(context)
         match await self._orchestrator.start(run):
-            case Refused(reason=reason):
-                await reject(updater, reason)
+            case Refused(reason=reason, code=code):
+                await reject(updater, reason, code)
             case Started(run_id=run_id):
                 # The chain comes back with the task: whoever reads it sees which agents
                 # took part (ADR 0014).

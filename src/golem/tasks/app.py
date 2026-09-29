@@ -2,6 +2,7 @@ import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -26,9 +27,11 @@ from a2a.types.a2a_pb2 import (
     Part,
     Role,
     SendMessageRequest,
+    Task,
     TaskState,
 )
 from a2a.utils.errors import TaskNotFoundError
+from google.protobuf.json_format import MessageToDict
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.requests import Request
@@ -37,6 +40,8 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from golem.metrics import Instrumented, Metrics
+from golem.resolution import ACTIONS as RESOLUTION_ACTIONS
+from golem.resolution import MAX_REASON_CHARS, RERUN
 from golem.run_token import SigningKey, public_jwks
 from golem.tasks.executor import ANONYMOUS, PROPOSAL_METADATA, RUN_OUTCOME, RunExecutor
 from golem.tasks.ports import NOT_FOUND, NOT_WAITING, Orchestrator
@@ -54,8 +59,6 @@ PROCESS_STATE_PATH = "/internal/process-state"
 # The edge's port: a process's owner answers a process waiting for a reason (ADR 0019).
 RESOLUTION_PATH = "/processes/{task_id}/resolution"
 PROCESS_METADATA = "golemProcess"
-RESOLUTION_ACTIONS = frozenset({"rerun", "end"})
-MAX_REASON_CHARS = 4000
 # The MCP servers' port, read-only: platform MCP servers verify run tokens against these keys.
 RUN_KEYS_PATH = "/internal/run-keys"
 # Platform MCP servers ask whether a run is still running before serving its token: a canceled
@@ -192,7 +195,7 @@ def public_app(
         reason = body.get("reason") if body else None
         if action not in RESOLUTION_ACTIONS or (reason is not None and not isinstance(reason, str)):
             return JSONResponse({"error": "malformed"}, status_code=400)
-        if action == "rerun" and not (
+        if action == RERUN and not (
             isinstance(reason, str) and 0 < len(reason) <= MAX_REASON_CHARS
         ):
             return JSONResponse({"error": "reason_required"}, status_code=400)
@@ -335,9 +338,7 @@ def internal_write_app(
             task = await handler.task_store.get(task_id, context)
             if task is None:
                 continue
-            # Saved as is otherwise: the status, and so the list's timestamp, stays put.
-            task.metadata.update({PROPOSAL_METADATA: asdict(record.view)})
-            await handler.task_store.save(task, context)
+            await _show(handler.task_store, task, {PROPOSAL_METADATA: asdict(record.view)}, context)
         return JSONResponse({"proposal_id": proposal_id})
 
     async def process_state(request: Request) -> Response:
@@ -357,8 +358,7 @@ def internal_write_app(
             task = await handler.task_store.get(task_id, context)
             if task is None:
                 continue
-            task.metadata.update(shown)
-            await handler.task_store.save(task, context)
+            await _show(handler.task_store, task, shown, context)
         return JSONResponse({"process_run_id": process_run_id})
 
     app = Starlette(
@@ -369,6 +369,20 @@ def internal_write_app(
         ]
     )
     return Instrumented(app, routes=app.routes, metrics=metrics)
+
+
+async def _show(
+    store: TaskStore, task: Task, shown: dict[str, Any], context: ServerCallContext
+) -> None:
+    """Metadata a task shows of its proposal or its process. A change moves the status's
+    timestamp, which the store lists by, so a board's delta sees it; the state and the
+    message stay what the run's outcome made them."""
+    current = MessageToDict(task.metadata)
+    if all(key in current and current[key] == value for key, value in shown.items()):
+        return
+    task.metadata.update(shown)
+    task.status.timestamp.FromDatetime(datetime.now(UTC))
+    await store.save(task, context)
 
 
 @dataclass(frozen=True)
