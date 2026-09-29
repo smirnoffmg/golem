@@ -1,42 +1,25 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { api } from "./api";
-import {
-  type Board,
-  COLUMNS,
-  type Task,
-  columnsOf,
-  cursorToAsk,
-  nextBoard,
-  reviewCards,
-  withTask,
-} from "./board";
+import { COLUMNS, type Task, columnsOf, reviewCards } from "./board";
+import { boardKey, boardQueryFn, showStarted } from "./boardCache";
 import { boardInterval } from "./poll";
 import { ReportsLane } from "./Reports";
 import { ProposalCardView } from "./Review";
 import { TaskCard } from "./TaskCard";
 import { newNonce } from "./text";
 
-export function boardKey(agent: string) {
-  return ["board", agent] as const;
-}
-
 export function AgentBoard(props: { agent: string; description: string }) {
   const { agent } = props;
   const queryClient = useQueryClient();
   const board = useQuery({
     queryKey: boardKey(agent),
-    // Each poll asks for what changed since the last one and merges it into what the board
-    // already shows; a snapshot answer replaces it (ADR 0018).
-    queryFn: async () => {
-      const previous = queryClient.getQueryData<Board>(boardKey(agent));
-      return nextBoard(previous, await api.board(agent, cursorToAsk(previous)));
-    },
+    queryFn: boardQueryFn(queryClient, agent, api.board),
     refetchInterval: (query) => boardInterval(query.state.error),
   });
 
   function show(task: Task) {
-    queryClient.setQueryData<Board>(boardKey(agent), (current) => withTask(current, task));
+    void showStarted(queryClient, agent, task);
   }
 
   const columns = board.data && columnsOf(board.data);

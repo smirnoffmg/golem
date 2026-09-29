@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "./api";
-import { boardKey } from "./AgentBoard";
+import { boardKey } from "./boardCache";
 import { ACTIVE_STATES } from "./board";
 import { Link } from "./navigation";
 import { boardInterval } from "./poll";
