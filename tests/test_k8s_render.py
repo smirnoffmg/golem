@@ -31,11 +31,11 @@ from golem.settings import (
     parse_gitlab_projects,
     parse_label_agents,
     parse_registry,
-    parse_write_servers,
     reconciler_settings,
     task_service_settings,
     ui_settings,
 )
+from golem.tasks.apply import parse_write_servers
 
 K8S = Path(__file__).parent.parent / "deploy" / "k8s"
 BASE = K8S / "base"

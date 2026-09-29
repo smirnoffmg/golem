@@ -36,7 +36,6 @@ from golem.ratelimit import (
 )
 from golem.run_token import ISSUER as GOLEM_ISSUER
 from golem.run_token import SigningKey
-from golem.tasks.apply import KIND_GROUPS, WriteServer
 
 DEFAULT_PORT = "8000"
 DEFAULT_INTERNAL_READ_PORT = "8001"
@@ -367,7 +366,7 @@ def _optional_path(env: Env, name: str) -> Path | None:
 
 def parse_registry(text: str) -> Registry:
     """``callee: [caller, ...]``; a caller may be a wildcard such as ``user:*``."""
-    data = _yaml_mapping(text, "call registry")
+    data = yaml_mapping(text, "call registry")
     allowed: dict[str, frozenset[str]] = {}
     for callee, callers in data.items():
         if not isinstance(callers, list) or not all(isinstance(c, str) for c in callers):
@@ -379,7 +378,7 @@ def parse_registry(text: str) -> Registry:
 def parse_catalog_refs(text: str) -> dict[str, CatalogRef]:
     """``agent: <git url>#<revision>``."""
     refs: dict[str, CatalogRef] = {}
-    for agent, value in _yaml_mapping(text, "catalogs").items():
+    for agent, value in yaml_mapping(text, "catalogs").items():
         url, sep, revision = str(value).rpartition("#")
         if not sep or not url or not revision:
             raise SettingsError(f"catalogs: {agent!r} must be '<url>#<revision>', got {value!r}")
@@ -390,7 +389,7 @@ def parse_catalog_refs(text: str) -> dict[str, CatalogRef]:
 def parse_agent_tools(text: str) -> dict[str, tuple[str, ...]]:
     """``agent: [tool group, ...]``: the platform's grant, whatever the agent's catalog asks for."""
     grants: dict[str, tuple[str, ...]] = {}
-    for agent, groups in _yaml_mapping(text, "agent tools").items():
+    for agent, groups in yaml_mapping(text, "agent tools").items():
         if not isinstance(groups, list) or not all(isinstance(g, str) and g for g in groups):
             raise SettingsError(f"agent tools: {agent!r} must map to a list of tool group names")
         grants[str(agent)] = tuple(groups)
@@ -409,7 +408,7 @@ def parse_signing_key(pem: str, kid: str, variable: str = "GOLEM_RUN_TOKEN_KEY_F
 def parse_gitlab_projects(text: str) -> dict[str, GitLabProject]:
     """``agent: {project: <group/name>, target_branch: <branch>}``."""
     projects: dict[str, GitLabProject] = {}
-    for agent, value in _yaml_mapping(text, "GitLab projects").items():
+    for agent, value in yaml_mapping(text, "GitLab projects").items():
         if not isinstance(value, dict) or not all(
             isinstance(value.get(k), str) and value[k] for k in ("project", "target_branch")
         ):
@@ -420,23 +419,6 @@ def parse_gitlab_projects(text: str) -> dict[str, GitLabProject]:
             path=value["project"], target_branch=value["target_branch"]
         )
     return projects
-
-
-WRITE_GROUPS = frozenset(KIND_GROUPS.values())
-
-
-def parse_write_servers(text: str) -> dict[str, WriteServer]:
-    """``<write group>: {url: <MCP endpoint>, resource: <canonical URI>}`` (ADR 0015)."""
-    servers: dict[str, WriteServer] = {}
-    for group, value in _yaml_mapping(text, "write servers").items():
-        if group not in WRITE_GROUPS:
-            raise SettingsError(f"write servers: {group!r} is not a write group")
-        if not isinstance(value, dict) or not all(
-            isinstance(value.get(k), str) and value[k] for k in ("url", "resource")
-        ):
-            raise SettingsError(f"write servers: {group!r} needs 'url' and 'resource'")
-        servers[str(group)] = WriteServer(url=value["url"], resource=value["resource"])
-    return servers
 
 
 def _values(env: Env, *names: str) -> dict[str, str]:
@@ -532,7 +514,7 @@ def _kubernetes(v: Mapping[str, str]) -> Kubernetes:
     return _parsed(v, "GOLEM_KUBERNETES", Kubernetes, f"one of {choices}")
 
 
-def _yaml_mapping(text: str, what: str) -> dict[Any, Any]:
+def yaml_mapping(text: str, what: str) -> dict[Any, Any]:
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as error:
@@ -599,7 +581,7 @@ def adapter_settings(env: Env) -> AdapterSettings:
 def parse_label_agents(text: str) -> dict[str, str]:
     """``<jira label>: <agent name>``."""
     labels: dict[str, str] = {}
-    for label, agent in _yaml_mapping(text, "Jira labels").items():
+    for label, agent in yaml_mapping(text, "Jira labels").items():
         if not isinstance(agent, str) or not agent:
             raise SettingsError(f"Jira labels: {label!r} must map to an agent name, got {agent!r}")
         labels[str(label)] = agent

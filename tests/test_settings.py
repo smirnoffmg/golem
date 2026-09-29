@@ -34,12 +34,11 @@ from golem.settings import (
     parse_gitlab_projects,
     parse_registry,
     parse_signing_key,
-    parse_write_servers,
     reconciler_settings,
     task_service_settings,
     ui_settings,
 )
-from golem.tasks.apply import WriteServer
+from golem.tasks.apply import WriteServer, parse_write_servers
 
 EDGE_ENV = {
     "GOLEM_OIDC_ISSUER": "https://idp.example.test/realms/golem",
@@ -650,3 +649,17 @@ def test_settings_import_no_process_handlers() -> None:
     ).stdout.split()
 
     assert [name for name in handlers if name in loaded] == []
+
+
+def test_reading_settings_loads_no_mcp_client_and_no_write_client() -> None:
+    # The edge, the reconciler and the MCP servers read settings too; none needs the task
+    # service's write-server client or the MCP client stack for it.
+    code = (
+        "import sys, golem.settings;"
+        "print(sorted(m for m in sys.modules if m in ('mcp', 'golem.tasks.apply')))"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    assert loaded == "[]"

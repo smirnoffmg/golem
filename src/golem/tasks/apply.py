@@ -21,9 +21,9 @@ from mcp.types import TextContent
 from golem.proposal_payload import WRITE_GROUPS
 from golem.proposal_token import APPLY, PREVIEW, ProposalClaims, issue
 from golem.run_token import SigningKey
+from golem.settings import SettingsError, yaml_mapping
 from golem.tasks.ports import Applied, LivePage, ProposalDetail
 
-KIND_GROUPS = WRITE_GROUPS
 RESULTS = frozenset({"applied", "stale", "failed"})
 MAX_DETAIL = 500
 # The write server's gate refused the token (401) or its scope (403): it refuses a retry the
@@ -46,18 +46,33 @@ class WriteServer:
     resource: str
 
 
+def parse_write_servers(text: str) -> dict[str, WriteServer]:
+    """``<write group>: {url: <MCP endpoint>, resource: <canonical URI>}`` (ADR 0015)."""
+    groups = frozenset(WRITE_GROUPS.values())
+    servers: dict[str, WriteServer] = {}
+    for group, value in yaml_mapping(text, "write servers").items():
+        if group not in groups:
+            raise SettingsError(f"write servers: {group!r} is not a write group")
+        if not isinstance(value, dict) or not all(
+            isinstance(value.get(k), str) and value[k] for k in ("url", "resource")
+        ):
+            raise SettingsError(f"write servers: {group!r} needs 'url' and 'resource'")
+        servers[str(group)] = WriteServer(url=value["url"], resource=value["resource"])
+    return servers
+
+
 def apply_call(proposal: ProposalDetail) -> tuple[str, str, dict[str, Any]]:
     """The write group, the tool and its arguments that apply ``proposal``."""
     kind, payload = proposal.summary.kind, dict(proposal.payload)
     arguments: dict[str, Any] = {"proposal_id": proposal.summary.id, "payload": payload}
     match kind:
         case "wiki_edit":
-            return KIND_GROUPS[kind], "apply_page_edit", arguments
+            return WRITE_GROUPS[kind], "apply_page_edit", arguments
         case "desk_reply":
             # The reply carries no marker the customer would read; a comment made after the
             # decision with the same text is this proposal already applied.
             return (
-                KIND_GROUPS[kind],
+                WRITE_GROUPS[kind],
                 "apply_reply",
                 {
                     **arguments,
@@ -65,9 +80,9 @@ def apply_call(proposal: ProposalDetail) -> tuple[str, str, dict[str, Any]]:
                 },
             )
         case "tracker_issue" if payload.get("action") == "comment":
-            return KIND_GROUPS[kind], "apply_comment", arguments
+            return WRITE_GROUPS[kind], "apply_comment", arguments
         case "tracker_issue":
-            return KIND_GROUPS[kind], "apply_issue", {**arguments, "target": proposal.target}
+            return WRITE_GROUPS[kind], "apply_issue", {**arguments, "target": proposal.target}
     raise ValueError(f"proposals of kind {kind!r} are not applied by the platform")
 
 
@@ -102,7 +117,7 @@ class McpApplier:
         return Applied(state, detail[:MAX_DETAIL] if isinstance(detail, str) else None)
 
     async def preview(self, proposal: ProposalDetail, reader: str) -> LivePage:
-        group = KIND_GROUPS[proposal.summary.kind]
+        group = WRITE_GROUPS[proposal.summary.kind]
         server = self.servers.get(group)
         if server is None:
             raise ApplyUnavailable(f"no write server is configured for {group}")

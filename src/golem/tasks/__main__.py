@@ -24,11 +24,10 @@ from golem.settings import (
     parse_agent_tools,
     parse_catalog_refs,
     parse_signing_key,
-    parse_write_servers,
     task_service_settings,
 )
 from golem.tasks.app import Listeners, PushDelivery, create_listeners
-from golem.tasks.apply import McpApplier, NoWriteServers
+from golem.tasks.apply import McpApplier, NoWriteServers, parse_write_servers
 from golem.tasks.ports import Applier
 from golem.tasks.store import backfill_agents, push_config_store, tasks_engine, tasks_store
 
