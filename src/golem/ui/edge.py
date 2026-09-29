@@ -15,8 +15,9 @@ TASK_NOT_CANCELABLE = -32002
 INVALID_PARAMS = -32602
 DIRECTORY_PATH = "/agents"
 RESOLUTION_PATH = "/processes/{task_id}/resolution"
-# What the edge refuses a resolution with, and the task service after it (ADR 0019).
-RESOLUTION_REFUSALS = frozenset({400, 404, 409})
+# What the edge refuses a person's request with, and the task service after it: an answer the
+# board can explain, unlike the edge failing.
+PERSON_REFUSALS = frozenset({400, 403, 404, 409})
 
 
 class EdgeUnauthorized(Exception):
@@ -122,18 +123,34 @@ async def resolve(
     """A process owner's answer to a process waiting for a reason (ADR 0019)."""
     body = {"action": action} | ({"reason": reason} if reason is not None else {})
     path = RESOLUTION_PATH.format(task_id=quote(task_id, safe=""))
+    await for_person(edge, token, "POST", path, json=body)
+
+
+async def for_person(
+    edge: httpx.AsyncClient,
+    token: str,
+    method: str,
+    path: str,
+    *,
+    params: dict[str, str] | None = None,
+    json: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One of the edge's routes only a person may call (ADR 0015, ADR 0019): a JSON object on
+    success, EdgeRefused with the edge's own error code when it refused the request itself."""
     try:
-        response = await edge.post(path, json=body, headers={"Authorization": f"Bearer {token}"})
+        response = await edge.request(
+            method, path, params=params, json=json, headers={"Authorization": f"Bearer {token}"}
+        )
     except httpx.HTTPError as error:
         raise EdgeError(None, f"the edge is unreachable: {error}") from error
     checked(response)
-    if response.status_code == 200:
-        return
     try:
         answer = response.json()
     except ValueError:
         answer = None
+    if response.status_code == 200 and isinstance(answer, dict):
+        return answer
     code = answer.get("error") if isinstance(answer, dict) else None
-    if response.status_code in RESOLUTION_REFUSALS and isinstance(code, str):
+    if response.status_code in PERSON_REFUSALS and isinstance(code, str):
         raise EdgeRefused(response.status_code, code)
     raise EdgeError(None, f"the edge answered {response.status_code}")

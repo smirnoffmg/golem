@@ -10,6 +10,7 @@ import json
 import re
 import secrets
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -24,6 +25,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from golem.adapters.common import TERMINAL_STATES
+from golem.decisions import DECISIONS, PAGE, TASK_ID
 from golem.metrics import Instrumented, Metrics
 from golem.ratelimit import (
     LOGIN_RATE,
@@ -35,6 +37,7 @@ from golem.ratelimit import (
     client_address,
 )
 from golem.resolution import ACTIONS as RESOLUTION_ACTIONS
+from golem.resolution import MAX_REASON_CHARS
 from golem.ui.board import CURSOR_OVERLAP, card, cursor_after, detail, format_cursor, parse_cursor
 from golem.ui.edge import (
     INVALID_PARAMS,
@@ -45,6 +48,7 @@ from golem.ui.edge import (
     EdgeRefused,
     EdgeUnauthorized,
     directory,
+    for_person,
     resolve,
     rpc,
 )
@@ -56,6 +60,13 @@ from golem.ui.oidc import (
     end_session_url,
     new_verifier,
     s256,
+)
+from golem.ui.proposals import (
+    proposal_cards,
+    proposal_detail,
+    report_cards,
+    report_detail,
+    review_counts,
 )
 from golem.ui.store import (
     LOGIN_LIFETIME_SECONDS,
@@ -96,6 +107,17 @@ RESOLUTION_MESSAGES = {
     "not_waiting": "The process no longer waits for a reason. Reload the board.",
     "malformed": "The answer is not one the process takes.",
 }
+DECISION_MESSAGES = {
+    "reason_required": "Say why you reject it: the stage runs again with your reason.",
+    "already_decided": "Someone decided on this proposal already. Reload it.",
+    "decided_in_gitlab": "A merge request is decided in GitLab: merge or close it there.",
+    "agents_do_not_decide": "Only a person decides on a proposal.",
+    "malformed": "The decision is not one the proposal takes.",
+}
+# Open: waiting for a person, being applied, or refused by the target (ADR 0015).
+OPEN_STATES = "pending,accepted,failed"
+# What a person can act on now: counted in the left column.
+WAITING_STATES = "pending,failed"
 
 Read = Callable[[Request, Session], Awaitable[Response]]
 Write = Callable[[Request, Session, dict[str, Any]], Awaitable[Response]]
@@ -476,9 +498,19 @@ def create_ui_app(
         cursor = cursor_after(cards, None if complete else since) or format_cursor(
             datetime.fromtimestamp(clock(), UTC) - CURSOR_OVERLAP
         )
-        # Reviewers' open proposals join here once the edge serves them (ADR 0015).
+        # The open set is small and a proposal's change can come without its task's, so it
+        # is sent whole with every answer (ADR 0018).
+        listed = await person(
+            session, "GET", "/proposals", params={"agent": agent, "state": OPEN_STATES}
+        )
         return JSONResponse(
-            {"agent": agent, "complete": complete, "cursor": cursor, "tasks": cards}
+            {
+                "agent": agent,
+                "complete": complete,
+                "cursor": cursor,
+                "tasks": cards,
+                "proposals": proposal_cards(listed.get("proposals")),
+            }
         )
 
     async def archive(request: Request, session: Session) -> Response:
@@ -567,6 +599,97 @@ def create_ui_app(
             raise edge_failed(error) from error
         return JSONResponse({"task": task_of({"task": result})})
 
+    async def person(
+        session: Session,
+        method: str,
+        path: str,
+        messages: dict[str, str] | None = None,
+        **options: Any,
+    ) -> dict[str, Any]:
+        try:
+            return await for_person(edge, session.access_token, method, path, **options)
+        except EdgeRefused as refusal:
+            if refusal.status == 404:
+                raise not_found() from refusal
+            text = (messages or {}).get(refusal.error, "The edge refused the request.")
+            raise Refusal(refusal.status, refusal.error, text) from refusal
+
+    def page_of(request: Request) -> dict[str, str]:
+        page = request.query_params.get("page")
+        if page is None:
+            return {}
+        if not PAGE.fullmatch(page):
+            raise malformed("This page does not exist.")
+        return {"page": page}
+
+    def proposal_path(request: Request, suffix: str = "") -> str:
+        proposal_id = str(request.path_params["proposal_id"])
+        try:
+            uuid.UUID(proposal_id)
+        except ValueError as error:
+            raise not_found() from error
+        return f"/proposals/{proposal_id}{suffix}"
+
+    async def counts(request: Request, session: Session) -> Response:
+        listed = await person(session, "GET", "/proposals", params={"state": WAITING_STATES})
+        return JSONResponse(
+            {
+                "agents": review_counts(listed.get("proposals") or []),
+                "more": isinstance(listed.get("next"), str),
+            }
+        )
+
+    async def queue(request: Request, session: Session) -> Response:
+        params = {"state": OPEN_STATES} | page_of(request)
+        listed = await person(session, "GET", "/proposals", params=params)
+        following = listed.get("next")
+        return JSONResponse(
+            {
+                "proposals": proposal_cards(listed.get("proposals")),
+                "next": following if isinstance(following, str) else None,
+            }
+        )
+
+    async def proposal(request: Request, session: Session) -> Response:
+        shown = proposal_detail(await person(session, "GET", proposal_path(request)))
+        if shown is None:
+            raise Refusal(502, "edge_failed", "The edge returned an unreadable proposal.")
+        return JSONResponse(shown)
+
+    async def decision(request: Request, session: Session, body: dict[str, Any]) -> Response:
+        choice, reason = body.get("decision"), body.get("reason")
+        if choice not in DECISIONS or not (
+            reason is None or (isinstance(reason, str) and len(reason) <= MAX_REASON_CHARS)
+        ):
+            raise malformed("decision must be accept or reject, and reason text.")
+        sent = {"decision": choice} | ({"reason": reason.strip()} if reason else {})
+        path = proposal_path(request, "/decision")
+        shown = proposal_detail(await person(session, "POST", path, DECISION_MESSAGES, json=sent))
+        if shown is None:
+            raise Refusal(502, "edge_failed", "The edge returned an unreadable proposal.")
+        return JSONResponse(shown)
+
+    async def reports(request: Request, session: Session) -> Response:
+        agent = await agent_named(request, session)
+        params = {"agent": agent} | page_of(request)
+        listed = await person(session, "GET", "/reports", params=params)
+        following = listed.get("next")
+        return JSONResponse(
+            {
+                "reports": report_cards(listed.get("reports")),
+                "next": following if isinstance(following, str) else None,
+            }
+        )
+
+    async def report(request: Request, session: Session) -> Response:
+        task_id = str(request.path_params["task_id"])
+        if not TASK_ID.fullmatch(task_id):
+            raise not_found()
+        shown = report_detail(await person(session, "GET", f"/reports/{task_id}"))
+        if shown is None:
+            raise Refusal(502, "edge_failed", "The edge returned an unreadable report.")
+        return JSONResponse(shown)
+
     async def resolution(request: Request, session: Session, body: dict[str, Any]) -> Response:
         # A rerun starts a run, so it counts against the same limit as starting one.
         take_start(session)
@@ -605,6 +728,12 @@ def create_ui_app(
             Route(f"{tasks}/{{task_id}}/messages", writing(reply), methods=["POST"]),
             Route(f"{tasks}/{{task_id}}/cancel", writing(cancel), methods=["POST"]),
             Route("/api/processes/{task_id}/resolution", writing(resolution), methods=["POST"]),
+            Route("/api/review-counts", reading(counts), methods=["GET"]),
+            Route("/api/proposals", reading(queue), methods=["GET"]),
+            Route("/api/proposals/{proposal_id}", reading(proposal), methods=["GET"]),
+            Route("/api/proposals/{proposal_id}/decision", writing(decision), methods=["POST"]),
+            Route("/api/agents/{agent}/reports", reading(reports), methods=["GET"]),
+            Route("/api/reports/{task_id}", reading(report), methods=["GET"]),
         ],
         exception_handlers={404: unmatched, 405: wrong_method},
     )

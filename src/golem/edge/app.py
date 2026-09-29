@@ -21,7 +21,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from golem.decisions import DECISIONS, NAME, PAGE, REVIEWS_HEADER, STATES
+from golem.decisions import DECISIONS, NAME, PAGE, REVIEWS_HEADER, STATES, TASK_ID
 from golem.edge.audit import (
     PROPOSALS,
     REPORTS,
@@ -62,7 +62,6 @@ LIST_REPORTS = "ListReports"
 READ_REPORT = "ReadReport"
 EMPTY_REVIEWERS: Mapping[str, frozenset[str]] = {}
 MAX_RESOLUTION_BYTES = 16 * 1024
-TASK_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 PRINCIPAL_HEADER = "X-Golem-Principal"
 EDGE_TOKEN_HEADER = "X-Golem-Edge-Token"
 # A delegated call's chain and root run, for the child run's admission and its task (ADR 0014).
