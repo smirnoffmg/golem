@@ -1,10 +1,85 @@
 # Reviewing proposals
 
-For gate owners: the people who decide whether an agent's proposal becomes part of the record.
-Golem only proposes; nothing reaches the default branch of a context repository without a
-person merging it ([ADR 0004](../adr/0004-security-boundary-outside-the-job.md)).
+For gate owners: the people who decide whether an agent's proposal becomes real. Golem only
+proposes. A run changes nothing outside its Job: nothing reaches the default branch of a context
+repository without a person merging it, and nothing reaches Confluence, a service desk request
+or Jira without a person accepting it on the board
+([ADR 0004](../adr/0004-security-boundary-outside-the-job.md),
+[ADR 0015](../adr/0015-proposals.md)).
 
-## What a proposal is
+## Two ways to decide
+
+An agent's catalog says what its runs propose:
+
+| Kind | A run proposes | You decide | The platform then |
+| --- | --- | --- | --- |
+| merge request (the default) | a change to its context repository | in GitLab: merge or close | follows the merge request |
+| page edit | a new body for one Confluence page | on the board: **Accept** or **Reject** | writes the page |
+| service desk reply | a reply to one request, for the customer or internal | on the board | posts the reply |
+| tracker issue | a new Jira issue, or a comment on one | on the board | creates the issue or the comment |
+
+Merge requests are described [below](#merge-requests). The other three are decided on the
+board, the same way.
+
+## Who decides
+
+The person who started the run, and the agent's **reviewers**: people named in its catalog
+(`reviewers: [user:<name>]`). Reviewers matter for runs nobody started by hand: an alert, a
+schedule or a chat channel starts them as a service, and the proposal waits for a reviewer.
+A reviewer sees the proposal and the run's report, never the rest of the task. Everyone else
+gets "not found".
+
+## Where you find what waits
+
+**To review** at the top of the left column counts what waits for you, per agent next to each
+agent's name; it opens a queue across all your agents. On an agent's board, **To review** holds
+your own completed tasks with an open proposal, and, as cards of their own, proposals you decide
+as a reviewer ("for bob"). The counts refresh every minute, the board every ten seconds.
+
+![What waits for review](../images/ui/review-queue.png)
+
+## Deciding on the board
+
+Open the proposal. Its page shows what would be written, as text, never rendered:
+
+- a **page edit** as the changes to the page **as it is now**: removed lines struck through,
+  added lines marked, long unchanged stretches folded. The platform reads the live page for
+  this, not the run's copy, so you see what accepting really changes;
+- a **reply** with its request and who reads it: **the customer**, or **agents only** for an
+  internal note;
+- a **tracker issue** with its project, type, summary and description, or the issue and the
+  comment;
+- **What the run found**: the run's report, when it left one.
+
+![A page edit](../images/ui/proposal-page-edit.png)
+
+**Accept** applies it at once, as you. The page says what came of it:
+
+| It says | Meaning | What you do |
+| --- | --- | --- |
+| Accepted and applied. | written to Confluence, the request or Jira | nothing |
+| being applied | the target did not answer in time; the platform retries within minutes | nothing; the board shows when it is done |
+| its target changed | the page moved to another version since the run read it; nothing was written | nothing; a new run redoes it on the current page |
+| could not be applied: … | the target refused, with its reason (for example a space the platform may not write to) | accept again once fixed, or reject |
+
+**Reject** writes nothing. The reason is optional, except on a stage of a process, where the
+stage runs again with it. If someone decided first, the page says so and shows the proposal as
+it is now.
+
+![A service desk reply](../images/ui/proposal-reply.png)
+
+An accepted proposal's record lands in the agent's context repository by itself: the platform
+merges the run's branch at the commit you accepted.
+
+## Reports
+
+A run that found nothing to propose leaves a report. Each board has a **Reports** lane below
+the archive, folded; open it to read what the agent's quiet runs found. Reviewers read the
+reports of the agents they review.
+
+![The Reports lane](../images/ui/reports-lane.png)
+
+## Merge requests
 
 One run, one merge request in the agent's context repository:
 
@@ -21,7 +96,7 @@ One run, one merge request in the agent's context repository:
 The run id leads to the run's task, trace and audit rows (ask the platform team). The role's
 summary in the commit message is its own account of what it did.
 
-## Where you find it
+### Where you find it
 
 On the board ([getting-started.md](getting-started.md)), a task whose run opened a merge
 request sits in **To review**, with a link to the merge request. The decision itself is taken
@@ -29,7 +104,7 @@ in GitLab: the board has no merge or close button for merge requests. The platfo
 merge request's state back from GitLab every few minutes (`GOLEM_MR_POLL_SECONDS`, five by
 default); once it is merged or closed, the card moves to the archive.
 
-## What validation already guarantees
+### What validation already guarantees
 
 Before the branch was pushed, the change passed every check of
 [writing-an-agent.md](writing-an-agent.md#what-validation-checks):
@@ -43,7 +118,7 @@ What it does **not** check is whether the content is right: whether the evidence
 sources are real, the reasoning holds. That is the review. Read the linked sources; a role is
 told not to invent them, but a model can.
 
-## Accept
+### Accept
 
 Merge the merge request (after your project's approvals). The branch is deleted, so the record
 is no longer pending, and the next run works from the new content: a hypothesis with its
@@ -55,7 +130,7 @@ may justify `status: validated` or `status: rejected` on the hypothesis, a revie
 of your own or with a commit of your own on the proposal's branch before merging. Only people
 change statuses; a run that tries fails validation.
 
-## Reject
+### Reject
 
 Record the decision on the record, then get rid of the proposal:
 
@@ -71,7 +146,7 @@ alone keeps the branch**, so the record stays pending for ever: no decision is r
 the agent never looks at it again. Deleting the branch alone makes the record free again, and
 the next run proposes the same step once more. Only the status change records a decision.
 
-## A wrong proposal
+### A wrong proposal
 
 Wrong content, and you want another attempt:
 

@@ -426,6 +426,30 @@ that switches to the stream changes its transport, not its model.
   task metadata is a protobuf `Struct`; the BFF takes whole numbers. Stage tasks never reach a
   person's board, since their tenant is the worker's.
 
+### Proposals and reports on the board as first built
+
+- **A queue besides the counts.** `GET /api/review-counts` answers
+  `{"agents": {<agent>: <n>}, "more": <bool>}` from one page of `pending,failed`, `more` when
+  the edge had another page. **To review** at the top of the left column shows the total and
+  opens a queue across agents, `GET /api/proposals?page=` (the open set, 50 a page). The queue
+  is where a reviewer finds a process stage's proposals: the directory cannot tell a process
+  from an agent ([ADR 0019](0019-processes.md)), so a board asks for `agent=<name>` only, and a
+  process's own card shows its stage's proposal.
+- **Proposal cards** carry `createdAt`, `decidedBy` and `decidedAt` rather than an `age`; the
+  board says how long ago. A proposal of one of the person's tasks is joined to the task's card
+  by `taskId`, and its state from the open set wins over the task's `golemProposal`.
+- **The diff.** Unchanged runs longer than six lines are folded into `{"op": "fold", "count"}`,
+  keeping three lines next to each change (none at the page's start or end). The BFF sends the
+  live page's title and version with the diff, not its body.
+- **Decisions take no start token.** An accept applies at once, but a reviewer working through
+  a queue must not meet the start bucket's burst of 5; the edge's per-caller limit applies. The
+  BFF checks the decision and a reason of at most 4000 characters before any edge call, and a
+  malformed proposal or report id is 404 without one.
+- **Routes of the board.** `/review`, `/proposals/{id}` and `/agents/{agent}/reports/{taskId}`.
+  The Reports lane is `details.reports`, folded; open, its first page refetches every 60 s.
+- **Budget.** Unchanged for a board: two edge calls a poll. The queue page, when it is the one
+  open, polls like a board, one call every 10 s.
+
 ### What changes elsewhere
 
 - `golem.settings`: `GOLEM_UI_AGENTS` goes away; the UI settings otherwise stay.
