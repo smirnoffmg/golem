@@ -294,3 +294,33 @@ def test_an_agent_declares_the_neighbours_its_roles_may_delegate_to():
 def test_neighbours_are_few_named_once_and_go_with_the_delegation_group(fields, message):
     with pytest.raises(ValidationError, match=message):
         agent(**fields)
+
+
+def _with(extra: str) -> AgentCatalog:
+    import yaml
+
+    return AgentCatalog.model_validate(yaml.safe_load(CATALOG_YAML + extra))
+
+
+def test_reviewers_are_named_people():
+    catalog = _with("reviewers: [user:alice, user:bob]\n")
+
+    assert catalog.reviewers == ("user:alice", "user:bob")
+
+
+def test_an_agent_has_no_reviewers_by_default():
+    assert _with("").reviewers == ()
+
+
+@pytest.mark.parametrize(
+    "reviewer", ["service:jira", "agent:discovery", "user:*", "alice", "user:", "user:a b"]
+)
+def test_reviewers_other_than_a_named_person_are_refused(reviewer):
+    # A service or an agent never decides (ADR 0015), and a wildcard would make everyone one.
+    with pytest.raises(ValidationError, match="reviewer"):
+        _with(f"reviewers: ['{reviewer}']\n")
+
+
+def test_a_reviewer_listed_twice_is_refused():
+    with pytest.raises(ValidationError, match="twice"):
+        _with("reviewers: [user:alice, user:alice]\n")
