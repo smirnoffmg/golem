@@ -2,15 +2,16 @@
 
 Runs the demo stack of scripts/ui_demo.py with ids and timestamps frozen, signs in as alice in
 headless Chromium with the browser's clock fixed two hours after the seed, and captures the
-board, a process's board and every task state at 1280x800, the board also at 390x844. Needs
-Docker and ``uv run playwright install --only-shell chromium`` once.
+board and every task state at 1280x800, the board also at 390x844; then the stack again with a
+process pinned, where people see only the process, for the process's board. Needs Docker and
+``uv run playwright install --only-shell chromium`` once.
 """
 
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from playwright.sync_api import BrowserContext, Page, expect, sync_playwright
+from playwright.sync_api import Browser, BrowserContext, Page, expect, sync_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
@@ -58,29 +59,29 @@ def use_up_starts(context: BrowserContext) -> None:
         assert started.status in (201, 429), started.status
 
 
+def signed_in(browser: Browser, ui_url: str) -> tuple[BrowserContext, Page]:
+    context = browser.new_context(
+        viewport=WIDE, base_url=ui_url, locale="en-US", color_scheme="light"
+    )
+    context.set_default_timeout(TIMEOUT_MS)
+    context.clock.set_fixed_time(BROWSER_NOW)
+    page = context.new_page()
+    page.goto("/")
+    expect(page.get_by_role("link", name="Sign in")).to_be_visible()
+    return context, page
+
+
 def capture(ui_url: str, tasks: dict[str, str]) -> list[Path]:
     shots = []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
-        context = browser.new_context(
-            viewport=WIDE, base_url=ui_url, locale="en-US", color_scheme="light"
-        )
-        context.set_default_timeout(TIMEOUT_MS)
-        context.clock.set_fixed_time(BROWSER_NOW)
-        page = context.new_page()
-
-        page.goto("/")
-        expect(page.get_by_role("link", name="Sign in")).to_be_visible()
+        context, page = signed_in(browser, ui_url)
         shots.append(shoot(page, "sign-in"))
         page.get_by_role("link", name="Sign in").click()
         page.wait_for_url(f"{ui_url}/")
         page.goto(BOARD)
         expect(page.locator(".card").first).to_be_visible()
         shots.append(shoot(page, "board"))
-        page.goto(PROCESS_BOARD)
-        expect(page.locator(".resolution")).to_be_visible()
-        shots.append(shoot(page, "process-board"))
-        page.goto(BOARD)
         page.get_by_label(f"New task for {AGENT}").fill(NEW_GOAL)
         shots.append(shoot(page, "new-task"))
         page.get_by_label(f"New task for {AGENT}").fill("")
@@ -105,17 +106,31 @@ def capture(ui_url: str, tasks: dict[str, str]) -> list[Path]:
     return shots
 
 
+def capture_process(ui_url: str) -> list[Path]:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        _, page = signed_in(browser, ui_url)
+        page.get_by_role("link", name="Sign in").click()
+        page.wait_for_url(f"{ui_url}/")
+        page.goto(PROCESS_BOARD)
+        expect(page.locator(".resolution")).to_be_visible()
+        shot = shoot(page, "process-board")
+        browser.close()
+    return [shot]
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     print("building the board and starting Postgres...", flush=True)
-    with (
-        postgres_container() as container,
-        board_server() as board,
-        running(databases_of(container), board) as demo,
-    ):
-        with frozen(SEEDED_AT):
-            tasks = seed(demo)
-        shots = capture(demo.ui_url, tasks)
+    with postgres_container() as container, board_server() as board:
+        with running(databases_of(container), board) as demo:
+            with frozen(SEEDED_AT):
+                tasks = seed(demo)
+            shots = capture(demo.ui_url, tasks)
+        with running(databases_of(container), board, processes=True) as demo:
+            with frozen(SEEDED_AT):
+                seed(demo)
+            shots += capture_process(demo.ui_url)
     total = 0
     for path in shots:
         size = path.stat().st_size

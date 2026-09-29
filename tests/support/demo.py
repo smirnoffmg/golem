@@ -3,12 +3,15 @@ backend-for-frontend behind one front that routes like the ingress (support/fron
 edge and task service, the Postgres-backed orchestrator with a fake Job launcher, and the fake
 identity provider, each served by uvicorn in its own thread.
 
-``seed`` gives the user ``alice`` a task in every state the UI shows, through the same code
-paths as production: A2A calls to the edge, admission in golem_runs, a reconcile pass that
-opens a merge request (GitLab faked at its HTTP boundary) and delivers the outcome. It also
-starts two processes (ADR 0019), whose stages the reconciler starts through the edge with call
-tokens: one waits for review of its stage's merge request, the other for a reason after its
-merge request was closed without one.
+The stack runs as a deployment does, one of two ways. Without a process pinned, people start
+the ``discovery`` agent: ``seed`` gives the user ``alice`` a task in every state the UI shows,
+through the same code paths as production: A2A calls to the edge, admission in golem_runs, a
+reconcile pass that opens a merge request (GitLab faked at its HTTP boundary) and delivers the
+outcome. With ``processes=True`` a process is pinned, the edge derives its call registry from
+the catalogs as it does in production, and people start only the process (ADR 0019): ``seed``
+starts two, whose stages the reconciler starts through the edge with call tokens; one waits
+for review of its stage's merge request, the other for a reason after its merge request was
+closed without one.
 """
 
 import asyncio
@@ -42,6 +45,7 @@ from golem.edge.app import create_edge_app
 from golem.edge.auth import authenticate_any
 from golem.edge.card_signing import card_keys
 from golem.edge.policy import ChainLimits, Registry
+from golem.edge.registry import derive_registry
 from golem.jwks import SigningKeys, fetch_jwks
 from golem.orchestrator import runs
 from golem.orchestrator.admission import Limits
@@ -339,12 +343,25 @@ class Demo:
     gitlab: DemoGitLab
     # The reconciler signs the call tokens that start a process's stages at the edge.
     run_key: SigningKey
+    # A process is pinned; people start it, and not the agent.
+    processes: bool
 
 
 @contextmanager
-def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[Demo]:
+def running(
+    databases: Databases, board_url: str, ui_port: int = 0, *, processes: bool = False
+) -> Iterator[Demo]:
     """The stack, with the board served from ``board_url`` (support.front.board_server)."""
     in_own_loop(reset(databases))
+    pinned = {PROCESS: PROCESS_CATALOG} if processes else {}
+    catalogs = Catalogs(agents=load_catalogs(EXAMPLES).agents, processes=pinned)
+    limits = ChainLimits(max_depth=3)
+    # As the edge's start derives it: with a process pinned, people may start only processes.
+    registry = derive_registry(
+        Registry(allowed_callers={PROCESS if processes else AGENT: frozenset({"user:*"})}),
+        catalogs,
+        limits,
+    )
     ui_socket = bound(ui_port)
     idp_socket, edge_socket, tasks_socket, outcome_socket, read_socket, bff_socket = (
         bound() for _ in range(6)
@@ -382,7 +399,7 @@ def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[
             catalogs={AGENT: catalog, STAGE_AGENT: catalog},
             signing_key=run_key,
             grants={AGENT: ("tracker.read", "wiki.read")},
-            processes={PROCESS: PROCESS_CATALOG},
+            processes=pinned,
         ),
         edge_token=EDGE_TOKEN,
         task_store=tasks_store(tasks_engine(databases.tasks_url)),
@@ -410,22 +427,13 @@ def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[
                 idp=authenticator(edge_keys, issuer=idp.issuer, audience=EDGE_AUDIENCE),
                 golem=call_authenticator(golem_keys),
             ),
-            registry=Registry(
-                allowed_callers={
-                    AGENT: frozenset({"user:*"}),
-                    PROCESS: frozenset({"user:*"}),
-                    STAGE_AGENT: frozenset({f"agent:{PROCESS}"}),
-                }
-            ),
-            limits=ChainLimits(max_depth=3),
+            registry=registry,
+            limits=limits,
             audit_dsn=databases.audit,
             forward=httpx.AsyncClient(base_url=tasks_url, timeout=10),
             edge_token=EDGE_TOKEN,
             cards=public_cards(
-                Catalogs(
-                    agents=load_catalogs(EXAMPLES).agents,
-                    processes={PROCESS: PROCESS_CATALOG},
-                ),
+                catalogs,
                 base_url=edge_url,
                 oidc_discovery_url=idp.discovery_url,
                 signing_key=card_key,
@@ -465,6 +473,7 @@ def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[
             databases=databases,
             gitlab=DemoGitLab(),
             run_key=run_key,
+            processes=processes,
         )
     finally:
         for each in served:
@@ -472,9 +481,9 @@ def running(databases: Databases, board_url: str, ui_port: int = 0) -> Iterator[
 
 
 def seed(demo: Demo) -> dict[str, str]:
-    """alice's tasks, one per state the board shows, and her two processes; returns each one's
-    board path by state (a process's as ``process-<state>``)."""
-    return in_own_loop(_seed(demo))
+    """alice's tasks, one per state the board shows, or with processes her two processes;
+    returns each one's board path by state (a process's as ``process-<state>``)."""
+    return in_own_loop(_seed_processes(demo) if demo.processes else _seed(demo))
 
 
 async def _seed(demo: Demo) -> dict[str, str]:
@@ -504,10 +513,21 @@ async def _seed(demo: Demo) -> dict[str, str]:
             ),
         )
         await rpc(edge, token, "CancelTask", {"tenant": AGENT, "id": tasks["canceled"]["id"]})
-        processes = {
-            state: await send(PROCESS, f"process-{state}", goal)
-            for state, goal in PROCESS_GOALS.items()
-        }
+    return {state: f"/agents/{AGENT}/tasks/{task['id']}" for state, task in tasks.items()}
+
+
+async def _seed_processes(demo: Demo) -> dict[str, str]:
+    token = demo.idp.access_token(USER)
+    async with httpx.AsyncClient(base_url=demo.edge_url, timeout=10) as edge:
+        processes = {}
+        for state, goal in PROCESS_GOALS.items():
+            message = {
+                "messageId": f"seed-process-{state}",
+                "role": "ROLE_USER",
+                "parts": [{"text": goal}],
+            }
+            result = await rpc(edge, token, "SendMessage", {"tenant": PROCESS, "message": message})
+            processes[state] = result["task"]
     # The reconciler starts each process's first stage at the edge, then shows it on the task.
     await _reconcile(demo)
     for process in processes.values():
@@ -518,8 +538,7 @@ async def _seed(demo: Demo) -> dict[str, str]:
     # A person closes the second one's merge request in GitLab without saying why.
     demo.gitlab.close_without_comment(await _stage_run(demo, processes["needs_reason"]))
     await _reconcile(demo)
-    paths = {state: f"/agents/{AGENT}/tasks/{task['id']}" for state, task in tasks.items()}
-    return paths | {
+    return {
         f"process-{state}": f"/agents/{PROCESS}/tasks/{task['id']}"
         for state, task in processes.items()
     }
@@ -599,8 +618,9 @@ def run_count(demo: Demo) -> int:
 def frozen(start: datetime, seed: int = 0) -> Iterator[None]:
     """Task ids, run ids and status timestamps that are the same on every run, for screenshots.
 
-    a2a-sdk and golem_runs take ids from uuid.uuid4 and a2a-sdk takes timestamps from
-    datetime.now; the seed calls them in a fixed order, so a seeded sequence reproduces them.
+    a2a-sdk and golem_runs take ids from uuid.uuid4, and a2a-sdk and the task service take
+    timestamps from datetime.now; the seed calls them in a fixed order, so a seeded sequence
+    reproduces them.
     Each timestamp is a minute after the one before.
     """
     ids = Random(seed)
@@ -620,5 +640,7 @@ def frozen(start: datetime, seed: int = 0) -> Iterator[None]:
     with (
         mock.patch("uuid.uuid4", uuid4),
         mock.patch("a2a.server.tasks.task_updater.datetime", FrozenDatetime),
+        # A proposal's or a process's change moves its task's timestamp too.
+        mock.patch("golem.tasks.app.datetime", FrozenDatetime),
     ):
         yield

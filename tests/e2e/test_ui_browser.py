@@ -20,23 +20,18 @@ from playwright.sync_api import (
     Page,
     Response,
     expect,
-    sync_playwright,
 )
 from support.demo import (
     AGENT,
     MERGE_REQUEST_URL,
-    PROCESS,
-    STAGE_AGENT,
     USER,
     Demo,
     databases_of,
     in_own_loop,
-    reconcile,
     run_count,
     running,
     seed,
 )
-from support.front import board_server
 from testcontainers.community.postgres import PostgresContainer
 
 from golem.ui.edge import rpc
@@ -47,7 +42,6 @@ TIMEOUT_MS = 10_000
 # The board polls every 10 s; a card must have moved by the poll after next.
 POLL_TIMEOUT_MS = 25_000
 BOARD = f"/agents/{AGENT}"
-PROCESS_BOARD = f"/agents/{PROCESS}"
 # styles.css gives the top bar this background; the browser default is transparent.
 TOPBAR_BACKGROUND = "rgb(35, 64, 95)"
 SECURITY_HEADERS = {
@@ -93,12 +87,6 @@ class Watched:
 
 
 @pytest.fixture(scope="module")
-def board_url() -> Iterator[str]:
-    with board_server() as url:
-        yield url
-
-
-@pytest.fixture(scope="module")
 def demo(postgres: PostgresContainer, board_url: str) -> Iterator[Demo]:
     with running(databases_of(postgres), board_url) as demo:
         yield demo
@@ -107,14 +95,6 @@ def demo(postgres: PostgresContainer, board_url: str) -> Iterator[Demo]:
 @pytest.fixture(scope="module")
 def tasks(demo: Demo) -> dict[str, str]:
     return seed(demo)
-
-
-@pytest.fixture(scope="module")
-def browser() -> Iterator[Browser]:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        yield browser
-        browser.close()
 
 
 def watched(browser: Browser, demo: Demo, **options: object) -> Watched:
@@ -129,9 +109,9 @@ def watched(browser: Browser, demo: Demo, **options: object) -> Watched:
 def sign_in(page: Page, demo: Demo, board: str = BOARD) -> None:
     page.goto("/")
     page.get_by_role("link", name="Sign in").click()
-    # An agent and a process to choose from: the rail lists both.
+    # One entry to choose from: the agent, or with a process pinned only the process.
     page.wait_for_url(f"{demo.ui_url}/")
-    expect(page.get_by_role("navigation", name="Agents").locator(".rail-link")).to_have_count(2)
+    expect(page.get_by_role("navigation", name="Agents").locator(".rail-link")).to_have_count(1)
     page.goto(board)
     expect(page.get_by_role("heading", name=board.rsplit("/", 1)[-1], level=1)).to_be_visible()
 
@@ -156,7 +136,7 @@ def walk(browser: Browser, demo: Demo, tasks: dict[str, str]) -> Iterator[Walk]:
     expect(page.get_by_role("link", name="Sign in")).to_be_visible()
     backgrounds = {"/": topbar_background(page)}
     sign_in(page, demo)
-    paths = [BOARD, PROCESS_BOARD, *tasks.values()]
+    paths = [BOARD, *tasks.values()]
     for path in paths:
         page.goto(path)
         expect(page.get_by_role("heading", level=1)).to_be_visible()
@@ -322,58 +302,4 @@ def test_the_board_fits_a_phone_screen(browser: Browser, demo: Demo, tasks: dict
         expect(page.locator(".topbar")).to_be_visible()
         overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
         assert overflow <= 0, path
-    watch.context.close()
-
-
-# --- Processes (ADR 0019) --------------------------------------------------------------------
-
-
-def test_a_process_is_one_card_per_process_showing_its_stage(
-    browser: Browser, demo: Demo, tasks: dict[str, str]
-) -> None:
-    watch = watched(browser, demo)
-    page = watch.page()
-    sign_in(page, demo, PROCESS_BOARD)
-
-    waiting = column(page, "Waiting for me").locator(".card")
-    review = column(page, "To review").locator(".card")
-    expect(waiting).to_have_count(1)
-    expect(review).to_have_count(1)
-    expect(waiting).to_contain_text("Stage 1 of 2: evidence")
-    expect(waiting.get_by_label("Why was it rejected?")).to_be_visible()
-    expect(review).to_contain_text("Stage 1 of 2: evidence")
-    expect(review).to_contain_text("close it with a comment")
-    expect(review.get_by_role("link", name="Merge request")).to_have_attribute(
-        "href", re.compile(r"/merge_requests/\d+$")
-    )
-    # A stage is not a card: its task belongs to the worker, which people cannot open.
-    expect(page.locator(".card", has_text="Collect evidence:")).to_have_count(0)
-    assert watch.console_errors == watch.csp_violations == []
-    watch.context.close()
-
-
-def test_rerunning_a_stage_needs_a_reason_and_starts_it_again(
-    browser: Browser, demo: Demo, tasks: dict[str, str]
-) -> None:
-    watch = watched(browser, demo)
-    page = watch.page()
-    sign_in(page, demo, PROCESS_BOARD)
-    card = column(page, "Waiting for me").locator(".card")
-    rerun = card.get_by_role("button", name="Rerun the stage")
-    expect(rerun).to_be_disabled()
-    stages_before = len([s for s in demo.launcher.launched if s.agent == STAGE_AGENT])
-
-    card.get_by_label("Why was it rejected?").fill("Count the tickets per customer, not per day.")
-    rerun.click()
-    expect(card.get_by_role("alert")).to_have_count(0)
-    # The reconciler starts the attempt, then shows it on the process's task.
-    reconcile(demo)
-    reconcile(demo)
-    page.reload()
-
-    moved = column(page, "In progress").locator(".card", has_text="Attempt 2 of 3")
-    expect(moved).to_have_count(1)
-    expect(column(page, "Waiting for me").locator(".card")).to_have_count(0)
-    assert len([s for s in demo.launcher.launched if s.agent == STAGE_AGENT]) == stages_before + 1
-    assert watch.console_errors == watch.csp_violations == []
     watch.context.close()

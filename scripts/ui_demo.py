@@ -2,7 +2,8 @@
 
 Builds and starts the board's image and Postgres in Docker (testcontainers), the real
 backend-for-frontend, edge and task service behind a front that routes like the ingress, and a
-fake identity provider that signs in ``alice`` without a password. Stop with Ctrl-C.
+fake identity provider that signs in ``alice`` without a password. ``--processes`` pins a process,
+and people see only the process, as in a deployment that pins one. Stop with Ctrl-C.
 """
 
 import argparse
@@ -22,12 +23,13 @@ DEFAULT_PORT = 8090
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="the UI's port")
-    port = parser.parse_args().port
+    parser.add_argument("--processes", action="store_true", help="pin a process (ADR 0019)")
+    args = parser.parse_args()
     print("building the board and starting Postgres...", flush=True)
     with (
         postgres_container() as container,
         board_server() as board,
-        running(databases_of(container), board, port) as demo,
+        running(databases_of(container), board, args.port, processes=args.processes) as demo,
     ):
         seed(demo)
         print(f"Golem board: {demo.ui_url} (signs in as alice). Ctrl-C stops it.", flush=True)

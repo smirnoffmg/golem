@@ -5,8 +5,8 @@ and open the merge request it proposes. You need an account at your organization
 provider that may use Golem, and the UI's address from your platform team (below,
 `https://golem-ui.internal`). No other set-up.
 
-The screenshots come from `scripts/ui_demo.py`, the real board with an example agent; yours
-shows your agents and your tasks.
+The screenshots come from `scripts/ui_demo.py`, the real board with an example agent, and with
+`--processes` an example process; yours shows your agents or your processes and your tasks.
 
 ## 1. Sign in
 
