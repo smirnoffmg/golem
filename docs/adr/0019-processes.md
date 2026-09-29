@@ -333,6 +333,9 @@ loader's checks above are what a process's merge request must pass.
   process did not get there. A stage run that succeeded but has no merge request yet (GitLab
   was down) is settled with nothing proposed, so no later pass opens one that nobody would
   close.
+- **An accepted stage proposal is not withdrawn.** Its apply may be writing already, and
+  rejecting the row would not stop the write, only hide it. It ends as its apply says, and the
+  canceled process leaves it to that ([ADR 0015](0015-proposals.md), one apply at a time).
 - **The reason of a rejection that is not a merge request** is the proposal row's `detail`,
   where the decision route of [ADR 0015](0015-proposals.md) will put it; a merge request's is the
   closer's comment as above.

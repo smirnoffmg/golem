@@ -125,8 +125,9 @@ transition and the other gets 409 `already_decided`.
 The run's branch stays the carrier, because it is the one thing a Job may write
 ([ADR 0007](0007-run-tokens.md): a branch-only Git token). The role writes the proposal's
 content under its `writes` directory along with its record change, as today; after validation
-the runtime writes one file of its own at the branch root, `golem-proposal.json`: the kind, the
-kind's fields, and the paths of any body files. The validator refuses a run whose file is
+the runtime writes one file of its own, `golem-proposals/<run id>.json` (as first built; at first
+`golem-proposal.json` at the branch root, which made two landed proposals conflict): the kind,
+the kind's fields, and the paths of any body files. The validator refuses a run whose file is
 missing, names another kind than the catalog's, or breaks the kind's limits (a page body over
 200 000 characters, a reply over 30 000, a summary over 255, a project outside the agent's
 grant), so an invalid proposal is an `invalid` run, not a row. A `merge_request` agent writes no
@@ -137,7 +138,7 @@ For `wiki_edit` the role needs the page as Confluence stores it, not the plain t
 title and `version.number`, refused as a tool error above 200 000 characters instead of cut, since
 a cut body proposed back would delete the rest of the page.
 
-When the run settles, the reconciler reads `golem-proposal.json` and the files it names through
+When the run settles, the reconciler reads the run's proposal file and the files it names through
 the Repository files API with `ref` = the branch's head commit, never the branch name, so what is
 stored is what was validated at that commit. It checks everything again (the file comes from an
 untrusted Job) and inserts a row into `proposals` in `golem_runs`: `id`, `run_id`, `task_id`
@@ -328,8 +329,12 @@ the run-token key and verified against the same JWKS (`/internal/run-keys`):
 The kinds the platform applies, from the Job to the decision; the write servers themselves are
 built separately.
 
-- **`golem-proposal.json`.** One JSON object: `kind` and the kind's fields, body text in files
-  under the role's `writes` directory, named by relative path.
+- **`golem-proposals/<run id>.json`.** One JSON object: `kind` and the kind's fields, body text
+  in files under the role's `writes` directory, named by relative path. One file per run, not
+  one at the branch root: an applied proposal's branch lands in main, and two proposals from
+  one main must not change the same file. The reconciler refuses a file over 16 KiB unread, and
+  checks every field before it fetches a body file, so the Job's file cannot decide how many
+  requests a pass makes.
   - `wiki_edit`: `page_id` (digits), `title` (one line, at most 255), `version` (the page version
     the role read, a positive integer), `body_file` (storage format, at most 200 000
     characters).
@@ -346,7 +351,7 @@ built separately.
   `submit_proposal` with that kind's fields as its arguments; the tool checks them as the
   reconciler will and answers what to fix. A record run of such a kind must end with a proposal
   (`invalid` otherwise); a goal run without one reports ([ADR 0017](0017-triggers.md)). The
-  runtime writes `golem-proposal.json` after validation, outside the role's directory.
+  runtime writes the run's proposal file after validation, outside the role's directory.
 - **No grant check on the project or space in the Job.** No catalog field grants projects or
   spaces, so the runtime and the reconciler check the shape only; `GOLEM_MCP_WIKI_SPACES`,
   `GOLEM_MCP_DESK_PROJECTS` and `GOLEM_MCP_TRACKER_PROJECTS` on the write servers are the check.
@@ -385,9 +390,21 @@ built separately.
 - **Applying.** The task service calls the write server's MCP endpoint (`GOLEM_WRITE_SERVERS_FILE`:
   per group its `url` and `resource`, the token's audience) with one proposal token per call.
   Without an entry for a group, an accepted proposal of its kind ends `failed` with the reason.
-  An apply that raises or takes over 15 s leaves the row `accepted`; the reconciler names
-  `accepted` rows decided over 60 s ago on `POST /internal/proposal-state`, at most once a minute
-  each, and the task service applies them again.
+- **One apply at a time.** A write server looks before it writes (the marker, the comment, the
+  label), which is safe only if no two applies of one proposal overlap. An accept therefore
+  leases the proposal to its apply for 60 s (`apply_lease_until`, set in the decision's
+  compare-and-set); the proposal-state notification and the reconciler's retry apply only a
+  proposal whose lease ran out, and take a new lease by compare-and-set first. A write server
+  bounds one apply to 30 s, the task service waits 15 s and the reconciler 25 s for the task
+  service, so the lease outlasts every apply that holds it. An apply that raises or takes over
+  15 s leaves the row `accepted`; once its lease ran out the reconciler names it on
+  `POST /internal/proposal-state`, at most once a minute, last in its pass and for at most 60 s
+  a pass, so a hanging write server cannot starve the rest of the pass.
+- **Refused for good.** A write server's gate refusing the token (401) or its scope (403) refuses
+  every retry the same way, so the apply ends `failed` with the reason. A decider no proposal
+  token can name (not `user:` followed by a name without spaces, colons or `*`, the catalog's
+  reviewer rule) is refused with 403 `unnameable_decider` before the row moves. An apply whose
+  result finds the row no longer `accepted` is logged and counted as `unrecorded`.
 - **The write servers' tools**, each answering JSON text:
   - `wiki.write`: `preview_page_edit(proposal_id, payload)` → `{"title", "version", "body"}`,
     token scope `preview`, subject the person looking; `apply_page_edit(proposal_id, payload)`.
@@ -400,7 +417,11 @@ built separately.
   token's `digest`, and reads the decider from the token's `sub`.
 - **The record lands.** For an `applied` proposal the reconciler opens the run's branch as a
   merge request (`<agent>: <target> (applied)`) and merges it with `sha` = the proposal's
-  `commit`; a 409 leaves it open for a person. A `stale` proposal's branch is deleted, a
+  `commit`. GitLab's documented refusals of a merge (Merge requests API, "Merge a merge
+  request": 400 `sha` required, 401 no permission, 405 cannot merge, 409 `sha` not the source's
+  HEAD, 422 failed to merge) leave it open for a person. Any other failure is tried again after
+  a minute, twice as long each time up to an hour, the rows tried least recently first, so rows
+  that keep failing never hold back newer ones. A `stale` proposal's branch is deleted, a
   `rejected` one's left. `landed_at` marks either, so each is done once.
 
 ### The write servers as built
@@ -451,7 +472,8 @@ built separately.
 - **Jira Service Management.** The server's own account comes from `GET /rest/api/2/myself`
   (`accountId` on Cloud, `key` on Data Center) and a comment's author is compared on those. A
   reply already posted is a comment by that account, with `public` equal to the proposal's,
-  created (`created.epochMillis`) at or after `decided_at`, whose body equals the proposed text
+  created (`created.epochMillis`) no earlier than two minutes before `decided_at` (Jira's clock
+  may run behind the database's that decided), whose body equals the proposed text
   up to trailing whitespace, which the upstream may trim. Comments are paged by `start` and
   `limit` (100) until `isLastPage`, at most 50 pages; a request with more fails rather than risk
   a second reply.
@@ -462,9 +484,9 @@ built separately.
 - **After a refused or unanswered write** each apply looks once more (the page, the comments,
   the label) before it answers `failed`, so a write whose answer was lost ends `applied`.
 - **Metrics.** The task service counts `golem_proposal_decisions_total{kind, decision}` and
-  `golem_proposal_applies_total{kind, result}`, `result` one of `applied`, `stale`, `failed` or
-  `unanswered` (the reconciler asks again); the write servers count their gate's decisions in
-  `golem_mcp_tool_calls_total` like the read servers.
+  `golem_proposal_applies_total{kind, result}`, `result` one of `applied`, `stale`, `failed`,
+  `unanswered` (the reconciler asks again) or `unrecorded` (the row had moved on); the write
+  servers count their gate's decisions in `golem_mcp_tool_calls_total` like the read servers.
 - **Read servers keep audience `golem-mcp`.** The per-server audiences of
   [ADR 0016](0016-observability-tools.md) are built for the write servers only.
 - **Compose** runs no MCP server, read or write; the write servers are deployed on Kubernetes

@@ -109,8 +109,8 @@ has seen before. But the lead does not choose. The runtime changes in `runtime/m
    (`pending_ids`). A goal agent does not: the alert fired again, and that is new
    information. The brief lists the open proposals on the target, so the role can extend an
    issue it already proposed rather than propose another.
-4. **The proposal is optional.** A goal agent's run writes `golem-proposal.json` only when it
-   found something to act on. Without one, the run's outcome is `reported`: exit 0, the
+4. **The proposal is optional.** A goal agent's run writes its proposal file
+   (`golem-proposals/<run id>.json`) only when it found something to act on. Without one, the run's outcome is `reported`: exit 0, the
    branch pushed, no proposal row. In both cases the reconciler reads the target record at
    the branch's head commit (Repository files API, as [ADR 0015](0015-proposals.md) reads the proposal) and puts
    it into the task's outcome as an A2A artifact `report`: a text part, cut at 20 000
@@ -140,10 +140,10 @@ with and without a finding, so the evaluation measures both false alarms and mis
   `reported`. The runtime's report names the record (`record`), and the reconciler reads only a
   relative `.md` path without `..` from it.
 - **A goal agent proposes its catalog's kind.** For `merge_request` the role calls
-  `submit_proposal(reason)` and writes no `golem-proposal.json`: its report's outcome, `proposed`
+  `submit_proposal(reason)` and writes no proposal file: its report's outcome, `proposed`
   or `reported`, tells the reconciler whether to open a merge request. For a kind the platform
   applies, the role calls the same tool with that kind's fields, and the runtime writes
-  `golem-proposal.json` ([ADR 0015](0015-proposals.md), as first built); without the call the run
+  a proposal file ([ADR 0015](0015-proposals.md), as first built); without the call the run
   reports as above.
 - **`golem_runs.runs` gains `outcome`, `record` and `report`.** The reconciler stores the report
   (cut at 20 000 characters) before it deletes the branch, so a failed delete is retried without
