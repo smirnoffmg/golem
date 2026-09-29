@@ -18,15 +18,12 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import TextContent
 
+from golem.proposal_payload import WRITE_GROUPS
 from golem.proposal_token import APPLY, PREVIEW, ProposalClaims, issue
 from golem.run_token import SigningKey
 from golem.tasks.ports import Applied, LivePage, ProposalDetail
 
-KIND_GROUPS = {
-    "wiki_edit": "wiki.write",
-    "desk_reply": "desk.write",
-    "tracker_issue": "tracker.write",
-}
+KIND_GROUPS = WRITE_GROUPS
 RESULTS = frozenset({"applied", "stale", "failed"})
 MAX_DETAIL = 500
 

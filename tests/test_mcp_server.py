@@ -593,7 +593,13 @@ async def test_a_server_offers_exactly_its_groups_tools(group: str) -> None:
     # The gate refuses a tools/call outside the group's list, so a tool the server offers but
     # the list lacks would be offered and then refused.
     async with httpx.AsyncClient() as upstream:
-        server = mcp_server(GROUPS[group], upstream, JiraDeployment.CLOUD)
+        server = mcp_server(
+            GROUPS[group],
+            upstream,
+            JiraDeployment.CLOUD,
+            confluence_deployment=JiraDeployment.CLOUD,
+            allowed=frozenset({"OPS"}),
+        )
         offered = {tool.name for tool in await server.list_tools()}
 
     assert offered == set(GROUPS[group].tools)

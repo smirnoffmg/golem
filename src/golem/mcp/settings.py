@@ -3,10 +3,12 @@
 Every missing variable is reported in one error, so a deployment is fixed in one round.
 """
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
-from golem.mcp.atlassian import JiraDeployment
+from golem.mcp.atlassian import Deployment, JiraDeployment
 from golem.mcp.groups import GROUPS
 from golem.metrics import DEFAULT_METRICS_PORT
 from golem.ratelimit import AUTH_FAILURE_RATE, Network, Rate
@@ -19,6 +21,7 @@ from golem.settings import (
 
 DEFAULTS = {
     "GOLEM_MCP_RUN_STATUS_TTL_SECONDS": "10",
+    "GOLEM_MCP_PROPOSAL_STATUS_TTL_SECONDS": "10",
     "GOLEM_MCP_KEYS_REFRESH_SECONDS": "60",
     "GOLEM_PORT": "8000",
 }
@@ -30,6 +33,17 @@ REQUIRED = (
     "GOLEM_AUDIT_DSN",
 )
 JIRA_DEPLOYMENT = "GOLEM_MCP_JIRA_DEPLOYMENT"
+CONFLUENCE_DEPLOYMENT = "GOLEM_MCP_CONFLUENCE_DEPLOYMENT"
+RESOURCE = "GOLEM_MCP_RESOURCE"
+# Where a write server may write, narrowed again on the server (ADR 0015).
+ALLOWED = {
+    "wiki.write": "GOLEM_MCP_WIKI_SPACES",
+    "desk.write": "GOLEM_MCP_DESK_PROJECTS",
+    "tracker.write": "GOLEM_MCP_TRACKER_PROJECTS",
+}
+# The groups that call Jira's search, whose path differs between Cloud and Data Center.
+JIRA_SEARCHING = frozenset({"tracker.read", "tracker.write"})
+KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_~]*$")
 
 Env = Mapping[str, str]
 
@@ -51,22 +65,35 @@ class McpSettings:
     auth_failure_rate: Rate = AUTH_FAILURE_RATE
     trusted_proxies: tuple[Network, ...] = ()
     metrics_port: int = DEFAULT_METRICS_PORT
+    # A write server only: Cloud's v2 or Data Center's page API, its tokens' audience (the
+    # canonical URI of its /mcp endpoint, ADR 0016), and the spaces or projects it writes to.
+    confluence_deployment: Deployment | None = None
+    resource: str | None = None
+    allowed: frozenset[str] = frozenset()
+    proposal_status_ttl_seconds: float = 10.0
 
 
 def mcp_settings(env: Env) -> McpSettings:
-    v = {name: env.get(name, "").strip() for name in (*REQUIRED, JIRA_DEPLOYMENT)}
-    needs_deployment = v["GOLEM_MCP_GROUP"] == "tracker.read"
+    group = env.get("GOLEM_MCP_GROUP", "").strip()
+    writes = group in ALLOWED
+    needed = [
+        *([JIRA_DEPLOYMENT] if group in JIRA_SEARCHING else []),
+        *([CONFLUENCE_DEPLOYMENT] if group == "wiki.write" else []),
+        *([RESOURCE, ALLOWED[group]] if writes else []),
+    ]
+    v = {name: env.get(name, "").strip() for name in (*REQUIRED, *needed)}
     missing = [name for name in REQUIRED if not v[name]]
-    if needs_deployment and not v[JIRA_DEPLOYMENT]:
-        missing.insert(3, JIRA_DEPLOYMENT)
+    missing[3:3] = [name for name in needed if not v[name]]
     if missing:
         raise SettingsError(f"missing environment variables: {', '.join(missing)}")
     return McpSettings(
-        group=_group(v["GOLEM_MCP_GROUP"]),
+        group=_group(group),
         upstream_url=_base_url("GOLEM_MCP_UPSTREAM_URL", v["GOLEM_MCP_UPSTREAM_URL"]),
         upstream_user=env.get("GOLEM_MCP_UPSTREAM_USER", "").strip() or None,
         upstream_token=v["GOLEM_MCP_UPSTREAM_TOKEN"],
-        jira_deployment=_deployment(v[JIRA_DEPLOYMENT]) if needs_deployment else None,
+        jira_deployment=(
+            _deployment(JIRA_DEPLOYMENT, v[JIRA_DEPLOYMENT]) if group in JIRA_SEARCHING else None
+        ),
         task_service_url=_base_url("GOLEM_TASK_SERVICE_URL", v["GOLEM_TASK_SERVICE_URL"]),
         audit_dsn=v["GOLEM_AUDIT_DSN"],
         run_status_ttl_seconds=_seconds(env, "GOLEM_MCP_RUN_STATUS_TTL_SECONDS"),
@@ -75,6 +102,14 @@ def mcp_settings(env: Env) -> McpSettings:
         auth_failure_rate=rate_setting(env, "GOLEM_RATE_AUTH_FAILURES", AUTH_FAILURE_RATE),
         trusted_proxies=trusted_proxies_setting(env),
         metrics_port=metrics_port_setting(env, _port(env)),
+        confluence_deployment=(
+            _deployment(CONFLUENCE_DEPLOYMENT, v[CONFLUENCE_DEPLOYMENT])
+            if group == "wiki.write"
+            else None
+        ),
+        resource=_resource(v[RESOURCE]) if writes else None,
+        allowed=_keys(ALLOWED[group], v[ALLOWED[group]]) if writes else frozenset(),
+        proposal_status_ttl_seconds=_seconds(env, "GOLEM_MCP_PROPOSAL_STATUS_TTL_SECONDS"),
     )
 
 
@@ -84,12 +119,38 @@ def _group(name: str) -> str:
     return name
 
 
-def _deployment(value: str) -> JiraDeployment:
+def _deployment(name: str, value: str) -> Deployment:
     try:
-        return JiraDeployment(value)
+        return Deployment(value)
     except ValueError as error:
-        choices = ", ".join(d.value for d in JiraDeployment)
-        raise SettingsError(f"{JIRA_DEPLOYMENT} must be one of {choices}, got {value!r}") from error
+        choices = ", ".join(d.value for d in Deployment)
+        raise SettingsError(f"{name} must be one of {choices}, got {value!r}") from error
+
+
+def _resource(value: str) -> str:
+    # MCP authorization: the canonical URI has a lowercase scheme and host, no fragment, and is
+    # used without the trailing slash; the token's audience must equal it exactly.
+    parts = urlsplit(value)
+    canonical = (
+        parts.scheme in ("http", "https")
+        and parts.netloc == parts.netloc.lower()
+        and bool(parts.netloc)
+        and not parts.fragment
+        and not value.endswith("/")
+    )
+    if not canonical:
+        raise SettingsError(f"{RESOURCE} must be the canonical URI of the server, got {value!r}")
+    return value
+
+
+def _keys(name: str, value: str) -> frozenset[str]:
+    keys = [key.strip() for key in value.split(",") if key.strip()]
+    if not keys:
+        raise SettingsError(f"{name} must name at least one space or project key")
+    for key in keys:
+        if not KEY.match(key):
+            raise SettingsError(f"{name}: {key!r} is not a space or project key")
+    return frozenset(keys)
 
 
 def _base_url(name: str, value: str) -> str:

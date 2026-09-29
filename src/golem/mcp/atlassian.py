@@ -40,9 +40,12 @@ BLOCK_TAGS = frozenset(
 SKIPPED_TAGS = frozenset({"script", "style"})
 
 
-class JiraDeployment(StrEnum):
+class Deployment(StrEnum):
     CLOUD = "cloud"
     DATA_CENTER = "data-center"
+
+
+JiraDeployment = Deployment
 
 
 JIRA_SEARCH_PATHS = {
@@ -289,6 +292,8 @@ def error_detail(response: httpx.Response) -> str:
     errors = body.get("errors")
     if isinstance(errors, dict):
         messages += [f"{field}: {message}" for field, message in errors.items()]
-    if isinstance(body.get("message"), str):
-        messages.append(body["message"])
+    # Jira Service Management names its one error errorMessage.
+    for single in ("message", "errorMessage"):
+        if isinstance(body.get(single), str):
+            messages.append(body[single])
     return bounded("; ".join(messages) or "no details", DETAIL_CHARS)

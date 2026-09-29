@@ -20,6 +20,7 @@ from golem.tasks.app import (
 )
 from golem.tasks.ports import (
     Orchestrator,
+    ProposalGate,
     ProposalRecord,
     ProposalView,
     Refused,
@@ -41,6 +42,7 @@ class FakeOrchestrator:
     canceled: list[str] = field(default_factory=list)
     runs: dict[str, TaskRun] = field(default_factory=dict)
     proposals: dict[str, ProposalRecord] = field(default_factory=dict)
+    gates: dict[str, ProposalGate] = field(default_factory=dict)
 
     async def start(self, run: RunStart) -> Started | Refused:
         self.started.append(run)
@@ -82,6 +84,9 @@ class FakeOrchestrator:
 
     async def agents_of_tasks(self, task_ids: tuple[str, ...]) -> dict[str, str]:
         return {t: run.agent for t, run in self.runs.items() if t in task_ids}
+
+    async def proposal_gate(self, proposal_id: str) -> ProposalGate | None:
+        return self.gates.get(proposal_id)
 
 
 def make_card() -> AgentCard:

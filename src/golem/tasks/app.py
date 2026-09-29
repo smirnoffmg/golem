@@ -66,6 +66,9 @@ RUN_KEYS_PATH = "/internal/run-keys"
 # Platform MCP servers ask whether a run is still running before serving its token: a canceled
 # run's token is refused before it expires.
 RUN_STATUS_PATH = "/internal/runs/{run_id}"
+# Write servers ask whether a proposal still allows the call its token was issued for: the
+# revocation of a proposal token, as run status is of a run token (ADR 0015).
+PROPOSAL_GATE_PATH = "/internal/proposals/{proposal_id}"
 TERMINAL_STATES = {
     TaskState.TASK_STATE_COMPLETED,
     TaskState.TASK_STATE_FAILED,
@@ -222,7 +225,7 @@ def public_app(
             await show_proposal(handler, orchestrator, proposal_id)
 
     decisions = (
-        proposal_routes(orchestrator, applier or NoWriteServers(), show)
+        proposal_routes(orchestrator, applier or NoWriteServers(), show, metrics)
         if orchestrator is not None
         else []
     )
@@ -240,7 +243,8 @@ def public_app(
 def internal_read_app(
     orchestrator: Orchestrator, run_keys: tuple[SigningKey, ...], metrics: Metrics
 ) -> ASGIApp:
-    """The MCP servers' port: run keys and run status, nothing that changes state."""
+    """The MCP servers' port: run keys, run status and proposal state, nothing that changes
+    state."""
     jwks = public_jwks(run_keys)
 
     async def run_signing_keys(_: Request) -> Response:
@@ -253,10 +257,19 @@ def internal_read_app(
             return JSONResponse({"error": "run not found"}, status_code=404)
         return JSONResponse({"run_id": run_id, "status": status})
 
+    async def proposal_gate(request: Request) -> Response:
+        found = await orchestrator.proposal_gate(request.path_params["proposal_id"])
+        if found is None:
+            return JSONResponse({"error": "proposal not found"}, status_code=404)
+        return JSONResponse(
+            {"id": found.id, "state": found.state, "digest": found.digest, "kind": found.kind}
+        )
+
     app = Starlette(
         routes=[
             Route(RUN_KEYS_PATH, run_signing_keys, methods=["GET"]),
             Route(RUN_STATUS_PATH, run_status, methods=["GET"]),
+            Route(PROPOSAL_GATE_PATH, proposal_gate, methods=["GET"]),
         ]
     )
     return Instrumented(app, routes=app.routes, metrics=metrics)
@@ -365,7 +378,7 @@ def internal_write_app(
         # it again, idempotently per proposal (ADR 0015).
         accepted = await orchestrator.accepted_proposal(proposal_id)
         if accepted is not None:
-            await apply_accepted(orchestrator, applier or NoWriteServers(), accepted)
+            await apply_accepted(orchestrator, applier or NoWriteServers(), accepted, metrics)
         if not await show_proposal(handler, orchestrator, proposal_id):
             return JSONResponse({"error": "proposal not found"}, status_code=404)
         return JSONResponse({"proposal_id": proposal_id})

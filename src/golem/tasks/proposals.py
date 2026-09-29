@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from golem.decisions import DECISIONS, NAME, PAGE, REVIEWS_HEADER, STATES
+from golem.metrics import Metrics
 from golem.resolution import MAX_REASON_CHARS
 from golem.tasks.ports import (
     ALREADY_DECIDED,
@@ -137,20 +138,30 @@ def error(code: str, status: int) -> JSONResponse:
 
 
 async def apply_accepted(
-    orchestrator: Orchestrator, applier: Applier, decided: ProposalDetail
+    orchestrator: Orchestrator,
+    applier: Applier,
+    decided: ProposalDetail,
+    metrics: Metrics | None = None,
 ) -> None:
     """Apply an accepted proposal and record what came of it; an apply that fails to answer
     leaves it accepted for the reconciler's retry."""
+    kind = decided.summary.kind
     try:
         async with asyncio.timeout(APPLY_SECONDS):
             result = await applier.apply(decided)
     except Exception:
         log.exception("the apply of proposal %s did not answer", decided.summary.id)
+        if metrics is not None:
+            metrics.proposal_applied(kind, "unanswered")
         return
+    if metrics is not None:
+        metrics.proposal_applied(kind, result.state)
     await orchestrator.record_apply(decided.summary.id, result.state, result.detail, ("accepted",))
 
 
-def proposal_routes(orchestrator: Orchestrator, applier: Applier, show: Show) -> list[Route]:
+def proposal_routes(
+    orchestrator: Orchestrator, applier: Applier, show: Show, metrics: Metrics | None = None
+) -> list[Route]:
     async def listed(request: Request) -> Response:
         access = access_of(request)
         if access is None:
@@ -218,8 +229,10 @@ def proposal_routes(orchestrator: Orchestrator, applier: Applier, show: Show) ->
         )
         if isinstance(decided, str):
             return error(decided, REFUSALS.get(decided, 409))
+        if metrics is not None:
+            metrics.proposal_decided(decided.summary.kind, str(choice))
         if decided.summary.state == "accepted":
-            await apply_accepted(orchestrator, applier, decided)
+            await apply_accepted(orchestrator, applier, decided, metrics)
         await show(proposal_id)
         now = await orchestrator.read_proposal(access, proposal_id)
         return JSONResponse(detail_json(now or decided))

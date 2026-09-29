@@ -35,6 +35,7 @@ from golem.tasks.ports import (
     Access,
     ProcessRecord,
     ProposalDetail,
+    ProposalGate,
     ProposalPage,
     ProposalRecord,
     Refused,
@@ -314,6 +315,10 @@ class PostgresOrchestrator:
     async def accepted_proposal(self, proposal_id: str) -> ProposalDetail | None:
         async with await self._connect() as conn:
             return await proposals.accepted_proposal(conn, proposal_id)
+
+    async def proposal_gate(self, proposal_id: str) -> ProposalGate | None:
+        async with await self._connect() as conn:
+            return await proposals.proposal_gate(conn, proposal_id)
 
     async def record_apply(
         self, proposal_id: str, state: str, detail: str | None, from_states: tuple[str, ...]

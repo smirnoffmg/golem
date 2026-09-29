@@ -1,6 +1,6 @@
 import pytest
 
-from golem.mcp.atlassian import JiraDeployment
+from golem.mcp.atlassian import Deployment, JiraDeployment
 from golem.mcp.settings import McpSettings, mcp_settings
 from golem.ratelimit import Rate
 from golem.settings import SettingsError
@@ -78,7 +78,7 @@ def test_a_missing_group_is_named_with_the_rest() -> None:
 @pytest.mark.parametrize(
     ("override", "message"),
     [
-        ({"GOLEM_MCP_GROUP": "tracker.write"}, "GOLEM_MCP_GROUP must be one of"),
+        ({"GOLEM_MCP_GROUP": "tracker.delete"}, "GOLEM_MCP_GROUP must be one of"),
         ({"GOLEM_MCP_JIRA_DEPLOYMENT": "server"}, "GOLEM_MCP_JIRA_DEPLOYMENT must be one of"),
         ({"GOLEM_MCP_UPSTREAM_URL": "https://jira.example.test/"}, "must not end with a slash"),
         ({"GOLEM_MCP_UPSTREAM_URL": "jira.example.test"}, "must be an http"),
@@ -91,3 +91,71 @@ def test_a_missing_group_is_named_with_the_rest() -> None:
 def test_malformed_values_are_refused(override: dict[str, str], message: str) -> None:
     with pytest.raises(SettingsError, match=message):
         mcp_settings({**TRACKER_ENV, **override})
+
+
+WIKI_WRITE_ENV = {
+    **{k: v for k, v in TRACKER_ENV.items() if k != "GOLEM_MCP_JIRA_DEPLOYMENT"},
+    "GOLEM_MCP_GROUP": "wiki.write",
+    "GOLEM_MCP_UPSTREAM_URL": "https://confluence.example.test",
+    "GOLEM_MCP_CONFLUENCE_DEPLOYMENT": "data-center",
+    "GOLEM_MCP_RESOURCE": "http://mcp-wiki-write.golem-system.svc:8000/mcp",
+    "GOLEM_MCP_WIKI_SPACES": "OPS, DOCS",
+}
+
+
+def test_a_write_server_names_its_audience_and_where_it_writes() -> None:
+    settings = mcp_settings(WIKI_WRITE_ENV)
+
+    assert settings.group == "wiki.write"
+    assert settings.confluence_deployment is Deployment.DATA_CENTER
+    assert settings.resource == "http://mcp-wiki-write.golem-system.svc:8000/mcp"
+    assert settings.allowed == frozenset({"OPS", "DOCS"})
+    assert settings.proposal_status_ttl_seconds == 10.0
+
+
+@pytest.mark.parametrize(
+    ("group", "names"),
+    [
+        (
+            "wiki.write",
+            ("GOLEM_MCP_CONFLUENCE_DEPLOYMENT", "GOLEM_MCP_RESOURCE", "GOLEM_MCP_WIKI_SPACES"),
+        ),
+        ("desk.write", ("GOLEM_MCP_RESOURCE", "GOLEM_MCP_DESK_PROJECTS")),
+        (
+            "tracker.write",
+            ("GOLEM_MCP_JIRA_DEPLOYMENT", "GOLEM_MCP_RESOURCE", "GOLEM_MCP_TRACKER_PROJECTS"),
+        ),
+    ],
+)
+def test_a_write_server_without_its_audience_or_allowlist_does_not_start(
+    group: str, names: tuple[str, ...]
+) -> None:
+    env = {k: v for k, v in TRACKER_ENV.items() if k != "GOLEM_MCP_JIRA_DEPLOYMENT"}
+
+    with pytest.raises(SettingsError) as caught:
+        mcp_settings({**env, "GOLEM_MCP_GROUP": group})
+
+    for name in names:
+        assert name in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"GOLEM_MCP_WIKI_SPACES": " , "}, "GOLEM_MCP_WIKI_SPACES must name at least one"),
+        ({"GOLEM_MCP_WIKI_SPACES": "OPS,ops team"}, "GOLEM_MCP_WIKI_SPACES: 'ops team'"),
+        ({"GOLEM_MCP_RESOURCE": "https://Wiki.example/mcp"}, "canonical URI"),
+        ({"GOLEM_MCP_RESOURCE": "https://wiki.example/mcp/"}, "canonical URI"),
+        ({"GOLEM_MCP_RESOURCE": "https://wiki.example/mcp#x"}, "canonical URI"),
+        ({"GOLEM_MCP_CONFLUENCE_DEPLOYMENT": "server"}, "must be one of"),
+    ],
+)
+def test_malformed_write_settings_are_refused(override: dict[str, str], message: str) -> None:
+    with pytest.raises(SettingsError, match=message):
+        mcp_settings({**WIKI_WRITE_ENV, **override})
+
+
+def test_a_read_server_needs_no_audience_or_allowlist() -> None:
+    settings = mcp_settings(TRACKER_ENV)
+
+    assert (settings.resource, settings.allowed) == (None, frozenset())

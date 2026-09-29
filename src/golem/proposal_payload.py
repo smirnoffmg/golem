@@ -18,8 +18,10 @@ MERGE_REQUEST = "merge_request"
 WIKI_EDIT = "wiki_edit"
 DESK_REPLY = "desk_reply"
 TRACKER_ISSUE = "tracker_issue"
-# The kinds a person decides in Golem and the platform applies; a merge request is merged.
-APPLIED_KINDS = frozenset({WIKI_EDIT, DESK_REPLY, TRACKER_ISSUE})
+# The kinds a person decides in Golem and the platform applies, and the write group that
+# applies each; a merge request is merged.
+WRITE_GROUPS = {WIKI_EDIT: "wiki.write", DESK_REPLY: "desk.write", TRACKER_ISSUE: "tracker.write"}
+APPLIED_KINDS = frozenset(WRITE_GROUPS)
 
 MAX_PAGE_BODY = 200_000
 MAX_REPLY = 30_000

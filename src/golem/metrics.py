@@ -34,6 +34,9 @@ DEFAULT_METRICS_PORT = 9090
 OTHER = "other"
 UNMATCHED = "unmatched"
 METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
+PROPOSAL_KINDS = frozenset({"merge_request", "wiki_edit", "desk_reply", "tracker_issue"})
+DECISIONS = frozenset({"accept", "reject"})
+APPLY_RESULTS = frozenset({"applied", "stale", "failed", "unanswered"})
 # The edge waits up to 30 s for the task service; the last bucket catches that.
 HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
 # A Job's deadline is an hour by default.
@@ -147,6 +150,19 @@ class Metrics:
             buckets=RUN_BUCKETS,
             registry=r,
         )
+        self._proposal_decisions = Counter(
+            "golem_proposal_decisions_total",
+            "Proposals a person decided in Golem (ADR 0015), by kind and decision.",
+            ["kind", "decision"],
+            registry=r,
+        )
+        self._proposal_applies = Counter(
+            "golem_proposal_applies_total",
+            "Applies of accepted proposals through the write servers, by kind and result;"
+            " unanswered ones are asked again by the reconciler.",
+            ["kind", "result"],
+            registry=r,
+        )
 
     def request_served(self, route: str, method: str, status: int, seconds: float) -> None:
         method = bounded(method, METHODS)
@@ -178,6 +194,16 @@ class Metrics:
     def run_ended(self, agent: str, outcome: str, seconds: float) -> None:
         self._run_outcomes.labels(self.agent(agent), outcome).inc()
         self._run_duration.labels(self.agent(agent), outcome).observe(seconds)
+
+    def proposal_decided(self, kind: str, decision: str) -> None:
+        self._proposal_decisions.labels(
+            bounded(kind, PROPOSAL_KINDS), bounded(decision, DECISIONS)
+        ).inc()
+
+    def proposal_applied(self, kind: str, result: str) -> None:
+        self._proposal_applies.labels(
+            bounded(kind, PROPOSAL_KINDS), bounded(result, APPLY_RESULTS)
+        ).inc()
 
     def agent(self, name: str) -> str:
         return bounded(name, self._agents)

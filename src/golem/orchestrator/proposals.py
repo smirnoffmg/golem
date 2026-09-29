@@ -24,6 +24,7 @@ from golem.tasks.ports import (
     REASON_REQUIRED,
     Access,
     ProposalDetail,
+    ProposalGate,
     ProposalPage,
     ProposalRecord,
     ProposalSummary,
@@ -365,6 +366,18 @@ async def accepted_proposal(conn: AsyncConnection, proposal_id: str) -> Proposal
     )
     row = await cursor.fetchone()
     return None if row is None else _detail(row)
+
+
+async def proposal_gate(conn: AsyncConnection, proposal_id: str) -> ProposalGate | None:
+    try:
+        proposal_uuid = uuid.UUID(proposal_id)
+    except ValueError:
+        return None
+    cursor = await conn.execute(
+        "SELECT id, state, digest, kind FROM proposals WHERE id = %s", (proposal_uuid,)
+    )
+    row = await cursor.fetchone()
+    return None if row is None else ProposalGate(str(row[0]), row[1], row[2], row[3])
 
 
 async def decide_proposal(

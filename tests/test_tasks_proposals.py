@@ -17,6 +17,7 @@ from test_tasks_service import TEST_EDGE_TOKEN, make_card
 from test_tasks_to_runs import CATALOG, GRANTS, SIGNING_KEY, TEMPLATE, FakeLauncher
 
 from golem.decisions import REVIEWS_HEADER
+from golem.metrics import Metrics
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.service import PostgresOrchestrator
 from golem.proposal_payload import payload_digest
@@ -60,9 +61,8 @@ def applier() -> FakeApplier:
     return FakeApplier()
 
 
-@pytest.fixture
-def client(runs_db: str, applier: FakeApplier) -> Iterator[TestClient]:
-    orchestrator = PostgresOrchestrator(
+def _orchestrator(runs_db: str) -> PostgresOrchestrator:
+    return PostgresOrchestrator(
         dsn=runs_db,
         limits=Limits(max_runs_per_caller=10, max_runs_per_root=10, budget_per_root=Decimal("99")),
         estimated_cost=Decimal("1"),
@@ -72,13 +72,20 @@ def client(runs_db: str, applier: FakeApplier) -> Iterator[TestClient]:
         signing_key=SIGNING_KEY,
         grants=GRANTS,
     )
+
+
+@pytest.fixture
+def client(runs_db: str, applier: FakeApplier) -> Iterator[TestClient]:
     listeners = create_listeners(
-        make_card(), orchestrator, edge_token=TEST_EDGE_TOKEN, applier=applier
+        make_card(), _orchestrator(runs_db), edge_token=TEST_EDGE_TOKEN, applier=applier
     )
 
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "http" and scope["path"] == PROPOSAL_STATE_PATH:
             await listeners.internal_write(scope, receive, send)
+            return
+        if scope["type"] == "http" and scope["path"].startswith("/internal/"):
+            await listeners.internal_read(scope, receive, send)
             return
         token = (EDGE_TOKEN_HEADER.encode(), TEST_EDGE_TOKEN.encode())
         public: ASGIApp = listeners.public
@@ -370,3 +377,76 @@ def test_a_reviewer_reads_the_reports_of_an_agent_they_review(
     }
     assert one.json()["text"] == "Disk grows 4% a day.\n\nNothing to act on yet."
     assert hidden.status_code == 404
+
+
+def test_a_write_server_reads_a_proposals_state_digest_and_kind_and_nothing_else(
+    client: TestClient, runs_db: str
+) -> None:
+    task_id = start(client, "desk")
+    proposal_id = proposal_for(runs_db, task_id)
+    decide(client, proposal_id, {"decision": "reject", "reason": "Wrong customer."})
+
+    found = client.get(f"/internal/proposals/{proposal_id}")
+    unknown = client.get(f"/internal/proposals/{uuid.uuid4()}")
+    malformed = client.get("/internal/proposals/not-a-uuid")
+
+    assert found.status_code == 200
+    assert found.json() == {
+        "id": proposal_id,
+        "state": "rejected",
+        "digest": payload_digest(REPLY),
+        "kind": "desk_reply",
+    }
+    assert (unknown.status_code, malformed.status_code) == (404, 404)
+
+
+def test_the_proposal_route_is_not_on_the_edges_port(client: TestClient, runs_db: str) -> None:
+    task_id = start(client, "desk")
+    proposal_id = proposal_for(runs_db, task_id)
+    listeners = create_listeners(make_card(), _orchestrator(runs_db), edge_token=TEST_EDGE_TOKEN)
+    token = {EDGE_TOKEN_HEADER: TEST_EDGE_TOKEN}
+
+    with TestClient(listeners.public) as public, TestClient(listeners.internal_write) as write:
+        assert public.get(f"/internal/proposals/{proposal_id}", headers=token).status_code == 404
+        assert write.get(f"/internal/proposals/{proposal_id}").status_code == 404
+
+
+def test_decisions_and_applies_are_counted_by_kind_and_result(runs_db: str) -> None:
+    metrics = Metrics("tasks")
+    applier = FakeApplier(result=Applied("stale", "Page 123 is at version 9."))
+    listeners = create_listeners(
+        make_card(),
+        _orchestrator(runs_db),
+        edge_token=TEST_EDGE_TOKEN,
+        applier=applier,
+        metrics=metrics,
+    )
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        token = (EDGE_TOKEN_HEADER.encode(), TEST_EDGE_TOKEN.encode())
+        await listeners.public(
+            {**scope, "headers": [*scope.get("headers", []), token]}, receive, send
+        )
+
+    with TestClient(app) as client:
+        accepted = proposal_for(runs_db, start(client, "wiki"), "wiki_edit", PAGE)
+        rejected = proposal_for(runs_db, start(client, "desk"))
+        decide(client, accepted, {"decision": "accept"})
+        decide(client, rejected, {"decision": "reject"})
+        applier.result = ApplyUnavailable("no answer")
+        again = proposal_for(runs_db, start(client, "desk"))
+        decide(client, again, {"decision": "accept"})
+
+    def decided(kind: str, decision: str) -> float | None:
+        labels = {"kind": kind, "decision": decision}
+        return metrics.registry.get_sample_value("golem_proposal_decisions_total", labels)
+
+    def applied(kind: str, result: str) -> float | None:
+        labels = {"kind": kind, "result": result}
+        return metrics.registry.get_sample_value("golem_proposal_applies_total", labels)
+
+    assert decided("wiki_edit", "accept") == 1
+    assert decided("desk_reply", "reject") == 1
+    assert decided("desk_reply", "accept") == 1
+    assert applied("wiki_edit", "stale") == 1
+    assert applied("desk_reply", "unanswered") == 1

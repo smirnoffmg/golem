@@ -183,6 +183,17 @@ class Applied:
 
 
 @dataclass(frozen=True)
+class ProposalGate:
+    """What a write server asks of a proposal before serving its token: whether its state
+    allows the call, and whether the token was issued for the payload the row holds."""
+
+    id: str
+    state: str
+    digest: str | None
+    kind: str
+
+
+@dataclass(frozen=True)
 class LivePage:
     """A wiki_edit's page as Confluence holds it now: what the diff is taken against."""
 
@@ -234,6 +245,8 @@ class Orchestrator(Protocol):
     ) -> ProposalDetail | str: ...
 
     async def accepted_proposal(self, proposal_id: str) -> ProposalDetail | None: ...
+
+    async def proposal_gate(self, proposal_id: str) -> ProposalGate | None: ...
 
     async def record_apply(
         self, proposal_id: str, state: str, detail: str | None, from_states: tuple[str, ...]

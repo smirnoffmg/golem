@@ -4,6 +4,10 @@ ASVS 5.0 16.3.2 at L3 asks for every authorization decision to be logged, and 16
 session token in a log only hashed or masked: the row names the tool and its argument values,
 bounded, never a result and never the run token, only a short hash of it that ties together
 the requests of one token, including tokens that failed verification.
+
+At a write server the row names the person who decided (the token's subject), the platform that
+acts for them and the proposal (ADR 0015); a page body or a reply is not logged, only the digest
+of the payload that carries it.
 """
 
 import hashlib
@@ -15,6 +19,8 @@ import psycopg
 from golem.edge.audit import AuditEntry, record
 from golem.mcp.auth import Refusal
 from golem.mcp.groups import Group
+from golem.proposal_payload import ProposalError, payload_digest
+from golem.proposal_token import ACTOR, ProposalClaims
 from golem.run_token import RunClaims
 
 UNAUTHENTICATED = "unauthenticated"
@@ -43,9 +49,9 @@ def token_digest(token: str | None) -> str:
     return "sha256:" + hashlib.sha256(token.encode()).hexdigest()[:DIGEST_CHARS]
 
 
-def request_text(operation: Operation, token: str | None) -> str:
+def request_text(operation: Operation, token: str | None, acting: str = "") -> str:
     head = operation.method if operation.tool is None else f"{operation.method} {operation.tool}"
-    tail = f"token={token_digest(token)}"
+    tail = f"{acting} token={token_digest(token)}" if acting else f"token={token_digest(token)}"
     room = REQUEST_CHARS - len(head) - len(tail) - 2
     arguments = " ".join(
         f"{name}={clipped(repr(value), VALUE_CHARS)}" for name, value in operation.arguments.items()
@@ -59,25 +65,54 @@ def clipped(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
 
 
+def payload_named(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return "<not a payload>"
+    try:
+        return f"sha256:{payload_digest(payload)[:DIGEST_CHARS]}"
+    except ProposalError:
+        return "<not a payload>"
+
+
+def without_payload(operation: Operation) -> Operation:
+    if "payload" not in operation.arguments:
+        return operation
+    arguments = {
+        name: payload_named(value) if name == "payload" else value
+        for name, value in operation.arguments.items()
+    }
+    return Operation(operation.method, operation.tool, arguments, operation.problem)
+
+
 def audit_entry(
     *,
     group: Group,
     target_system: str,
     operation: Operation,
     token: str | None,
-    claims: RunClaims | None,
+    claims: RunClaims | ProposalClaims | None,
     refusal: Refusal | None,
     source_ip: str | None,
 ) -> AuditEntry:
+    if group.writes:
+        operation = without_payload(operation)
+    if isinstance(claims, ProposalClaims):
+        account = claims.decider
+        acting = f"act={ACTOR} proposal={claims.proposal_id}"
+        chain: tuple[str, ...] = ()
+    elif isinstance(claims, RunClaims):
+        account, acting, chain = claims.caller, "", (claims.root_run_id, claims.run_id)
+    else:
+        account, acting, chain = UNAUTHENTICATED, "", ()
     return AuditEntry(
-        account=claims.caller if claims else UNAUTHENTICATED,
-        request=request_text(operation, token),
+        account=account,
+        request=request_text(operation, token, acting),
         target_system=target_system,
         operation=clipped(operation.name, VALUE_CHARS),
         result="allow" if refusal is None else f"deny: {refusal.reason}",
         source=f"mcp:{group.name}",
         source_ip=source_ip,
-        chain=(claims.root_run_id, claims.run_id) if claims else (),
+        chain=chain,
     )
 
 
