@@ -22,7 +22,7 @@ export function ReportsLane(props: { agent: string }) {
 
   return (
     <details
-      className="archive reports"
+      className="reports"
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
