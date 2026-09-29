@@ -88,7 +88,8 @@ A2A tasks, run admission, Job launch, run tokens. Three listeners, one per kind 
 | `GOLEM_PUSH_CONFIG_KEY` | required with `GOLEM_PUSH_ALLOWED_PREFIXES` | Fernet key that encrypts push configs (they hold the adapters' push tokens) in `golem_tasks` |
 | `GOLEM_MCP_REGISTRY_CONFIGMAP` | none | a ConfigMap in the Jobs namespace mounted into every run as the [MCP registry](#mcp-registry) |
 | `GOLEM_CATALOGS_DIR` | none: no processes | the edge's directory of pinned catalogs; a task for one of its `process.yaml` is a process, not a run ([ADR 0019](../adr/0019-processes.md)), checked with its stage agents at start |
-| `GOLEM_PORT` | `8000` | `a2a`: agent card, `/a2a` and `/processes/{task}/resolution`, for the edge |
+| `GOLEM_WRITE_SERVERS_FILE` | none: nothing is applied | where the [write servers](#write-servers) are; without it an accepted proposal of a kind the platform applies ends `failed` ([ADR 0015](../adr/0015-proposals.md)) |
+| `GOLEM_PORT` | `8000` | `a2a`: agent card, `/a2a`, `/processes/{task}/resolution`, `/proposals` and `/reports`, for the edge |
 | `GOLEM_INTERNAL_READ_PORT` | `8001` | `internal-read`: `/internal/run-keys`, `/internal/runs/{run_id}`, for the MCP servers |
 | `GOLEM_INTERNAL_WRITE_PORT` | `8002` | `internal-write`: `/internal/run-outcome`, `/internal/proposal-state` and `/internal/process-state`, for the reconciler |
 | `GOLEM_METRICS_PORT` | `9090` | metrics |
@@ -339,6 +340,25 @@ task.
 discovery:
   project: product/discovery-context
   target_branch: main
+```
+
+### Write servers
+
+`GOLEM_WRITE_SERVERS_FILE`, read by the task service: for each write group, the MCP endpoint it
+calls and the server's canonical URI, the audience of the proposal tokens it issues for that
+server ([ADR 0015](../adr/0015-proposals.md)). A group left out is not applied: its accepted
+proposals end `failed` with the reason.
+
+```yaml
+wiki.write:
+  url: http://wiki-write.golem-system.svc:8000/mcp
+  resource: https://wiki-write.golem-system.svc/mcp
+desk.write:
+  url: http://desk-write.golem-system.svc:8000/mcp
+  resource: https://desk-write.golem-system.svc/mcp
+tracker.write:
+  url: http://tracker-write.golem-system.svc:8000/mcp
+  resource: https://tracker-write.golem-system.svc/mcp
 ```
 
 ### Jira labels

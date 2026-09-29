@@ -243,7 +243,8 @@ async def _run_of_message(
 async def _stage_run(conn: AsyncConnection, run_id: str) -> StageRun | None:
     cursor = await conn.execute(
         "SELECT r.status, r.outcome, r.detail, r.proposal_settled_at IS NOT NULL, r.agent,"
-        " p.id, p.kind, p.state, p.decided_by, p.detail, (p.payload->>'iid')::bigint"
+        " p.id, p.kind, p.state, p.decided_by, coalesce(p.reason, p.detail),"
+        " (p.payload->>'iid')::bigint"
         " FROM runs r LEFT JOIN proposals p ON p.run_id = r.id WHERE r.id = %s",
         (run_id,),
     )

@@ -16,6 +16,7 @@ from golem.metrics import Metrics, metrics_app, process_registry
 from golem.orchestrator.launchers import launcher_for
 from golem.orchestrator.reconciler import apply_schema_once
 from golem.orchestrator.service import PostgresOrchestrator
+from golem.run_token import SigningKey
 from golem.serving import Listener, listener, serve_all
 from golem.settings import (
     SettingsError,
@@ -23,9 +24,12 @@ from golem.settings import (
     parse_agent_tools,
     parse_catalog_refs,
     parse_signing_key,
+    parse_write_servers,
     task_service_settings,
 )
 from golem.tasks.app import Listeners, PushDelivery, create_listeners
+from golem.tasks.apply import McpApplier, NoWriteServers
+from golem.tasks.ports import Applier
 from golem.tasks.store import backfill_agents, push_config_store, tasks_engine, tasks_store
 
 
@@ -61,6 +65,13 @@ def pinned_catalogs(settings: TaskServiceSettings) -> Catalogs:
         return load_catalogs(settings.catalogs_dir)
     except (CatalogError, OSError) as error:
         raise SettingsError(f"GOLEM_CATALOGS_DIR: {error}") from error
+
+
+def applier_for(settings: TaskServiceSettings, signing_key: SigningKey) -> Applier:
+    if settings.write_servers_file is None:
+        return NoWriteServers()
+    servers = parse_write_servers(settings.write_servers_file.read_text())
+    return McpApplier(servers=servers, signing_key=signing_key)
 
 
 def build_service(
@@ -102,6 +113,7 @@ def build_service(
         push=push,
         run_keys=(signing_key,),
         metrics=metrics,
+        applier=applier_for(settings, signing_key),
     )
     return TaskService(listeners, engine, orchestrator)
 

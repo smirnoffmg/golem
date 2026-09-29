@@ -36,6 +36,7 @@ from golem.ratelimit import (
 )
 from golem.run_token import ISSUER as GOLEM_ISSUER
 from golem.run_token import SigningKey
+from golem.tasks.apply import KIND_GROUPS, WriteServer
 
 DEFAULT_PORT = "8000"
 DEFAULT_INTERNAL_READ_PORT = "8001"
@@ -111,6 +112,8 @@ class TaskServiceSettings:
     metrics_port: int = DEFAULT_METRICS_PORT
     # The pinned catalogs the processes come from (ADR 0019), as the edge's; None: no processes.
     catalogs_dir: Path | None = None
+    # Where the write servers are (ADR 0015); None: an accepted proposal fails, nothing applies.
+    write_servers_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -303,6 +306,7 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
         push_config_key=_push_config_key(env),
         metrics_port=metrics_port,
         catalogs_dir=_optional_path(env, "GOLEM_CATALOGS_DIR"),
+        write_servers_file=_optional_path(env, "GOLEM_WRITE_SERVERS_FILE"),
     )
 
 
@@ -416,6 +420,23 @@ def parse_gitlab_projects(text: str) -> dict[str, GitLabProject]:
             path=value["project"], target_branch=value["target_branch"]
         )
     return projects
+
+
+WRITE_GROUPS = frozenset(KIND_GROUPS.values())
+
+
+def parse_write_servers(text: str) -> dict[str, WriteServer]:
+    """``<write group>: {url: <MCP endpoint>, resource: <canonical URI>}`` (ADR 0015)."""
+    servers: dict[str, WriteServer] = {}
+    for group, value in _yaml_mapping(text, "write servers").items():
+        if group not in WRITE_GROUPS:
+            raise SettingsError(f"write servers: {group!r} is not a write group")
+        if not isinstance(value, dict) or not all(
+            isinstance(value.get(k), str) and value[k] for k in ("url", "resource")
+        ):
+            raise SettingsError(f"write servers: {group!r} needs 'url' and 'resource'")
+        servers[str(group)] = WriteServer(url=value["url"], resource=value["resource"])
+    return servers
 
 
 def _values(env: Env, *names: str) -> dict[str, str]:

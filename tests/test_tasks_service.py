@@ -76,6 +76,10 @@ class FakeOrchestrator:
     async def proposal(self, proposal_id: str) -> ProposalRecord | None:
         return self.proposals.get(proposal_id)
 
+    async def accepted_proposal(self, proposal_id: str) -> None:
+        # Merge requests only here: none is ever accepted in Golem.
+        return None
+
     async def agents_of_tasks(self, task_ids: tuple[str, ...]) -> dict[str, str]:
         return {t: run.agent for t, run in self.runs.items() if t in task_ids}
 
