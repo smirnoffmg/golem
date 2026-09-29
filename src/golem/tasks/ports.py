@@ -69,6 +69,8 @@ class RunOutcome:
     report: str | None = None
     # A stage of a canceled process, withdrawn by the platform (ADR 0019).
     canceled: bool = False
+    # What a proposal of a kind the platform applies proposes: the task's `proposal` artifact.
+    proposal_payload: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)

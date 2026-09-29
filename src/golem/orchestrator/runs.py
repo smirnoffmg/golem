@@ -35,6 +35,8 @@ class StartRequest:
     agent: str
     estimated_cost: Decimal
     root_run_id: str | None = None
+    # What the agent's runs propose, from its pinned catalog (ADR 0015).
+    proposal_kind: str = "merge_request"
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,8 @@ class RecordedRun:
     # A goal run that found nothing to propose: the report its task shows (ADR 0017).
     report: str | None = None
     withdrawn: bool = False
+    # What a proposal of a kind the platform applies proposes: the task's `proposal` artifact.
+    proposal_payload: dict[str, Any] | None = None
 
 
 async def apply_schema(conn: AsyncConnection) -> None:
@@ -128,7 +132,7 @@ async def start_run(
 
         await conn.execute(
             "INSERT INTO runs (id, root_run_id, caller, message_id, task_id, agent,"
-            " estimated_cost) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            " estimated_cost, proposal_kind) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 run_id,
                 root_run_id,
@@ -137,6 +141,7 @@ async def start_run(
                 request.task_id,
                 request.agent,
                 request.estimated_cost,
+                request.proposal_kind,
             ),
         )
         await _map_task(conn, request.task_id, run_id)
@@ -204,7 +209,8 @@ async def run_of_task(conn: AsyncConnection, task_id: str) -> RecordedRun | None
     cursor = await conn.execute(
         "SELECT r.id, r.caller, r.agent, r.status, r.detail, " + FINAL_OUTCOME + " AS final,"
         " p.id, p.kind, p.state, p.url, CASE WHEN r.outcome = 'reported' THEN r.report END,"
-        " r.outcome IS NOT DISTINCT FROM %s"
+        " r.outcome IS NOT DISTINCT FROM %s,"
+        " CASE WHEN p.kind <> 'merge_request' THEN p.payload END"
         " FROM run_tasks t JOIN runs r ON r.id = t.run_id"
         " LEFT JOIN proposals p ON p.run_id = r.id WHERE t.task_id = %s",
         (WITHDRAWN, task_id),
@@ -213,12 +219,12 @@ async def run_of_task(conn: AsyncConnection, task_id: str) -> RecordedRun | None
     if row is None:
         return None
     (run_id, caller, agent, status, detail, final) = row[:6]
-    (proposal_id, kind, state, url, report, withdrawn) = row[6:]
+    (proposal_id, kind, state, url, report, withdrawn, payload) = row[6:]
     proposal = (
         None if proposal_id is None else ProposalView(str(proposal_id), kind, state, url or "")
     )
     return RecordedRun(
-        str(run_id), caller, agent, status, detail, final, proposal, report, withdrawn
+        str(run_id), caller, agent, status, detail, final, proposal, report, withdrawn, payload
     )
 
 

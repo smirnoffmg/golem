@@ -56,9 +56,12 @@ class FakeOrchestrator:
         detail: str,
         proposal: ProposalView | None = None,
         report: str | None = None,
+        proposal_payload: dict | None = None,
     ) -> None:
         run = self.runs[task_id]
-        outcome = RunOutcome(run.run_id, succeeded, detail, proposal, report)
+        outcome = RunOutcome(
+            run.run_id, succeeded, detail, proposal, report, proposal_payload=proposal_payload
+        )
         self.runs[task_id] = replace(run, outcome=outcome)
 
     async def run_of_task(self, task_id: str) -> TaskRun | None:
@@ -474,6 +477,25 @@ def test_a_reported_run_completes_its_task_with_the_report(
     [artifact] = done["artifacts"]
     assert artifact["name"] == "report"
     assert artifact["parts"] == [{"text": "# Seen\n\nA deploy."}]
+
+
+def test_a_proposal_the_platform_applies_is_the_tasks_proposal_artifact(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task = send(client, "answer SD-12")
+    reply = ProposalView(id="p-2", kind="desk_reply", state="pending", url="")
+    payload = {"request": "SD-12", "public": True, "text": "The export works again."}
+    orchestrator.finish(
+        task["id"], succeeded=True, detail="waits", proposal=reply, proposal_payload=payload
+    )
+
+    assert notify(client, task["id"]).status_code == 200
+
+    done = get_task(client, task["id"])
+    assert done["metadata"]["golemProposal"]["kind"] == "desk_reply"
+    [artifact] = done["artifacts"]
+    assert artifact["name"] == "proposal"
+    assert artifact["parts"] == [{"data": payload}]
 
 
 def test_a_proposal_state_change_moves_only_the_status_timestamp(

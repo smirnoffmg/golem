@@ -82,6 +82,7 @@ def client(runs_db: str, launcher: FakeLauncher) -> Iterator[TestClient]:
         signing_key=SIGNING_KEY,
         grants=GRANTS,
         clock=fixed_clock,
+        proposal_kinds={"reviewer": "desk_reply"},
     )
     with TestClient(create_app(make_card(), orchestrator)) as test_client:
         yield test_client
@@ -121,6 +122,18 @@ def test_a_task_starts_a_recorded_run(client: TestClient, runs_db: str) -> None:
 
     assert task["status"]["state"] == "TASK_STATE_WORKING"
     assert run_rows(runs_db) == [(task["metadata"]["runId"], "running")]
+
+
+def test_a_run_records_what_its_pinned_catalog_proposes(client: TestClient, runs_db: str) -> None:
+    first = send(client, "m-1", tenant="reviewer")
+    # One running run per caller here: the first makes room for the second.
+    rpc(client, "CancelTask", {"tenant": "reviewer", "id": first["id"]})
+    send(client, "m-2", tenant="discovery")
+
+    with psycopg.connect(runs_db) as conn:
+        kinds = dict(conn.execute("SELECT agent, proposal_kind FROM runs").fetchall())
+    # An agent no pinned catalog names proposes as agents always did: a merge request.
+    assert kinds == {"reviewer": "desk_reply", "discovery": "merge_request"}
 
 
 def test_a_retried_message_gets_a_new_task_but_the_same_run(

@@ -28,6 +28,7 @@ from golem.orchestrator.runs import (
     start_process,
     start_run,
 )
+from golem.proposal_payload import MERGE_REQUEST
 from golem.run_token import RunClaims, SigningKey, issue
 from golem.tasks.ports import (
     ProcessRecord,
@@ -141,6 +142,8 @@ class PostgresOrchestrator:
     metrics: Metrics = field(default_factory=lambda: Metrics("tasks"))
     # The pinned processes (ADR 0019): a task for one of them is a process, not a run.
     processes: Mapping[str, ProcessCatalog] = field(default_factory=dict)
+    # What each pinned agent proposes (ADR 0015); an agent missing here proposes a merge request.
+    proposal_kinds: Mapping[str, str] = field(default_factory=dict)
 
     async def start(self, run: RunStart) -> Started | Refused:
         process = self.processes.get(run.agent)
@@ -160,6 +163,7 @@ class PostgresOrchestrator:
             estimated_cost=self.estimated_cost,
             # A delegated run shares its chain's concurrency and budget (ADR 0004, ADR 0014).
             root_run_id=run.root_run_id or None,
+            proposal_kind=self.proposal_kinds.get(run.agent, MERGE_REQUEST),
         )
         async with await AsyncConnection.connect(
             self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
@@ -254,6 +258,7 @@ class PostgresOrchestrator:
                 proposal=run.proposal,
                 report=run.report,
                 canceled=run.withdrawn,
+                proposal_payload=run.proposal_payload,
             )
         return TaskRun(run.run_id, run.caller, run.agent, outcome)
 

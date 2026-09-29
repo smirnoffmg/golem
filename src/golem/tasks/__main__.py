@@ -11,7 +11,7 @@ from a2a.types.a2a_pb2 import AgentCapabilities, AgentCard, AgentInterface
 from prometheus_client import CollectorRegistry
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from golem.catalog import CatalogError, ProcessCatalog, load_catalogs
+from golem.catalog import CatalogError, Catalogs, load_catalogs
 from golem.metrics import Metrics, metrics_app, process_registry
 from golem.orchestrator.launchers import launcher_for
 from golem.orchestrator.reconciler import apply_schema_once
@@ -52,13 +52,13 @@ class TaskService:
     orchestrator: PostgresOrchestrator
 
 
-def pinned_processes(settings: TaskServiceSettings) -> dict[str, ProcessCatalog]:
-    """The processes of the pinned catalogs, checked with their stage agents as the edge checks
-    them; a task for one of them is a process (ADR 0019)."""
+def pinned_catalogs(settings: TaskServiceSettings) -> Catalogs:
+    """The pinned catalogs, checked as the edge checks them: a task for one of their processes
+    is a process (ADR 0019), and each agent's catalog says what its runs propose (ADR 0015)."""
     if settings.catalogs_dir is None:
-        return {}
+        return Catalogs(agents={}, processes={})
     try:
-        return dict(load_catalogs(settings.catalogs_dir).processes)
+        return load_catalogs(settings.catalogs_dir)
     except (CatalogError, OSError) as error:
         raise SettingsError(f"GOLEM_CATALOGS_DIR: {error}") from error
 
@@ -68,6 +68,7 @@ def build_service(
 ) -> TaskService:
     signing_key = parse_signing_key(settings.run_token_key_file.read_text(), settings.run_token_kid)
     catalogs = parse_catalog_refs(settings.catalogs_file.read_text())
+    pinned = pinned_catalogs(settings)
     # The registered agents are the bounded set the run metrics name; others are "other".
     metrics = Metrics("tasks", registry=registry, agents=catalogs)
     orchestrator = PostgresOrchestrator(
@@ -80,7 +81,8 @@ def build_service(
         signing_key=signing_key,
         grants=parse_agent_tools(settings.agent_tools_file.read_text()),
         metrics=metrics,
-        processes=pinned_processes(settings),
+        processes=dict(pinned.processes),
+        proposal_kinds={name: agent.proposal for name, agent in pinned.agents.items()},
     )
     engine = tasks_engine(settings.tasks_db_url)
     push = (

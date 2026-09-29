@@ -17,14 +17,21 @@ from golem.orchestrator.process_runs import (
 )
 from golem.orchestrator.proposals import (
     MR_POLL_SECONDS,
+    Landing,
+    NewProposal,
     OpenedMergeRequest,
     PendingMergeRequest,
     Transition,
     due_merge_requests,
+    due_retries,
     mark_delivered,
+    mark_landed,
+    mark_retried,
     record_check,
     record_merge_request,
+    record_proposal,
     undelivered_states,
+    unlanded,
 )
 from golem.orchestrator.runs import FINAL_OUTCOME, RETURNING_ENDED, EndedRun, ended_run
 
@@ -45,14 +52,18 @@ class SucceededRun:
     agent: str
     # A reported run's target record on its branch, from its report; checked, never trusted.
     record: str | None = None
+    # What its agent proposes (ADR 0015): a merge request, or a kind the platform applies.
+    proposal_kind: str = "merge_request"
 
 
 @dataclass(frozen=True)
 class Settlement:
-    """What a succeeded run proposed: the outcome detail for its tasks, and its merge request."""
+    """What a succeeded run proposed: the outcome detail for its tasks, and its merge request
+    or the proposal read from its branch."""
 
     detail: str
     merge_request: OpenedMergeRequest | None = None
+    proposal: NewProposal | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +84,8 @@ Proposed = Callable[[SucceededRun], Awaitable[Pushed | None]]
 # GitLab cannot say.
 Check = Callable[[PendingMergeRequest], Awaitable[Transition | None]]
 NotifyProposal = Callable[[str], Awaitable[bool]]
+# Merges or deletes a decided proposal's branch; raises when GitLab cannot do it now.
+Land = Callable[[Landing], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -170,6 +183,7 @@ async def reconcile_once(
     report: Reporter | None = None,
     processes: ProcessPorts | None = None,
     notify_process: NotifyProcess | None = None,
+    land: Land | None = None,
 ) -> None:
     """Move finished Jobs' runs to their final status, settle what succeeded runs propose,
     deliver pending task outcomes, then follow open merge requests and deliver the changes;
@@ -195,6 +209,9 @@ async def reconcile_once(
         await _check_merge_requests(conn, check, poll_seconds)
     if notify_proposal is not None:
         await _deliver_proposal_states(conn, notify_proposal)
+        await _retry_accepted(conn, notify_proposal)
+    if land is not None:
+        await _land(conn, land)
     if processes is not None:
         await advance_processes(conn, processes, launcher)
         # A process that ended, or a stage the platform withdrew, is told in this pass.
@@ -318,16 +335,17 @@ async def _settle_proposals(
     conn: AsyncConnection, propose: Propose | None, metrics: ReconcilerMetrics
 ) -> None:
     cursor = await conn.execute(
-        "SELECT id, agent, detail FROM runs"
+        "SELECT id, agent, detail, proposal_kind FROM runs"
         " WHERE status = 'succeeded' AND proposal_settled_at IS NULL"
         " AND outcome IS DISTINCT FROM %s",
         (REPORTED,),
     )
-    for run_id, agent, detail in await cursor.fetchall():
-        merge_request = None
+    for run_id, agent, detail, kind in await cursor.fetchall():
+        merge_request, proposal = None, None
         if propose is not None:
+            run = SucceededRun(run_id=str(run_id), agent=agent, proposal_kind=kind)
             try:
-                proposed = await propose(SucceededRun(run_id=str(run_id), agent=agent))
+                proposed = await propose(run)
             except Exception:
                 # Left unsettled, the run is proposed again next pass and its tasks wait for it;
                 # other runs must not wait behind it.
@@ -335,11 +353,13 @@ async def _settle_proposals(
                 metrics.merge_request_failed()
                 continue
             detail = settled_detail(str(run_id), detail, proposed.detail)
-            merge_request = proposed.merge_request
+            merge_request, proposal = proposed.merge_request, proposed.proposal
         # A run with a proposal is settled only together with its row (ADR 0015).
         async with conn.transaction():
             if merge_request is not None:
                 await record_merge_request(conn, str(run_id), merge_request)
+            if proposal is not None:
+                await record_proposal(conn, str(run_id), proposal)
             settled = await conn.execute(
                 "UPDATE runs SET detail = %s, proposal_settled_at = now()"
                 " WHERE id = %s AND proposal_settled_at IS NULL",
@@ -377,6 +397,24 @@ async def _deliver_proposal_states(conn: AsyncConnection, notify_proposal: Notif
     for proposal_id, state in await undelivered_states(conn):
         if await notify_proposal(proposal_id):
             await mark_delivered(conn, proposal_id, state)
+
+
+async def _retry_accepted(conn: AsyncConnection, notify_proposal: NotifyProposal) -> None:
+    """An accept whose apply outlived the decision's answer is left accepted; the task service,
+    told again, applies it again, idempotently per proposal (ADR 0015)."""
+    for proposal_id in await due_retries(conn):
+        await notify_proposal(proposal_id)
+        await mark_retried(conn, proposal_id)
+
+
+async def _land(conn: AsyncConnection, land: Land) -> None:
+    for landing in await unlanded(conn):
+        try:
+            await land(landing)
+        except Exception:
+            log.exception("could not land the record of proposal %s", landing.proposal_id)
+            continue
+        await mark_landed(conn, landing.proposal_id)
 
 
 async def _count_pending(conn: AsyncConnection, metrics: ReconcilerMetrics) -> None:

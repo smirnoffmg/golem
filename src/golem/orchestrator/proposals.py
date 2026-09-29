@@ -1,11 +1,14 @@
 """Proposals in golem_runs (ADR 0015): the result of a succeeded run that a person decides on.
 
-Only the merge request kind exists so far. A person decides it in GitLab; the reconciler reads
-the decision there and tells the task service, which shows it on the run's tasks.
+A merge request is decided in GitLab; the reconciler reads the decision there and tells the task
+service, which shows it on the run's tasks. The other kinds are decided in Golem and applied by
+the task service; the reconciler retries an apply whose answer was lost, and lands the run's
+record once the proposal is decided.
 """
 
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
@@ -13,6 +16,9 @@ from psycopg.types.json import Jsonb
 from golem.tasks.ports import ProposalRecord, ProposalView
 
 MR_POLL_SECONDS = 300.0
+# An accepted proposal the task service did not finish applying is asked for again this late,
+# and at most this often: past the apply's own 15 s timeout, with room to spare (ADR 0015).
+RETRY_SECONDS = 60.0
 # Keeps a pass short however many merge requests are open; the rest wait for the next one.
 MAX_CHECKS_PER_PASS = 50
 
@@ -55,6 +61,80 @@ async def record_merge_request(
         " ON CONFLICT (run_id) DO NOTHING",
         (uuid.uuid4(), Jsonb({"iid": opened.iid}), opened.target, opened.url, run_id),
     )
+
+
+@dataclass(frozen=True)
+class NewProposal:
+    """A proposal read back from a run's branch, checked again: what the row records."""
+
+    kind: str
+    payload: dict[str, Any]
+    digest: str
+    # The head commit the payload was read at, where the record lands if it is applied.
+    commit: str
+    target: str
+
+
+@dataclass(frozen=True)
+class Landing:
+    """A decided proposal whose run's branch is still to be merged or deleted."""
+
+    proposal_id: str
+    run_id: str
+    agent: str
+    state: str
+    commit: str
+
+
+async def record_proposal(conn: AsyncConnection, run_id: str, proposal: NewProposal) -> None:
+    await conn.execute(
+        "INSERT INTO proposals (id, run_id, task_id, agent, owner, kind, state, notified_state,"
+        " payload, digest, commit, target)"
+        " SELECT %s, r.id, r.task_id, r.agent, r.caller, %s, 'pending', 'pending', %s, %s, %s, %s"
+        " FROM runs r WHERE r.id = %s ON CONFLICT (run_id) DO NOTHING",
+        (
+            uuid.uuid4(),
+            proposal.kind,
+            Jsonb(proposal.payload),
+            proposal.digest,
+            proposal.commit,
+            proposal.target,
+            run_id,
+        ),
+    )
+
+
+async def due_retries(conn: AsyncConnection) -> list[str]:
+    # checked_at doubles as the time of the last retry: a merge request is never accepted.
+    cursor = await conn.execute(
+        "SELECT id FROM proposals WHERE state = 'accepted'"
+        " AND decided_at <= now() - make_interval(secs => %(after)s)"
+        " AND (checked_at IS NULL OR checked_at <= now() - make_interval(secs => %(after)s))"
+        " ORDER BY decided_at LIMIT %(limit)s",
+        {"after": RETRY_SECONDS, "limit": MAX_CHECKS_PER_PASS},
+    )
+    return [str(proposal_id) for (proposal_id,) in await cursor.fetchall()]
+
+
+async def mark_retried(conn: AsyncConnection, proposal_id: str) -> None:
+    await conn.execute("UPDATE proposals SET checked_at = now() WHERE id = %s", (proposal_id,))
+
+
+async def unlanded(conn: AsyncConnection) -> list[Landing]:
+    cursor = await conn.execute(
+        "SELECT p.id, p.run_id, p.agent, p.state, p.commit FROM proposals p"
+        " WHERE p.kind <> 'merge_request' AND p.state IN ('applied', 'stale')"
+        " AND p.landed_at IS NULL ORDER BY p.decided_at LIMIT %s",
+        (MAX_CHECKS_PER_PASS,),
+    )
+    return [
+        Landing(str(proposal_id), str(run_id), agent, state, commit or "")
+        for proposal_id, run_id, agent, state, commit in await cursor.fetchall()
+    ]
+
+
+async def mark_landed(conn: AsyncConnection, proposal_id: str) -> None:
+    await conn.execute("UPDATE proposals SET landed_at = now() WHERE id = %s", (proposal_id,))
 
 
 async def due_merge_requests(

@@ -80,6 +80,8 @@ class FakeGitLab:
             return httpx.Response(200, json=self._merge_requests(request.url.params))
         if path == f"{prefix}/merge_requests" and request.method == "POST":
             return self._create(json.loads(request.content))
+        if path.startswith(f"{prefix}/merge_requests/") and path.endswith("/merge"):
+            return self._merge(int(path.split("/")[-2]), json.loads(request.content or b"{}"))
         if path.startswith(f"{prefix}/merge_requests/") and path.endswith("/notes"):
             return self._notes(int(path.split("/")[-2]), request.url.params)
         if path.startswith(f"{prefix}/merge_requests/") and request.method == "GET":
@@ -150,6 +152,18 @@ class FakeGitLab:
             if mr["iid"] == iid:
                 if body.get("state_event") == "close" and mr["state"] == "opened":
                     mr.update(state="closed", closed_by={"username": "golem"})
+                return httpx.Response(200, json=mr)
+        return httpx.Response(404, json={"message": "404 Not found"})
+
+    def _merge(self, iid: int, body: dict[str, Any]) -> httpx.Response:
+        # GitLab: with `sha`, the merge fails with 409 unless it is the source branch's HEAD.
+        for mr in self.merge_requests:
+            if mr["iid"] == iid:
+                if body.get("sha") not in (None, f"sha-{mr['source_branch']}"):
+                    return httpx.Response(409, json={"message": "SHA does not match HEAD"})
+                mr.update(state="merged", merge_user={"username": "golem"})
+                if mr.get("remove_source_branch") and mr["source_branch"] in self.branches:
+                    self.branches.remove(mr["source_branch"])
                 return httpx.Response(200, json=mr)
         return httpx.Response(404, json={"message": "404 Not found"})
 

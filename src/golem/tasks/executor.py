@@ -1,7 +1,7 @@
 from dataclasses import asdict
 from typing import Any
 
-from a2a.helpers.proto_helpers import new_task_from_user_message, new_text_part
+from a2a.helpers.proto_helpers import new_data_part, new_task_from_user_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.context import ServerCallContext
 from a2a.server.events import EventQueue
@@ -27,6 +27,7 @@ PROPOSAL_METADATA = "golemProposal"
 OUTCOME_METADATA = "golemOutcome"
 TARGET_METADATA = "golemTarget"
 REPORT_ARTIFACT = "report"
+PROPOSAL_ARTIFACT = "proposal"
 CHAIN_HEADER = "x-golem-chain"
 ROOT_RUN_HEADER = "x-golem-root-run"
 
@@ -90,6 +91,12 @@ async def finish(updater: TaskUpdater, outcome: RunOutcome) -> None:
         metadata: dict[str, Any] | None = (
             {PROPOSAL_METADATA: asdict(outcome.proposal)} if outcome.proposal else None
         )
+        if outcome.proposal_payload is not None:
+            await updater.add_artifact(
+                [new_data_part(dict(outcome.proposal_payload))],
+                artifact_id=f"{PROPOSAL_ARTIFACT}-{outcome.run_id}",
+                name=PROPOSAL_ARTIFACT,
+            )
         if outcome.report is not None:
             # One id per run, so a delivery repeated before the task ended adds no second one.
             await updater.add_artifact(
