@@ -2,8 +2,10 @@
 run's branch at its head commit, recorded without a merge request, retried while accepted, and
 the record landed once the proposal is decided."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 import httpx
@@ -13,12 +15,14 @@ from test_proposals import ProposalInbox
 from test_reconcile import LIMITS, Inbox, StatusBoard, age, connect, recorded
 
 from golem.orchestrator import proposals
+from golem.orchestrator import reconcile as reconcile_module
 from golem.orchestrator.merge_requests import (
     GitLabMergeRequests,
     GitLabProject,
     land_record,
     propose_result,
 )
+from golem.orchestrator.notify import TaskServiceNotifier
 from golem.orchestrator.reconcile import (
     LAUNCH_GRACE_SECONDS,
     Landing,
@@ -28,6 +32,7 @@ from golem.orchestrator.reconcile import (
 )
 from golem.orchestrator.runs import RunCreated, StartRequest, start_run
 from golem.proposal_payload import payload_digest, proposal_file
+from golem.tasks.proposals import APPLY_SECONDS
 
 REPLY = {
     "kind": "desk_reply",
@@ -363,6 +368,46 @@ async def test_an_accepted_proposal_whose_apply_holds_it_is_not_retried(
     assert retries.received == []
 
 
+@dataclass
+class HangingTaskService:
+    """The task service waiting on a write server that does not answer."""
+
+    seconds: float
+    received: list[str] = field(default_factory=list)
+
+    async def notify(self, proposal_id: str) -> bool:
+        self.received.append(proposal_id)
+        await asyncio.sleep(self.seconds)
+        return False
+
+
+async def test_retries_stuck_on_a_hanging_write_server_leave_the_pass_its_other_work(
+    runs_db: str,
+    gitlab: FakeGitLab,
+    merge_requests: GitLabMergeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reconcile_module, "RETRY_BUDGET_SECONDS", 0.2)
+    waiting = []
+    for n in range(3):
+        run_id = await succeeded_run(runs_db, message_id=f"m-{n}")
+        pushed(gitlab, run_id)
+        waiting.append(run_id)
+    landing = await succeeded_run(runs_db, message_id="m-land")
+    pushed(gitlab, landing)
+    await reconcile(runs_db, merge_requests)
+    for run_id in waiting:
+        await set_state(runs_db, run_id, "accepted", decided_seconds_ago=120)
+    await set_state(runs_db, landing, "applied")
+    hanging = HangingTaskService(seconds=0.3)
+
+    # The pass has a timeout of its own; the retries must not spend all of it.
+    await asyncio.wait_for(reconcile(runs_db, merge_requests, proposals=hanging), 0.8)
+
+    assert (await row_of(runs_db, landing))["landed_at"] is not None
+    assert len(hanging.received) == 1
+
+
 async def test_an_applied_proposal_lands_its_record_at_the_accepted_commit(
     runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
 ) -> None:
@@ -519,3 +564,19 @@ async def test_landing_waits_for_gitlab(
         )
     await reconcile(runs_db, merge_requests)
     assert (await row_of(runs_db, run_id))["landed_at"] is not None
+
+
+async def test_the_reconciler_waits_for_an_apply_longer_than_the_task_service_does() -> None:
+    timeouts: list[dict[str, float]] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        timeouts.append(request.extensions["timeout"])
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(answer), base_url="http://tasks.test", timeout=10
+    ) as client:
+        assert await TaskServiceNotifier(client).notify_proposal("p-1")
+
+    [timeout] = timeouts
+    assert timeout["read"] > APPLY_SECONDS

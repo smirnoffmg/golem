@@ -110,6 +110,9 @@ FINAL_STATUS = {
 # A run is committed before its Job is created, and creating it may take two API calls of up
 # to 35 s each; a Job missing that soon is one still being made, not one that disappeared.
 LAUNCH_GRACE_SECONDS = 120
+# The most one pass spends asking the task service to apply accepted proposals again: each ask
+# may wait out a write server, and the rest of the pass must still run.
+RETRY_BUDGET_SECONDS = 60.0
 
 # What a run's own report may say about its outcome, beyond the Job's status. The report comes
 # from an untrusted Job, so only these words become label values.
@@ -210,7 +213,6 @@ async def reconcile_once(
         await _check_merge_requests(conn, check, poll_seconds)
     if notify_proposal is not None:
         await _deliver_proposal_states(conn, notify_proposal)
-        await _retry_accepted(conn, notify_proposal)
     if land is not None:
         await _land(conn, land)
     if processes is not None:
@@ -222,6 +224,9 @@ async def reconcile_once(
     if notify_process is not None:
         await deliver_views(conn, notify_process)
     await _count_pending(conn, metrics)
+    # Last and bounded: a retry waits out a write server, which may hang.
+    if notify_proposal is not None:
+        await _retry_accepted(conn, notify_proposal)
 
 
 async def _reconcile_run(
@@ -403,9 +408,20 @@ async def _deliver_proposal_states(conn: AsyncConnection, notify_proposal: Notif
 async def _retry_accepted(conn: AsyncConnection, notify_proposal: NotifyProposal) -> None:
     """An accept whose apply outlived the decision's answer is left accepted; the task service,
     told again, applies it again, idempotently per proposal (ADR 0015)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + RETRY_BUDGET_SECONDS
     for proposal_id in await due_retries(conn):
-        await notify_proposal(proposal_id)
+        left = deadline - loop.time()
+        if left <= 0:
+            return
+        # Marked first: a retry cut short by the budget waits its minute like any other.
         await mark_retried(conn, proposal_id)
+        try:
+            async with asyncio.timeout(left):
+                await notify_proposal(proposal_id)
+        except TimeoutError:
+            log.warning("the retry of proposal %s outlived this pass's budget", proposal_id)
+            return
 
 
 async def _land(conn: AsyncConnection, land: Land) -> None:
