@@ -322,3 +322,83 @@ the run-token key and verified against the same JWKS (`/internal/run-keys`):
 - Deciding on the diff Golem shows depends on `preview_page_edit` reaching Confluence; if it
   cannot, the proposal page shows the proposed body alone and the decision is refused until the
   live page can be read.
+
+## As first built
+
+The kinds the platform applies, from the Job to the decision; the write servers themselves are
+built separately.
+
+- **`golem-proposal.json`.** One JSON object: `kind` and the kind's fields, body text in files
+  under the role's `writes` directory, named by relative path.
+  - `wiki_edit`: `page_id` (digits), `title` (one line, at most 255), `version` (the page version
+    the role read, a positive integer), `body_file` (storage format, at most 200 000
+    characters).
+  - `desk_reply`: `request` (a request key, `SD-12`), `public` (required, no default: `true` the
+    customer reads it, `false` an internal note), `text_file` (at most 30 000).
+  - `tracker_issue`: `action` `create` with `project`, `issue_type`, `summary` (one line, at most
+    255) and `description_file` (at most 30 000); or `action` `comment` with `issue` and
+    `comment_file` (at most 30 000).
+
+  The payload a person decides is the same object with each file replaced by its text (`body`,
+  `text`, `description`, `comment`); a body over its limit, or empty, is refused, never cut.
+  `golem.proposal_payload` does this one way for the runtime and the reconciler.
+- **The role proposes through its tool.** An agent of a kind the platform applies gets
+  `submit_proposal` with that kind's fields as its arguments; the tool checks them as the
+  reconciler will and answers what to fix. A record run of such a kind must end with a proposal
+  (`invalid` otherwise); a goal run without one reports ([ADR 0017](0017-triggers.md)). The
+  runtime writes `golem-proposal.json` after validation, outside the role's directory.
+- **No grant check on the project or space in the Job.** No catalog field grants projects or
+  spaces, so the runtime and the reconciler check the shape only; `GOLEM_MCP_WIKI_SPACES`,
+  `GOLEM_MCP_DESK_PROJECTS` and `GOLEM_MCP_TRACKER_PROJECTS` on the write servers are the check.
+- **A run records its kind** (`runs.proposal_kind`) from the task service's pinned catalogs
+  (`GOLEM_CATALOGS_DIR`); an agent not pinned there proposes a merge request, as before.
+- **The digest** is SHA-256 of the payload's RFC 8785 form, computed without a library: the
+  payload holds only objects, arrays, strings, booleans and integers a double carries exactly,
+  and anything else is refused rather than approximated.
+- **Columns.** `proposals` gains `digest`, `commit`, `reason` (a decision's words; a failed
+  apply's cause stays in `detail`) and `landed_at`. A process reads a stage's rejection reason
+  as `coalesce(reason, detail)`.
+- **The task** gets the payload as its `proposal` artifact (id `proposal-<run id>`, one data
+  part) next to `golemProposal`.
+- **Reading and deciding.** Through the edge, answered from `golem_runs`:
+  - `GET /proposals?agent=&state=&process=&page=` → `{"proposals": [...], "next"}`, 50 a page,
+    newest first; an item is `{"id", "taskId", "agent", "kind", "state", "summary", "url",
+    "owner", "createdAt", "decidedBy", "decidedAt"}`.
+  - `GET /proposals/{id}` → the item and `payload`, `target`, `reason`, `detail`, `report`,
+    `stage` (a process stage's proposal); for a `wiki_edit` still `pending` or `failed`, also
+    `live` (`{"title", "version", "body"}`, or `null` with `liveError`), and `state` `stale` when
+    the live version moved.
+  - `POST /proposals/{id}/decision` `{"decision", "reason"}` → the proposal after the decision
+    and its apply; 400 `malformed` or `reason_required`, 404 `not_found`, 409 `already_decided`
+    or `decided_in_gitlab`.
+  - `GET /reports?agent=&page=` → `{"reports": [{"taskId", "agent", "target", "completedAt",
+    "summary"}], "next"}`, 20 a page; `GET /reports/{taskId}` → `{"taskId", "agent", "target",
+    "completedAt", "text"}`. They are read from `golem_runs` (`runs.report` of a `reported`
+    run), the system of record, rather than from `golem_tasks` as [ADR 0018](0018-board.md)
+    has it; `target` is the record's file name.
+  - The edge audits `ListProposals`, `ReadProposal`, `DecideProposal` (`id=` and `decision=`,
+    never the reason), `ListReports` and `ReadReport`, and refuses what does not parse before
+    it forwards anything.
+- **The decision is not refused when the live page cannot be read.** The apply reads the page
+  itself before writing, so an unreadable page ends the proposal `failed`, which a person may
+  accept again; the proposal page shows the proposed body with `live: null`.
+- **Applying.** The task service calls the write server's MCP endpoint (`GOLEM_WRITE_SERVERS_FILE`:
+  per group its `url` and `resource`, the token's audience) with one proposal token per call.
+  Without an entry for a group, an accepted proposal of its kind ends `failed` with the reason.
+  An apply that raises or takes over 15 s leaves the row `accepted`; the reconciler names
+  `accepted` rows decided over 60 s ago on `POST /internal/proposal-state`, at most once a minute
+  each, and the task service applies them again.
+- **The write servers' tools**, each answering JSON text:
+  - `wiki.write`: `preview_page_edit(proposal_id, payload)` → `{"title", "version", "body"}`,
+    token scope `preview`, subject the person looking; `apply_page_edit(proposal_id, payload)`.
+  - `desk.write`: `apply_reply(proposal_id, payload, decided_at)`.
+  - `tracker.write`: `apply_issue(proposal_id, payload, target)`; `apply_comment(proposal_id,
+    payload)`.
+
+  An apply answers `{"state": "applied" | "stale" | "failed", "detail"}`; a tool error is
+  `failed` with its text. The server recomputes the digest of `payload` and compares it with the
+  token's `digest`, and reads the decider from the token's `sub`.
+- **The record lands.** For an `applied` proposal the reconciler opens the run's branch as a
+  merge request (`<agent>: <target> (applied)`) and merges it with `sha` = the proposal's
+  `commit`; a 409 leaves it open for a person. A `stale` proposal's branch is deleted, a
+  `rejected` one's left. `landed_at` marks either, so each is done once.

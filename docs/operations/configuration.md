@@ -50,7 +50,7 @@ registry, rate limits, audit, forwarding to the task service ([ADR 0002](../adr/
 | `GOLEM_CARD_SIGNING_KID` | required | the card key's id, in each signature's header and in `GET /.well-known/golem-card-keys.json`; a new key gets a new id |
 | `GOLEM_TASK_SERVICE_READ_URL` | required | the task service's `internal-read` listener (`http://tasks.golem-system.svc:8001`): the orchestrator's public keys, which verify the call tokens of delegating runs (fetched like the provider's keys), and run statuses, which revoke them ([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)) |
 | `GOLEM_RUN_STATUS_TTL_SECONDS` | `10` | how long the edge caches a delegating run's status; a canceled or finished run's call token stops working within it |
-| `GOLEM_PORT` | `8000` | A2A, agent cards, the directory and the card keys |
+| `GOLEM_PORT` | `8000` | A2A, agent cards, the directory, the card keys, a process owner's resolution, and the proposal and report routes ([ADR 0015](../adr/0015-proposals.md)) |
 | `GOLEM_METRICS_PORT` | `9090` | metrics |
 | `GOLEM_RATE_CALLER_PER_MINUTE`, `GOLEM_RATE_CALLER_BURST` | `60`, `20` | per authenticated caller, every `/a2a` call and every authenticated `GET /agents`, from one bucket |
 | `GOLEM_RATE_AUTH_FAILURES_PER_MINUTE`, `GOLEM_RATE_AUTH_FAILURES_BURST` | `30`, `10` | per client address, failed authentications |

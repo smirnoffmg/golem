@@ -139,11 +139,12 @@ with and without a finding, so the evaluation measures both false alarms and mis
   serves to goal runs only and that no MCP tool may shadow. Without the call the run is
   `reported`. The runtime's report names the record (`record`), and the reconciler reads only a
   relative `.md` path without `..` from it.
-- **Only `merge_request` goal agents may propose.** A goal run that proposes another kind is
-  `invalid` until the platform applies that kind ([ADR 0015](0015-proposals.md)); otherwise it
-  would land as a merge request nobody asked for. A `merge_request` goal run writes no
-  `golem-proposal.json`: its report's outcome, `proposed` or `reported`, tells the reconciler
-  whether to open a merge request.
+- **A goal agent proposes its catalog's kind.** For `merge_request` the role calls
+  `submit_proposal(reason)` and writes no `golem-proposal.json`: its report's outcome, `proposed`
+  or `reported`, tells the reconciler whether to open a merge request. For a kind the platform
+  applies, the role calls the same tool with that kind's fields, and the runtime writes
+  `golem-proposal.json` ([ADR 0015](0015-proposals.md), as first built); without the call the run
+  reports as above.
 - **`golem_runs.runs` gains `outcome`, `record` and `report`.** The reconciler stores the report
   (cut at 20 000 characters) before it deletes the branch, so a failed delete is retried without
   reading again, and settles the run only after the delete. A branch or record already gone
