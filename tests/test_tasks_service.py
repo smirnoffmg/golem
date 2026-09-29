@@ -78,7 +78,7 @@ class FakeOrchestrator:
     async def proposal(self, proposal_id: str) -> ProposalRecord | None:
         return self.proposals.get(proposal_id)
 
-    async def accepted_proposal(self, proposal_id: str) -> None:
+    async def claim_apply(self, proposal_id: str) -> None:
         # Merge requests only here: none is ever accepted in Golem.
         return None
 

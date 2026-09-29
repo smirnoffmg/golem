@@ -77,8 +77,10 @@ def wiki_write_tools(
         """Write an accepted wiki_edit proposal as the page's next version; JSON with state
         (applied, stale or failed) and detail."""
         return json.dumps(
-            await writes.apply_page_edit(
-                confluence, deployment, spaces, proposal_id, payload, decider(ctx)
+            await writes.within_deadline(
+                writes.apply_page_edit(
+                    confluence, deployment, spaces, proposal_id, payload, decider(ctx)
+                )
             )
         )
 
@@ -90,7 +92,9 @@ def desk_write_tools(server: FastMCP, jira: httpx.AsyncClient, projects: frozens
     async def apply_reply(proposal_id: str, payload: dict[str, Any], decided_at: str) -> str:
         """Post an accepted desk_reply proposal on its request; JSON with state and detail."""
         return json.dumps(
-            await writes.apply_reply(jira, projects, proposal_id, payload, decided_at)
+            await writes.within_deadline(
+                writes.apply_reply(jira, projects, proposal_id, payload, decided_at)
+            )
         )
 
     server.add_tool(apply_reply, annotations=WRITE, structured_output=False)
@@ -103,12 +107,16 @@ def tracker_write_tools(
         """Create the issue of an accepted tracker_issue proposal; JSON with state and
         detail."""
         return json.dumps(
-            await writes.apply_issue(jira, deployment, projects, proposal_id, payload, target)
+            await writes.within_deadline(
+                writes.apply_issue(jira, deployment, projects, proposal_id, payload, target)
+            )
         )
 
     async def apply_comment(proposal_id: str, payload: dict[str, Any]) -> str:
         """Comment as an accepted tracker_issue proposal says; JSON with state and detail."""
-        return json.dumps(await writes.apply_comment(jira, projects, proposal_id, payload))
+        return json.dumps(
+            await writes.within_deadline(writes.apply_comment(jira, projects, proposal_id, payload))
+        )
 
     for tool in (apply_issue, apply_comment):
         server.add_tool(tool, annotations=WRITE, structured_output=False)

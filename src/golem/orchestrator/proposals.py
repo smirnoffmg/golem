@@ -16,12 +16,14 @@ from typing import Any
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
+from golem.catalog import REVIEWER
 from golem.proposal_payload import MERGE_REQUEST, summary_of
 from golem.tasks.ports import (
     ALREADY_DECIDED,
     DECIDED_IN_GITLAB,
     NOT_FOUND,
     REASON_REQUIRED,
+    UNNAMEABLE_DECIDER,
     Access,
     ProposalDetail,
     ProposalGate,
@@ -35,8 +37,11 @@ from golem.tasks.ports import (
 )
 
 MR_POLL_SECONDS = 300.0
-# An accepted proposal the task service did not finish applying is asked for again this late,
-# and at most this often: past the apply's own 15 s timeout, with room to spare (ADR 0015).
+# How long one apply holds an accepted proposal: longer than the task service waits for it (15 s)
+# and than a write server spends on it (WRITE_DEADLINE_SECONDS, 30 s), so a retry starts only
+# once the apply before it is over (ADR 0015).
+APPLY_LEASE_SECONDS = 60.0
+# An accepted proposal whose lease ran out is asked for again at most this often.
 RETRY_SECONDS = 60.0
 # Keeps a pass short however many merge requests are open; the rest wait for the next one.
 MAX_CHECKS_PER_PASS = 50
@@ -127,7 +132,7 @@ async def due_retries(conn: AsyncConnection) -> list[str]:
     # checked_at doubles as the time of the last retry: a merge request is never accepted.
     cursor = await conn.execute(
         "SELECT id FROM proposals WHERE state = 'accepted'"
-        " AND decided_at <= now() - make_interval(secs => %(after)s)"
+        " AND (apply_lease_until IS NULL OR apply_lease_until <= now())"
         " AND (checked_at IS NULL OR checked_at <= now() - make_interval(secs => %(after)s))"
         " ORDER BY decided_at LIMIT %(limit)s",
         {"after": RETRY_SECONDS, "limit": MAX_CHECKS_PER_PASS},
@@ -354,16 +359,23 @@ async def read_proposal(
     return _detail(row)
 
 
-async def accepted_proposal(conn: AsyncConnection, proposal_id: str) -> ProposalDetail | None:
-    """An accepted proposal, whoever decided it: what the task service applies again when the
-    reconciler says its first apply went unanswered."""
+async def claim_apply(conn: AsyncConnection, proposal_id: str) -> ProposalDetail | None:
+    """An accepted proposal no apply holds, now held by the caller: what the task service
+    applies again when the reconciler says the apply before went unanswered. None while
+    another apply holds it, or when it is no longer accepted: one apply at a time."""
     try:
         proposal_uuid = uuid.UUID(proposal_id)
     except ValueError:
         return None
-    cursor = await conn.execute(
-        SELECT_PROPOSAL + " WHERE p.id = %s AND p.state = 'accepted'", (proposal_uuid,)
+    claimed = await conn.execute(
+        "UPDATE proposals SET apply_lease_until = now() + make_interval(secs => %s)"
+        " WHERE id = %s AND state = 'accepted'"
+        " AND (apply_lease_until IS NULL OR apply_lease_until <= now())",
+        (APPLY_LEASE_SECONDS, proposal_uuid),
     )
+    if not claimed.rowcount:
+        return None
+    cursor = await conn.execute(SELECT_PROPOSAL + " WHERE p.id = %s", (proposal_uuid,))
     row = await cursor.fetchone()
     return None if row is None else _detail(row)
 
@@ -384,12 +396,17 @@ async def decide_proposal(
     conn: AsyncConnection, access: Access, proposal_id: str, decision: str, reason: str | None
 ) -> ProposalDetail | str:
     """A person's decision, one compare-and-set on the row: the proposal as it now is, or why
-    it was refused (``not_found``, ``decided_in_gitlab``, ``reason_required``,
-    ``already_decided``). Accepting only moves it to ``accepted``; applying follows."""
+    it was refused (``not_found``, ``unnameable_decider``, ``decided_in_gitlab``,
+    ``reason_required``, ``already_decided``). Accepting moves it to ``accepted`` and holds its
+    apply for the caller, who applies it next."""
     found = await read_proposal(conn, access, proposal_id)
     # A service or an agent never decides (ADR 0015); neither may learn the row exists.
     if found is None or not access.principal.startswith(PERSON):
         return NOT_FOUND
+    # The write server takes the decider from a proposal token, which names only a principal
+    # the catalog's reviewers could: anyone else would leave an accept no apply can carry out.
+    if not REVIEWER.fullmatch(access.principal):
+        return UNNAMEABLE_DECIDER
     if found.summary.kind == MERGE_REQUEST:
         return DECIDED_IN_GITLAB
     if decision == "reject" and found.stage and not reason:
@@ -397,11 +414,15 @@ async def decide_proposal(
     state = "accepted" if decision == "accept" else "rejected"
     moved = await conn.execute(
         "UPDATE proposals SET state = %s, decided_by = %s, decided_at = now(), reason = %s,"
-        " detail = NULL, checked_at = NULL WHERE id = %s AND state = ANY(%s)",
+        " detail = NULL, checked_at = NULL,"
+        " apply_lease_until = CASE WHEN %s THEN now() + make_interval(secs => %s) END"
+        " WHERE id = %s AND state = ANY(%s)",
         (
             state,
             access.principal,
             reason if state == "rejected" else None,
+            state == "accepted",
+            APPLY_LEASE_SECONDS,
             uuid.UUID(proposal_id),
             list(DECIDABLE),
         ),
@@ -424,7 +445,8 @@ async def record_apply(
     """What the write server made of an accepted proposal, or a preview that found it stale;
     False when the row had moved on already (another apply, a decision)."""
     moved = await conn.execute(
-        "UPDATE proposals SET state = %s, detail = %s WHERE id = %s AND state = ANY(%s)",
+        "UPDATE proposals SET state = %s, detail = %s, apply_lease_until = NULL"
+        " WHERE id = %s AND state = ANY(%s)",
         (state, detail, uuid.UUID(proposal_id), list(from_states)),
     )
     return bool(moved.rowcount)
@@ -443,6 +465,8 @@ async def list_reports(
     cursor = await conn.execute(
         "SELECT r.task_id, r.agent, r.record, r.proposal_settled_at, r.report, r.id FROM runs r"
         " WHERE r.outcome = 'reported' AND r.report IS NOT NULL"
+        # The report is stored before its branch is deleted; it is a report once both are done.
+        " AND r.proposal_settled_at IS NOT NULL"
         " AND (r.caller = %(principal)s OR r.agent = ANY(%(reviews)s))"
         " AND (%(agent)s::text IS NULL OR r.agent = %(agent)s)"
         " AND (%(after)s::timestamptz IS NULL"

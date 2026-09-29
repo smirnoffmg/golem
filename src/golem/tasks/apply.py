@@ -26,10 +26,17 @@ from golem.tasks.ports import Applied, LivePage, ProposalDetail
 KIND_GROUPS = WRITE_GROUPS
 RESULTS = frozenset({"applied", "stale", "failed"})
 MAX_DETAIL = 500
+# The write server's gate refused the token (401) or its scope (403): it refuses a retry the
+# same way, so the apply fails with the reason instead of staying accepted.
+REFUSING = frozenset({401, 403})
 
 
 class ApplyUnavailable(RuntimeError):
     """The write server could not be asked, or answered nothing usable: try again later."""
+
+
+class ApplyRefused(RuntimeError):
+    """The write server refused the call for good: the apply fails with this reason."""
 
 
 @dataclass(frozen=True)
@@ -82,7 +89,10 @@ class McpApplier:
         if server is None:
             return Applied("failed", f"no write server is configured for {group}")
         token = self._token(server, decided, decided.summary.decided_by or "", APPLY, group)
-        text, failed = await self._call(server, token, tool, arguments)
+        try:
+            text, failed = await self._call(server, token, tool, arguments)
+        except ApplyRefused as refused:
+            return Applied("failed", str(refused)[:MAX_DETAIL])
         if failed:
             return Applied("failed", text[:MAX_DETAIL])
         answer = _object(text)
@@ -98,7 +108,10 @@ class McpApplier:
             raise ApplyUnavailable(f"no write server is configured for {group}")
         token = self._token(server, proposal, reader, PREVIEW, group)
         arguments = {"proposal_id": proposal.summary.id, "payload": dict(proposal.payload)}
-        text, failed = await self._call(server, token, "preview_page_edit", arguments)
+        try:
+            text, failed = await self._call(server, token, "preview_page_edit", arguments)
+        except ApplyRefused as refused:
+            raise ApplyUnavailable(str(refused)) from refused
         answer = {} if failed else _object(text)
         title, version, body = answer.get("title"), answer.get("version"), answer.get("body")
         if not (isinstance(title, str) and isinstance(version, int) and isinstance(body, str)):
@@ -130,9 +143,27 @@ class McpApplier:
                 await session.initialize()
                 result = await session.call_tool(tool, arguments)
         except Exception as error:
+            status = _refusal(error)
+            if status is not None:
+                raise ApplyRefused(
+                    f"the write server at {server.url} refused the apply: {status}"
+                ) from error
             raise ApplyUnavailable(f"{server.url}: {type(error).__name__}: {error}") from error
         text = "".join(part.text for part in result.content if isinstance(part, TextContent))
         return text, bool(result.isError)
+
+
+def _refusal(error: BaseException) -> int | None:
+    """The status of a refusal for good somewhere in ``error``: the MCP client reports the HTTP
+    answer from inside its task group."""
+    if isinstance(error, httpx.HTTPStatusError):
+        code = error.response.status_code
+        return code if code in REFUSING else None
+    for inner in getattr(error, "exceptions", ()):
+        found = _refusal(inner)
+        if found is not None:
+            return found
+    return None
 
 
 def _object(text: str) -> dict[str, Any]:

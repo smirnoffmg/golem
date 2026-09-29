@@ -18,8 +18,9 @@ version conflict and Data Center none, so after any refused write the page is re
 the same rules decide.
 """
 
+import asyncio
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -36,11 +37,31 @@ COMMENTS_PAGE = 100
 # posting it twice.
 MAX_COMMENT_PAGES = 50
 
+# The most one apply may take here, all its upstream calls together. The task service leases an
+# accepted proposal to one apply for longer than this (APPLY_LEASE_SECONDS), so a retry never
+# overlaps an apply still writing: the look-then-write below is safe only under that lease.
+WRITE_DEADLINE_SECONDS = 30.0
+# How far Jira's clock may run behind the database's that decided a reply: a reply by this
+# server's account with the same text and visibility, stamped up to this long before the
+# decision, is taken for this one. Posting it again would only repeat those very words.
+CLOCK_SKEW_MS = 120_000
+
 Result = dict[str, str]
 
 
 def _result(state: str, detail: str) -> Result:
     return {"state": state, "detail": detail}
+
+
+async def within_deadline(
+    apply: Awaitable[Result], seconds: float = WRITE_DEADLINE_SECONDS
+) -> Result:
+    """``apply``'s answer, or failed once it has taken ``seconds``: cancelled, it writes no more."""
+    try:
+        async with asyncio.timeout(seconds):
+            return await apply
+    except TimeoutError:
+        return _result("failed", f"the apply did not finish in {seconds:g} s")
 
 
 def _allowed(key: str, allowed: frozenset[str], what: str) -> None:
@@ -267,7 +288,7 @@ async def apply_reply(
 ) -> Result:
     request, text, public = str(payload["request"]), str(payload["text"]), payload["public"]
     _allowed(_project_of(request), projects, "project")
-    after = _milliseconds(decided_at)
+    after = _milliseconds(decided_at) - CLOCK_SKEW_MS
     kind = "Replied on" if public else "Added an internal note on"
     if await _replied(client, request, text, public, after):
         return _result("applied", f"{kind} {request} already.")

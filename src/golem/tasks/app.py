@@ -374,9 +374,10 @@ def internal_write_app(
         proposal_id = await named_in_body(request, "proposal_id")
         if proposal_id is None:
             return JSONResponse({"error": "proposal_id is required"}, status_code=422)
-        # An accepted proposal the reconciler names is one whose apply went unanswered: apply
-        # it again, idempotently per proposal (ADR 0015).
-        accepted = await orchestrator.accepted_proposal(proposal_id)
+        # An accepted proposal the reconciler names is either just decided, its apply running
+        # under the decision's lease, or one whose apply went unanswered and whose lease ran
+        # out: only then is it applied again, idempotently per proposal (ADR 0015).
+        accepted = await orchestrator.claim_apply(proposal_id)
         if accepted is not None:
             await apply_accepted(orchestrator, applier or NoWriteServers(), accepted, metrics)
         if not await show_proposal(handler, orchestrator, proposal_id):

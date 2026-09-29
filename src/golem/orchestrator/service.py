@@ -312,9 +312,9 @@ class PostgresOrchestrator:
         async with await self._connect() as conn:
             return await proposals.decide_proposal(conn, access, proposal_id, decision, reason)
 
-    async def accepted_proposal(self, proposal_id: str) -> ProposalDetail | None:
+    async def claim_apply(self, proposal_id: str) -> ProposalDetail | None:
         async with await self._connect() as conn:
-            return await proposals.accepted_proposal(conn, proposal_id)
+            return await proposals.claim_apply(conn, proposal_id)
 
     async def proposal_gate(self, proposal_id: str) -> ProposalGate | None:
         async with await self._connect() as conn:

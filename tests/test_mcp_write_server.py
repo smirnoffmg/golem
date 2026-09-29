@@ -41,7 +41,7 @@ from golem.run_status import RunStatuses
 from golem.run_token import RunClaims, SigningKey
 from golem.run_token import issue as issue_run_token
 from golem.tasks.app import EDGE_TOKEN_HEADER, create_listeners
-from golem.tasks.apply import ApplyUnavailable, McpApplier, WriteServer
+from golem.tasks.apply import McpApplier, WriteServer
 from golem.tasks.ports import Applied, LivePage, ProposalDetail, ProposalGate, ProposalSummary
 
 KEY = SigningKey.generate(kid="run-key-1")
@@ -293,8 +293,10 @@ async def test_a_proposal_that_is_not_accepted_is_not_applied(stack: Stack) -> N
     )
 
     assert refusal(response) == (401, "the proposal is rejected")
-    with pytest.raises(ApplyUnavailable):
-        await stack.applier().apply(detail("wiki_edit", PAGE))
+    # Refused for good: asking again would be refused the same way.
+    applied = await stack.applier().apply(detail("wiki_edit", PAGE))
+    assert applied.state == "failed"
+    assert applied.detail is not None and "refused the apply: 401" in applied.detail
 
 
 def test_an_unknown_proposal_is_refused(stack: Stack) -> None:

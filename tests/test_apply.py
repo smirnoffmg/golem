@@ -241,6 +241,57 @@ async def test_an_unreachable_write_server_leaves_the_proposal_for_a_retry() -> 
         await applier.apply(detail("wiki_edit", PAGE))
 
 
+def answering(status: int, body: dict[str, Any]) -> Callable[[str], httpx.AsyncClient]:
+    def http(token: str) -> httpx.AsyncClient:
+        def answer(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(status, json=body)
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(answer))
+
+    return http
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (401, {"error": "invalid_token"}),
+        (403, {"error": "insufficient_scope", "scope": "wiki.write"}),
+    ],
+)
+async def test_a_write_server_refusing_the_token_fails_the_apply_instead_of_retrying_it(
+    status: int, body: dict[str, Any]
+) -> None:
+    # A decider the token cannot name, or an audience set wrong, is refused by the gate on
+    # every retry the same way: it ends failed with the reason, not accepted for ever.
+    applier = McpApplier(
+        servers={"wiki.write": WriteServer(url="http://write.test/mcp", resource=RESOURCE)},
+        signing_key=KEY,
+        clock=lambda: NOW,
+        http=answering(status, body),
+    )
+
+    result = await applier.apply(detail("wiki_edit", PAGE))
+
+    assert result.state == "failed"
+    assert result.detail is not None
+    assert f"refused the apply: {status}" in result.detail
+
+
+@pytest.mark.parametrize("status", [429, 502, 503])
+async def test_a_write_server_that_is_busy_or_down_leaves_the_apply_for_a_retry(
+    status: int,
+) -> None:
+    applier = McpApplier(
+        servers={"wiki.write": WriteServer(url="http://write.test/mcp", resource=RESOURCE)},
+        signing_key=KEY,
+        clock=lambda: NOW,
+        http=answering(status, {"error": "busy"}),
+    )
+
+    with pytest.raises(ApplyUnavailable):
+        await applier.apply(detail("wiki_edit", PAGE))
+
+
 async def test_a_preview_reads_the_live_page_as_the_person_looking() -> None:
     live = {"title": "Home", "version": 8, "body": "<p>Someone else's edit</p>"}
     fake = FakeWriteServer(answers={"preview_page_edit": live})

@@ -261,8 +261,12 @@ async def set_state(dsn: str, run_id: str, state: str, decided_seconds_ago: int 
     async with await connect(dsn) as conn:
         await conn.execute(
             "UPDATE proposals SET state = %s, notified_state = %s, decided_by = 'user:bob',"
-            " decided_at = now() - make_interval(secs => %s) WHERE run_id = %s",
-            (state, state, decided_seconds_ago, run_id),
+            " decided_at = now() - make_interval(secs => %s),"
+            # An accept holds its apply for a minute, as the decision route leaves it.
+            " apply_lease_until = CASE WHEN %s = 'accepted'"
+            "  THEN now() - make_interval(secs => %s) + interval '60 seconds' END"
+            " WHERE run_id = %s",
+            (state, state, decided_seconds_ago, state, decided_seconds_ago, run_id),
         )
 
 
@@ -284,6 +288,27 @@ async def test_an_accepted_proposal_left_by_a_lost_apply_is_retried_after_a_minu
     await reconcile(runs_db, merge_requests, proposals=retries)
     # Once a minute, not once a pass: the task service is asked to apply it again.
     assert retries.received == [proposal_id]
+
+
+async def test_an_accepted_proposal_whose_apply_holds_it_is_not_retried(
+    runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    run_id = await succeeded_run(runs_db)
+    pushed(gitlab, run_id)
+    await reconcile(runs_db, merge_requests)
+    retries = ProposalInbox()
+
+    # Decided long ago, but a retry claimed it a moment ago and is still applying.
+    await set_state(runs_db, run_id, "accepted", decided_seconds_ago=600)
+    async with await connect(runs_db) as conn:
+        await conn.execute(
+            "UPDATE proposals SET apply_lease_until = now() + interval '30 seconds'"
+            " WHERE run_id = %s",
+            (run_id,),
+        )
+    await reconcile(runs_db, merge_requests, proposals=retries)
+
+    assert retries.received == []
 
 
 async def test_an_applied_proposal_lands_its_record_at_the_accepted_commit(

@@ -4,11 +4,13 @@ the task service answers for a person the edge authenticated, and the reviewers 
 import uuid
 from decimal import Decimal
 
+import pytest
 from psycopg.types.json import Jsonb
 from test_reconcile import LIMITS, connect
 
 from golem.orchestrator.process_runs import _stage_run as stage_run
 from golem.orchestrator.proposals import (
+    claim_apply,
     decide_proposal,
     list_proposals,
     list_reports,
@@ -23,6 +25,7 @@ from golem.tasks.ports import (
     DECIDED_IN_GITLAB,
     NOT_FOUND,
     REASON_REQUIRED,
+    UNNAMEABLE_DECIDER,
     Access,
     ProposalDetail,
 )
@@ -254,6 +257,65 @@ async def test_an_apply_result_is_recorded_only_on_an_accepted_proposal(runs_db:
     assert found.summary.state == "applied"
 
 
+async def expire_lease(dsn: str, proposal_id: str) -> None:
+    async with await connect(dsn) as conn:
+        await conn.execute(
+            "UPDATE proposals SET apply_lease_until = now() - interval '1 second' WHERE id = %s",
+            (proposal_id,),
+        )
+
+
+async def test_accepting_holds_the_apply_so_no_one_else_claims_it(runs_db: str) -> None:
+    proposal_id = await proposal(runs_db, "m-1")
+    async with await connect(runs_db) as conn:
+        await decide_proposal(conn, ALICE, proposal_id, "accept", None)
+
+        # The decision's own apply holds the lease: a notification or a retry arriving while it
+        # runs must not start a second one.
+        assert await claim_apply(conn, proposal_id) is None
+
+    await expire_lease(runs_db, proposal_id)
+    async with await connect(runs_db) as conn:
+        first = await claim_apply(conn, proposal_id)
+        second = await claim_apply(conn, proposal_id)
+
+    assert isinstance(first, ProposalDetail)
+    assert first.summary.state == "accepted"
+    assert second is None
+
+
+async def test_a_failed_apply_accepted_again_is_held_by_the_new_accept(runs_db: str) -> None:
+    proposal_id = await proposal(runs_db, "m-1")
+    async with await connect(runs_db) as conn:
+        await decide_proposal(conn, ALICE, proposal_id, "accept", None)
+        assert await record_apply(conn, proposal_id, "failed", "Jira answered 500")
+        again = await decide_proposal(conn, ALICE, proposal_id, "accept", None)
+
+        assert isinstance(again, ProposalDetail)
+        assert await claim_apply(conn, proposal_id) is None
+        cursor = await conn.execute(
+            "SELECT apply_lease_until > now() FROM proposals WHERE id = %s", (proposal_id,)
+        )
+        assert await cursor.fetchone() == (True,)
+
+
+@pytest.mark.parametrize("principal", ["user:john doe", "user:dom:jdoe", "user:*", "user:"])
+async def test_a_person_a_proposal_token_cannot_name_does_not_decide(
+    runs_db: str, principal: str
+) -> None:
+    proposal_id = await proposal(runs_db, "m-1", owner=principal)
+
+    async with await connect(runs_db) as conn:
+        refused = await decide_proposal(
+            conn, Access(principal, frozenset({"desk"})), proposal_id, "accept", None
+        )
+        found = await read_proposal(conn, BOB_REVIEWS, proposal_id)
+
+    assert refused == UNNAMEABLE_DECIDER
+    assert isinstance(found, ProposalDetail)
+    assert found.summary.state == "pending"
+
+
 async def test_a_stale_preview_moves_a_pending_proposal_to_stale(runs_db: str) -> None:
     page = {"page_id": "123", "title": "Home", "version": 7, "body": "<p>New</p>"}
     proposal_id = await proposal(runs_db, "m-1", kind="wiki_edit", payload=page)
@@ -297,6 +359,21 @@ async def test_reviewers_read_the_reports_of_the_agents_they_review(runs_db: str
     assert one is not None
     assert one.text == "Disk grows 4% a day.\n\nNothing to act on yet."
     assert (hidden.items, not_theirs) == ((), None)
+
+
+async def test_a_report_whose_branch_is_not_deleted_yet_is_not_listed(runs_db: str) -> None:
+    settled = await reported(runs_db, "m-1")
+    unsettled = await reported(runs_db, "m-2")
+    async with await connect(runs_db) as conn:
+        # The report is stored before its branch is deleted; GitLab down, it stays unsettled.
+        await conn.execute(
+            "UPDATE runs SET proposal_settled_at = NULL FROM run_tasks t"
+            " WHERE t.run_id = runs.id AND t.task_id = %s",
+            (unsettled,),
+        )
+        page = await list_reports(conn, Access("user:bob", frozenset({"investigator"})))
+
+    assert [item.task_id for item in page.items] == [settled]
 
 
 async def test_a_stages_rejection_reason_is_what_its_process_reruns_with(runs_db: str) -> None:

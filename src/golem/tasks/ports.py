@@ -104,6 +104,8 @@ NOT_FOUND = "not_found"
 ALREADY_DECIDED = "already_decided"
 DECIDED_IN_GITLAB = "decided_in_gitlab"
 REASON_REQUIRED = "reason_required"
+# A principal no proposal token can carry (ADR 0015): refused before the row moves.
+UNNAMEABLE_DECIDER = "unnameable_decider"
 
 
 @dataclass(frozen=True)
@@ -244,7 +246,7 @@ class Orchestrator(Protocol):
         self, access: Access, proposal_id: str, decision: str, reason: str | None
     ) -> ProposalDetail | str: ...
 
-    async def accepted_proposal(self, proposal_id: str) -> ProposalDetail | None: ...
+    async def claim_apply(self, proposal_id: str) -> ProposalDetail | None: ...
 
     async def proposal_gate(self, proposal_id: str) -> ProposalGate | None: ...
 

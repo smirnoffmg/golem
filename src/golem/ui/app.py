@@ -112,6 +112,10 @@ DECISION_MESSAGES = {
     "already_decided": "Someone decided on this proposal already. Reload it.",
     "decided_in_gitlab": "A merge request is decided in GitLab: merge or close it there.",
     "agents_do_not_decide": "Only a person decides on a proposal.",
+    "unnameable_decider": (
+        "Your sign-in name has a space, a colon or a '*', which a decision cannot carry."
+        " Ask an operator to decide it."
+    ),
     "malformed": "The decision is not one the proposal takes.",
 }
 # Open: waiting for a person, being applied, or refused by the target (ADR 0015).

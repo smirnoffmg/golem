@@ -4,6 +4,7 @@ faked at their HTTP boundary, with the shapes of their REST documentation.
 
 Each apply is idempotent per proposal: asked twice, it writes once."""
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -12,11 +13,13 @@ from support.atlassian import DECIDED_MS, Confluence, Desk, Jira, body_of
 
 from golem.mcp.atlassian import Deployment, UpstreamError
 from golem.mcp.writes import (
+    CLOCK_SKEW_MS,
     apply_comment,
     apply_issue,
     apply_page_edit,
     apply_reply,
     preview_page_edit,
+    within_deadline,
 )
 
 PROPOSAL = "0c6f0d4e-6c43-4a8e-9a55-0f6c7b0f4a11"
@@ -176,11 +179,14 @@ async def test_a_reply_asked_twice_is_posted_once() -> None:
     assert len(fake.posts()) == 1
 
 
-async def test_the_same_text_from_someone_else_or_before_the_decision_is_not_this_reply() -> None:
+async def test_the_same_text_from_someone_else_or_well_before_the_decision_is_not_this_reply() -> (
+    None
+):
     fake = Desk(me={"key": "golem", "name": "golem"})
+    before = DECIDED_MS - CLOCK_SKEW_MS - 1
     fake.comments = [
         fake.comment(REPLY["text"], True, {"key": "ann", "name": "ann"}, DECIDED_MS + 1),
-        fake.comment(REPLY["text"], True, {"key": "golem", "name": "golem"}, DECIDED_MS - 1),
+        fake.comment(REPLY["text"], True, {"key": "golem", "name": "golem"}, before),
         fake.comment(REPLY["text"], False, {"key": "golem", "name": "golem"}, DECIDED_MS + 1),
     ]
 
@@ -188,6 +194,18 @@ async def test_the_same_text_from_someone_else_or_before_the_decision_is_not_thi
 
     assert result["state"] == "applied"
     assert len(fake.posts()) == 1
+
+
+async def test_a_reply_stamped_by_a_jira_clock_behind_the_database_is_still_this_reply() -> None:
+    # The apply posted it a second after the decision, Jira's clock is 3 s behind Postgres's,
+    # and the 201 was lost: asked again, the reply must be found, not posted twice.
+    fake = Desk()
+    fake.comments = [fake.comment(REPLY["text"], True, fake.me, DECIDED_MS - 2_000)]
+
+    result = await reply(fake)
+
+    assert result["state"] == "applied"
+    assert fake.posts() == []
 
 
 async def test_a_reply_whose_post_fails_and_is_not_found_fails() -> None:
@@ -305,3 +323,27 @@ async def test_a_comment_that_only_quotes_the_marker_is_not_this_one() -> None:
 
     assert result["state"] == "applied"
     assert len(fake.comments["OPS-7"]) == 2
+
+
+# The whole of one apply
+
+
+async def test_an_apply_that_outlives_its_deadline_fails_and_writes_nothing_more() -> None:
+    started = asyncio.Event()
+
+    async def hanging() -> dict[str, str]:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("never")
+
+    result = await within_deadline(hanging(), seconds=0.05)
+
+    assert started.is_set()
+    assert result == {"state": "failed", "detail": "the apply did not finish in 0.05 s"}
+
+
+async def test_an_apply_within_its_deadline_answers_as_it_did() -> None:
+    async def quick() -> dict[str, str]:
+        return {"state": "applied", "detail": "done"}
+
+    assert await within_deadline(quick(), seconds=1) == {"state": "applied", "detail": "done"}

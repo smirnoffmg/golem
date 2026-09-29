@@ -23,6 +23,7 @@ from golem.tasks.ports import (
     DECIDED_IN_GITLAB,
     NOT_FOUND,
     REASON_REQUIRED,
+    UNNAMEABLE_DECIDER,
     Access,
     Applier,
     Orchestrator,
@@ -39,6 +40,7 @@ REFUSALS = {
     ALREADY_DECIDED: 409,
     DECIDED_IN_GITLAB: 409,
     REASON_REQUIRED: 400,
+    UNNAMEABLE_DECIDER: 403,
 }
 
 # Shows a proposal's current state on the tasks of its run.

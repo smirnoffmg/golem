@@ -292,6 +292,32 @@ def test_an_apply_that_does_not_answer_leaves_the_proposal_accepted(
     assert state_of(runs_db, proposal_id) == ("accepted", None)
 
 
+def expire_lease(dsn: str, proposal_id: str) -> None:
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE proposals SET apply_lease_until = now() - interval '1 second' WHERE id = %s",
+            (proposal_id,),
+        )
+
+
+def test_a_notification_while_the_decisions_apply_holds_it_applies_nothing_more(
+    client: TestClient, runs_db: str, applier: FakeApplier
+) -> None:
+    proposal_id = proposal_for(runs_db, start(client, "desk"))
+    # The decision's apply outlived its 15 s answer and may still be writing.
+    applier.result = ApplyUnavailable("write server did not answer")
+    decide(client, proposal_id, {"decision": "accept"})
+    applier.result = Applied("applied")
+
+    # The reconciler delivers the accepted state, and a retry comes early: neither applies
+    # while the first apply's lease holds, or a reply would be posted twice.
+    response = client.post(PROPOSAL_STATE_PATH, json={"proposal_id": proposal_id})
+
+    assert response.status_code == 200
+    assert len(applier.applied) == 1
+    assert state_of(runs_db, proposal_id) == ("accepted", None)
+
+
 def test_the_reconciler_asking_again_applies_an_accepted_proposal(
     client: TestClient, runs_db: str, applier: FakeApplier
 ) -> None:
@@ -299,6 +325,7 @@ def test_the_reconciler_asking_again_applies_an_accepted_proposal(
     applier.result = ApplyUnavailable("write server unreachable")
     decide(client, proposal_id, {"decision": "accept"})
     applier.result = Applied("applied")
+    expire_lease(runs_db, proposal_id)
 
     response = client.post(PROPOSAL_STATE_PATH, json={"proposal_id": proposal_id})
 
@@ -337,6 +364,18 @@ def test_a_decision_is_refused_with_its_reason(
     response = decide(client, proposal_id, body)
 
     assert (response.status_code, response.json()) == (status, {"error": error})
+
+
+def test_a_person_no_proposal_token_can_name_is_refused_before_anything_moves(
+    client: TestClient, runs_db: str, applier: FakeApplier
+) -> None:
+    proposal_id = proposal_for(runs_db, start(client, "desk", principal="user:john doe"))
+
+    response = decide(client, proposal_id, {"decision": "accept"}, principal="user:john doe")
+
+    assert (response.status_code, response.json()) == (403, {"error": "unnameable_decider"})
+    assert state_of(runs_db, proposal_id) == ("pending", None)
+    assert applier.applied == []
 
 
 def test_nobody_else_decides(client: TestClient, runs_db: str) -> None:
