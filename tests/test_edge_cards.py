@@ -1,7 +1,7 @@
 import pytest
 from google.protobuf.json_format import MessageToDict
 
-from golem.catalog import AgentCatalog
+from golem.catalog import AgentCatalog, ProcessCatalog
 from golem.edge.cards import build_public_card
 
 BASE_URL = "https://golem.example.test"
@@ -117,3 +117,24 @@ def test_card_hides_kinds_roles_rules_write_paths_and_tools():
 def test_trailing_slash_in_base_url_is_rejected():
     with pytest.raises(ValueError, match="trailing slash"):
         build_public_card(CATALOG, base_url=f"{BASE_URL}/", oidc_discovery_url=OIDC_URL)
+
+
+def test_a_process_card_looks_like_an_agents_so_a_caller_cannot_tell_them_apart():
+    process = ProcessCatalog.model_validate(
+        {
+            "name": "corsar-feature",
+            "description": "Takes a change request from analysis to a merged implementation.",
+            "version": "0.2.0",
+            "skills": [{"id": "feature", "name": "Implement a change", "description": "d"}],
+            "stages": [{"name": "analysis", "agent": "analyst", "goal": "{input}"}],
+        }
+    )
+
+    result = build_public_card(process, base_url=BASE_URL, oidc_discovery_url=OIDC_URL)
+    [interface] = result.supported_interfaces
+    [skill] = result.skills
+
+    assert (result.name, result.version) == ("corsar-feature", "0.2.0")
+    assert interface.tenant == "corsar-feature"
+    assert skill.id == "feature"
+    assert "analyst" not in str(result)

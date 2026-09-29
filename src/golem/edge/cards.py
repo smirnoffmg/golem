@@ -9,16 +9,17 @@ from a2a.types import (
     StringList,
 )
 
-from golem.catalog import AgentCatalog, Skill
+from golem.catalog import AgentCatalog, ProcessCatalog, Skill
 
 OIDC_SCHEME = "oidc"
 PLAIN_TEXT = "text/plain"
 
 
 def build_public_card(
-    catalog: AgentCatalog, *, base_url: str, oidc_discovery_url: str
+    catalog: AgentCatalog | ProcessCatalog, *, base_url: str, oidc_discovery_url: str
 ) -> AgentCard:
-    """Only skills are published: roles, rules, write paths and tools stay internal."""
+    """Only skills are published: roles, rules, write paths, tools and a process's stages stay
+    internal, so a caller cannot tell a process from an agent (ADR 0019)."""
     if base_url.endswith("/"):
         raise ValueError(f"base_url must not have a trailing slash: {base_url!r}")
     return AgentCard(

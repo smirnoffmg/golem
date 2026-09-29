@@ -19,9 +19,9 @@ from golem.runtime.main import Outcome
 CASE_FILE = "case.yaml"
 CONTEXT_DIR = "context"
 CASE_ID = re.compile(r"[a-z0-9][a-z0-9-]*")
-EXPECTED_OUTCOMES = (Outcome.IDLE, Outcome.INVALID, Outcome.PROPOSED)
+EXPECTED_OUTCOMES = (Outcome.IDLE, Outcome.INVALID, Outcome.PROPOSED, Outcome.REPORTED)
 CASE_KEYS = frozenset({"goal", "pending", "expect"})
-EXPECT_KEYS = frozenset({"outcome", "role", "target", "checks"})
+EXPECT_KEYS = frozenset({"outcome", "role", "target", "checks", "delegates"})
 CHECK_KEYS = frozenset(
     {"sections_filled", "files_changed_under", "must_contain", "must_not_contain"}
 )
@@ -57,6 +57,8 @@ class Expectation:
     role: str | None = None
     target: str | None = None
     checks: Checks = Checks()
+    # The neighbours the role must ask; empty: none; None: routing is not checked.
+    delegates: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,11 @@ def parse_expectation(value: Any, source: str) -> Expectation:
         role=optional_string(fields, "role", source),
         target=optional_string(fields, "target", source),
         checks=parse_checks(fields.get("checks") or {}, source),
+        delegates=(
+            string_list(fields["delegates"], "delegates", source)
+            if fields.get("delegates") is not None
+            else None
+        ),
     )
 
 

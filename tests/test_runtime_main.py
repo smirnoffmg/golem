@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from golem.catalog import load_catalog
+from golem.catalog import Neighbour, load_catalog
 from golem.runtime.brief import BriefError, build_brief, linked_ids
 from golem.runtime.lead import Command
 from golem.runtime.main import (
@@ -57,6 +57,13 @@ def test_parse_settings_reads_the_job_environment():
     )
 
 
+def test_the_target_is_read_when_the_starter_named_one():
+    assert parse_settings({**ENV, "GOLEM_TARGET": "alert-0a1b2c3d4e5f"}).target == (
+        "alert-0a1b2c3d4e5f"
+    )
+    assert parse_settings(ENV).target == ""
+
+
 def test_parse_settings_defaults():
     settings = parse_settings(ENV)
 
@@ -100,6 +107,7 @@ def test_exit_codes_follow_the_outcome():
     assert codes == {
         Outcome.IDLE: 0,
         Outcome.PROPOSED: 0,
+        Outcome.REPORTED: 0,
         Outcome.INVALID: 2,
         Outcome.FAILED: 1,
     }
@@ -132,6 +140,7 @@ def test_small_report_is_kept_whole():
         "branch": None,
         "reasons": ["a", "b"],
         "summary": None,
+        "record": None,
     }
 
 
@@ -200,6 +209,28 @@ def test_brief_points_at_catalog_skills_when_present(tmp_path):
     )
 
     assert brief.skills_dir == catalog_dir / "skills"
+
+
+def test_brief_carries_the_agents_neighbours_for_the_delegation_tool(tmp_path):
+    catalog_dir = example_catalog(tmp_path)
+    context_dir = example_context(tmp_path)
+    catalog = load_catalog(catalog_dir / "agent.yaml")
+    delegating = catalog.model_copy(
+        update={"delegates": (Neighbour(agent="checker", when="A contract changes."),)}
+    )
+
+    brief = build_brief(
+        run_id="run-1",
+        goal="goal",
+        catalog=delegating,
+        catalog_dir=catalog_dir,
+        context_dir=context_dir,
+        records=read_state(context_dir).records,
+        command=Command(role="researcher", target_id="H-2"),
+    )
+
+    assert brief.delegates == (Neighbour(agent="checker", when="A contract changes."),)
+    assert brief_for(tmp_path / "plain", "researcher", "H-2").delegates == ()
 
 
 def test_missing_role_instructions_are_a_clear_error(tmp_path):
@@ -306,6 +337,7 @@ class FakeRunner:
     edits: dict[str, str] = field(default_factory=dict)
     fill_target: bool = True
     status_to: str | None = None
+    propose: bool = False
     briefs: list[Brief] = field(default_factory=list)
 
     async def run(self, brief: Brief) -> RoleResult:
@@ -319,7 +351,7 @@ class FakeRunner:
             path = brief.workspace / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
-        return RoleResult(summary=f"worked on {brief.target.id}")
+        return RoleResult(summary=f"worked on {brief.target.id}", proposed=self.propose)
 
 
 class BrokenRunner:
@@ -478,3 +510,166 @@ def test_main_tolerates_an_unwritable_termination_path(tmp_path):
 
     assert code == 1
     assert json.loads(out.getvalue())["outcome"] == "failed"
+
+
+# Goal agents (ADR 0017): no lead, a target named by the starter, an optional proposal
+
+GOAL = "mode: goal\ngoal:\n  role: researcher\n  kind: hypothesis\n"
+
+
+@pytest.fixture
+def goal_remotes(tmp_path: Path) -> Remotes:
+    return remotes_with(tmp_path, extra=GOAL)
+
+
+def remotes_with(tmp_path: Path, extra: str) -> Remotes:
+    seeds = tmp_path / "goal-seeds"
+    context_seed = Path(shutil.copytree(EXAMPLES / "context", seeds / "context"))
+    context = tmp_path / "goal-remotes" / "context.git"
+    seed_bare(EXAMPLES / "context", context, context_seed)
+    catalog_seed = Path(shutil.copytree(EXAMPLES / "discovery", seeds / "catalog"))
+    agent = catalog_seed / "agent.yaml"
+    agent.write_text(
+        agent.read_text().replace(
+            "https://git.example.com/product/discovery-context.git", str(context)
+        )
+        + extra
+    )
+    catalog = tmp_path / "goal-remotes" / "catalog.git"
+    revision = seed_bare(EXAMPLES / "discovery", catalog, catalog_seed)
+    return Remotes(catalog=catalog, context=context, revision=revision)
+
+
+def goal_settings(
+    remotes: Remotes, tmp_path: Path, target: str = "alert-0a1b2c3d4e5f", run_id: str = "run-1"
+) -> RuntimeSettings:
+    return replace(settings_for(remotes, tmp_path, run_id), target=target)
+
+
+async def test_a_goal_run_opens_its_target_record_and_reports_without_a_proposal(
+    goal_remotes, tmp_path
+):
+    runner = FakeRunner()
+
+    report = await run(goal_settings(goal_remotes, tmp_path), runner)
+
+    assert report == RunReport(
+        run_id="run-1",
+        agent="discovery",
+        outcome=Outcome.REPORTED,
+        role="researcher",
+        target_id="alert-0a1b2c3d4e5f",
+        branch="golem/alert-0a1b2c3d4e5f/run-1",
+        summary="worked on alert-0a1b2c3d4e5f",
+        record="hypotheses/alert-0a1b2c3d4e5f.md",
+    )
+    brief = runner.briefs[0]
+    assert (brief.goal_mode, brief.target.kind, brief.target.status) == (
+        True,
+        "hypothesis",
+        "proposed",
+    )
+    pushed = sh(
+        "show",
+        "golem/alert-0a1b2c3d4e5f/run-1:hypotheses/alert-0a1b2c3d4e5f.md",
+        cwd=goal_remotes.context,
+    )
+    assert pushed.startswith("---\nid: alert-0a1b2c3d4e5f\nkind: hypothesis\nstatus: proposed\n")
+    assert "Work the discovery backlog" in pushed
+    assert "## Evidence" in pushed and "## Problem" in pushed
+    assert EVIDENCE.strip() in pushed
+    # What survives of the report if the Job is gone before the reconciler reads it.
+    head = sh(
+        "log", "-1", "--format=%B", "golem/alert-0a1b2c3d4e5f/run-1", cwd=goal_remotes.context
+    )
+    assert head.rstrip().endswith("Outcome: reported\nRecord: hypotheses/alert-0a1b2c3d4e5f.md")
+
+
+async def test_a_goal_run_that_found_something_proposes(goal_remotes, tmp_path):
+    report = await run(goal_settings(goal_remotes, tmp_path), FakeRunner(propose=True))
+
+    assert (report.outcome, report.branch) == (
+        Outcome.PROPOSED,
+        "golem/alert-0a1b2c3d4e5f/run-1",
+    )
+    assert remote_golem_branches(goal_remotes.context) == ["golem/alert-0a1b2c3d4e5f/run-1"]
+    head = sh(
+        "log", "-1", "--format=%B", "golem/alert-0a1b2c3d4e5f/run-1", cwd=goal_remotes.context
+    )
+    assert head.rstrip().endswith("Outcome: proposed")
+
+
+def push_record(remotes: Remotes, tmp_path: Path, relative: str, text: str) -> None:
+    work = tmp_path / "record-work"
+    sh("clone", "--quiet", str(remotes.context), str(work), cwd=tmp_path)
+    path = work / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    sh("add", "-A", cwd=work)
+    sh(*AUTHOR, "commit", "--quiet", "-m", f"add {relative}", cwd=work)
+    sh("push", "--quiet", "origin", "HEAD:refs/heads/main", cwd=work)
+
+
+async def test_a_goal_run_works_on_an_existing_target_as_it_is(goal_remotes, tmp_path):
+    existing = (
+        "---\nid: alert-0a1b2c3d4e5f\nkind: hypothesis\nstatus: proposed\n---\n"
+        "# Seen before\n\n## Problem\n\nDisk fills up.\n\n## Evidence\n\n"
+    )
+    push_record(goal_remotes, tmp_path, "hypotheses/alert-0a1b2c3d4e5f.md", existing)
+    runner = FakeRunner()
+
+    report = await run(goal_settings(goal_remotes, tmp_path), runner)
+
+    assert report.outcome is Outcome.REPORTED
+    assert runner.briefs[0].target_text == existing
+    commits = sh(
+        "rev-list", "--count", "main..golem/alert-0a1b2c3d4e5f/run-1", cwd=goal_remotes.context
+    )
+    assert commits == "1"
+
+
+async def test_an_open_proposal_on_the_target_does_not_block_a_goal_run(goal_remotes, tmp_path):
+    push_pending(goal_remotes, tmp_path, "golem/alert-0a1b2c3d4e5f/run-0")
+    push_pending(goal_remotes, tmp_path, "golem/H-2/run-0")
+    runner = FakeRunner()
+
+    report = await run(goal_settings(goal_remotes, tmp_path), runner)
+
+    assert report.outcome is Outcome.REPORTED
+    assert runner.briefs[0].open_proposals == ("golem/alert-0a1b2c3d4e5f/run-0",)
+
+
+@pytest.mark.parametrize("target", ["", "Alert-1", "9-lives", "a" * 65, "alert_1"])
+async def test_a_missing_or_malformed_target_becomes_the_run_id(goal_remotes, tmp_path, target):
+    report = await run(goal_settings(goal_remotes, tmp_path, target=target), FakeRunner())
+
+    assert report.target_id == "run-run-1"
+    assert report.record == "hypotheses/run-run-1.md"
+
+
+async def test_a_goal_run_that_changes_nothing_is_invalid(goal_remotes, tmp_path):
+    report = await run(goal_settings(goal_remotes, tmp_path), FakeRunner(fill_target=False))
+
+    assert report.outcome is Outcome.INVALID
+    assert "the role changed no files" in report.reasons
+    assert remote_golem_branches(goal_remotes.context) == []
+
+
+async def test_a_proposal_of_a_kind_not_built_yet_is_invalid(tmp_path):
+    remotes = remotes_with(tmp_path, extra=GOAL + "proposal: tracker_issue\n")
+
+    report = await run(goal_settings(remotes, tmp_path), FakeRunner(propose=True))
+
+    assert report.outcome is Outcome.INVALID
+    assert report.reasons == (
+        "proposals of kind 'tracker_issue' are not built yet; only merge_request is",
+    )
+    assert remote_golem_branches(remotes.context) == []
+
+
+async def test_a_record_agent_ignores_a_target_and_asks_the_lead(remotes, tmp_path):
+    settings = replace(settings_for(remotes, tmp_path), target="alert-0a1b2c3d4e5f")
+
+    report = await run(settings, FakeRunner())
+
+    assert (report.outcome, report.target_id) == (Outcome.PROPOSED, "H-2")

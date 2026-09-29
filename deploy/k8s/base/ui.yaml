@@ -1,4 +1,4 @@
-# The web UI: a backend-for-frontend (ADR 0011). Browsers reach it through the ingress
+# The web UI's backend-for-frontend (ADRs 0011 and 0018): JSON for the board, no pages. Browsers reach it through the ingress
 # controller; it signs users in at the identity provider, keeps their tokens in golem_ui and
 # calls the edge with each user's own access token.
 apiVersion: v1
@@ -16,8 +16,6 @@ data:
   GOLEM_OIDC_REDIRECT_URL: https://golem-ui.example.com/callback
   # The edge's Service, not its public host: the UI calls it inside the cluster.
   GOLEM_EDGE_URL: http://edge.golem-system.svc:8000
-  # Agents the UI offers; the call registry must allow user:* (or the users) for each.
-  GOLEM_UI_AGENTS: discovery
   GOLEM_PUBLIC_BASE_URL: https://golem-ui.example.com
   # Placeholder: the addresses of the ingress controller's pods (ADR 0012). Rate limits key
   # on the client address, which behind the controller is only in X-Forwarded-For.
@@ -72,10 +70,10 @@ spec:
             limits:
               cpu: 500m
               memory: 256Mi
-          # The stylesheet is the one route that needs neither a session nor the database.
+          # Needs neither a session nor the database.
           readinessProbe:
             httpGet:
-              path: /static/golem.css
+              path: /healthz
               port: http
             periodSeconds: 5
           livenessProbe:

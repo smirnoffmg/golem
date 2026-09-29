@@ -19,10 +19,26 @@ jobs:
       - run: uv run pre-commit run --all-files --show-diff-on-failure
       - run: uv run pytest
 
-  # A second stage: the real image as a Job in k3s, and the web UI in Chromium. It runs only
-  # after the fast checks pass.
+  # The board (ADR 0018): type check, lint, unit tests and the production build.
+  board:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: board
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: board/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+
+  # A second stage: the real image as a Job in k3s, and the board's image with the real UI in
+  # Chromium. It runs only after the fast checks pass.
   e2e:
-    needs: check
+    needs: [check, board]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

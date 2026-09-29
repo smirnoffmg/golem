@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from itertools import count, islice
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from pydantic import Field
 from golem.catalog import Role
 from golem.runtime.deepagents_runner import (
     DEFAULT_MODEL_TIMEOUT_SECONDS,
+    PROPOSE_TOOL,
     DeepAgentsRunner,
     Limits,
     ModelResponseError,
@@ -182,6 +184,47 @@ async def test_no_execute_tool_since_path_permissions_hold_only_without_a_shell(
     assert "write_file" in model.bound_tools
     assert "execute" not in model.bound_tools
     assert not any("shell" in name for name in model.bound_tools)
+
+
+def goal_brief(workspace: Path, open_proposals: tuple[str, ...] = ()) -> Brief:
+    return replace(make_brief(workspace), goal_mode=True, open_proposals=open_proposals)
+
+
+async def test_a_record_run_has_no_proposal_tool_and_always_proposes(tmp_path: Path) -> None:
+    model = scripted("Done.")
+
+    result = await DeepAgentsRunner(model=model).run(make_brief(tmp_path))
+
+    assert PROPOSE_TOOL not in model.bound_tools
+    assert result.proposed is False
+
+
+async def test_a_goal_run_proposes_only_when_its_role_says_so(tmp_path: Path) -> None:
+    model = scripted(tool_call(PROPOSE_TOOL, reason="Disk usage grows 4% a day."), "Proposed.")
+
+    result = await DeepAgentsRunner(model=model).run(goal_brief(tmp_path))
+
+    assert PROPOSE_TOOL in model.bound_tools
+    assert result.proposed is True
+
+
+async def test_a_goal_run_that_found_nothing_reports(tmp_path: Path) -> None:
+    model = scripted("Nothing to act on; the spike was a deploy.")
+
+    result = await DeepAgentsRunner(model=model).run(goal_brief(tmp_path))
+
+    assert result.proposed is False
+
+
+def test_a_goal_preamble_explains_the_choice_and_names_open_proposals(tmp_path: Path) -> None:
+    text = preamble(goal_brief(tmp_path, open_proposals=("golem/H-1/run-0",)))
+
+    assert PROPOSE_TOOL in text
+    assert "golem/H-1/run-0" in text
+
+
+def test_a_record_preamble_says_nothing_of_proposing(tmp_path: Path) -> None:
+    assert PROPOSE_TOOL not in preamble(make_brief(tmp_path))
 
 
 async def test_middleware_offloads_stay_out_of_the_workspace(tmp_path: Path) -> None:

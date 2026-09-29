@@ -1,4 +1,5 @@
-"""Fixtures of the e2e suite: the Golem image in k3s, the git server and the model server."""
+"""Fixtures of the e2e suite: the Golem image in k3s, the git server and the model server; the
+board's image and a browser for the board's tests."""
 
 import time
 from collections.abc import Iterator
@@ -23,6 +24,8 @@ from e2e_cluster import (
     wait_ready,
 )
 from kubernetes.client import ApiClient, AppsV1Api, CoreV1Api
+from playwright.sync_api import Browser, sync_playwright
+from support.front import board_server
 from testcontainers.community.k3s import K3SContainer
 
 
@@ -60,3 +63,17 @@ def cluster(k3s_api_client: ApiClient, golem_image: str) -> Iterator[ApiClient]:
     wait_ready(core, apps, MODEL_SERVICE)
     yield k3s_api_client
     core.delete_namespace(NAMESPACE)
+
+
+@pytest.fixture(scope="session")
+def board_url() -> Iterator[str]:
+    with board_server() as url:
+        yield url
+
+
+@pytest.fixture(scope="session")
+def browser() -> Iterator[Browser]:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        yield browser
+        browser.close()

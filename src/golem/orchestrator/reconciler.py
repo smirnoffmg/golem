@@ -1,9 +1,12 @@
 """The reconciler process: ``python -m golem.orchestrator.reconciler``.
 
-Every interval it reconciles finished Jobs, opens merge requests for succeeded runs and
-delivers task outcomes. A failed pass, or one that runs past its timeout, is logged and the
-next one runs; SIGTERM stops the loop between passes. Its metrics are served on
-``GOLEM_METRICS_PORT``, the only port it listens on.
+Every interval it reconciles finished Jobs, opens merge requests for succeeded runs, reads the
+reports of goal runs that proposed nothing and deletes their branches (ADR 0017), delivers task
+outcomes, follows open merge requests to their proposals' state (ADR 0015), and takes every
+process a step, starting its stages through the edge (ADR 0019). A failed
+pass, or one that runs past its timeout, is logged and the next one runs; SIGTERM stops the
+loop between passes. Its metrics are served on ``GOLEM_METRICS_PORT``, the only port it
+listens on.
 """
 
 import asyncio
@@ -23,18 +26,33 @@ from golem.orchestrator.jobs import JobLauncher
 from golem.orchestrator.launchers import launcher_for
 from golem.orchestrator.merge_requests import (
     GitLabMergeRequests,
-    has_proposal,
+    check_merge_request,
+    close_merge_request,
+    closing_reason,
+    discard_branch,
     propose_merge_request,
+    pushed_branch,
+    read_report,
 )
 from golem.orchestrator.notify import TaskServiceNotifier
-from golem.orchestrator.reconcile import SucceededRun, reconcile_once
+from golem.orchestrator.process_runs import ProcessPorts, StageRefused, StageStart
+from golem.orchestrator.proposals import PendingMergeRequest, Transition
+from golem.orchestrator.reconcile import (
+    Pushed,
+    Reporter,
+    Settlement,
+    SucceededRun,
+    reconcile_once,
+)
 from golem.orchestrator.runs import apply_schema
 from golem.orchestrator.service import CONNECT_TIMEOUT_SECONDS
+from golem.orchestrator.stages import EdgeStages
 from golem.serving import listener
 from golem.settings import (
     ReconcilerSettings,
     SettingsError,
     parse_gitlab_projects,
+    parse_signing_key,
     reconciler_settings,
 )
 
@@ -86,20 +104,65 @@ def pass_for(
     notifier: TaskServiceNotifier,
     gitlab: GitLabMergeRequests,
     metrics: ReconcilerMetrics | None = None,
+    stages: EdgeStages | None = None,
 ) -> Callable[[], Awaitable[None]]:
-    async def propose(run: SucceededRun) -> str:
+    async def propose(run: SucceededRun) -> Settlement:
         return await propose_merge_request(gitlab, run)
 
-    async def proposed(run: SucceededRun) -> bool:
-        return await has_proposal(gitlab, run)
+    async def proposed(run: SucceededRun) -> Pushed | None:
+        return await pushed_branch(gitlab, run)
+
+    async def check(pending: PendingMergeRequest) -> Transition | None:
+        return await check_merge_request(gitlab, pending)
+
+    async def read(run: SucceededRun) -> str | None:
+        return await read_report(gitlab, run)
+
+    async def discard(run: SucceededRun) -> None:
+        await discard_branch(gitlab, run)
+
+    async def reason(agent: str, iid: int) -> str | None:
+        return await closing_reason(gitlab, agent, iid)
+
+    async def close(agent: str, iid: int) -> None:
+        await close_merge_request(gitlab, agent, iid)
+
+    async def start(stage: StageStart) -> str | StageRefused:
+        assert stages is not None
+        return await stages.start(stage)
+
+    processes = None if stages is None else ProcessPorts(start, reason, close)
 
     async def reconcile_pass() -> None:
         async with await AsyncConnection.connect(
             settings.runs_dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
         ) as conn:
-            await reconcile_once(conn, launcher, notifier.notify, propose, metrics, proposed)
+            await reconcile_once(
+                conn,
+                launcher,
+                notifier.notify,
+                propose,
+                metrics,
+                proposed,
+                check=check,
+                notify_proposal=notifier.notify_proposal,
+                poll_seconds=settings.mr_poll_seconds,
+                report=Reporter(read, discard),
+                processes=processes,
+                notify_process=notifier.notify_process,
+            )
 
     return reconcile_pass
+
+
+def stages_for(settings: ReconcilerSettings, edge_client: httpx.AsyncClient) -> EdgeStages | None:
+    if settings.stages is None:
+        log.warning("no GOLEM_EDGE_URL and run-token key: processes' stages are not started")
+        return None
+    key = parse_signing_key(
+        settings.stages.run_token_key_file.read_text(), settings.stages.run_token_kid
+    )
+    return EdgeStages(client=edge_client, signing_key=key)
 
 
 async def serve(settings: ReconcilerSettings) -> None:
@@ -127,6 +190,10 @@ async def serve(settings: ReconcilerSettings) -> None:
             headers={"PRIVATE-TOKEN": settings.gitlab_token},
             timeout=HTTP_TIMEOUT_SECONDS,
         ) as gitlab_client,
+        httpx.AsyncClient(
+            base_url=settings.stages.edge_url if settings.stages else "http://unused",
+            timeout=HTTP_TIMEOUT_SECONDS,
+        ) as edge_client,
     ):
         reconcile_pass = pass_for(
             settings,
@@ -134,6 +201,7 @@ async def serve(settings: ReconcilerSettings) -> None:
             TaskServiceNotifier(tasks_client),
             GitLabMergeRequests(gitlab_client, projects),
             metrics,
+            stages_for(settings, edge_client),
         )
         log.info("reconciler started: a pass every %ss", settings.interval_seconds)
         try:

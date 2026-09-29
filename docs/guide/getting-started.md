@@ -1,28 +1,29 @@
 # Getting started
 
-The fastest way to your first result: give an agent a goal in the web UI, watch its task, and
-open the merge request it proposes. You need an account at your organization's identity
+The fastest way to your first result: give an agent a goal on its board, watch the card move,
+and open the merge request it proposes. You need an account at your organization's identity
 provider that may use Golem, and the UI's address from your platform team (below,
 `https://golem-ui.internal`). No other set-up.
 
-The screenshots come from `scripts/ui_demo.py`, the real UI with an example agent; yours shows
-your agents and your tasks.
+The screenshots come from `scripts/ui_demo.py`, the real board with an example agent, and with
+`--processes` an example process; yours shows your agents or your processes and your tasks.
 
 ## 1. Sign in
 
 Open the UI's address and choose **Sign in**. You sign in at the identity provider as you do
-for other internal tools, and come back to the list of your tasks.
+for other internal tools, and come back to the board.
 
 ![The sign-in page](../images/ui/sign-in.png)
 
-The UI never shows or stores a password; it keeps your session for twelve hours at most, and
-**Sign out** ends it at once.
+The board never shows or stores a password, and your browser never holds a token: the UI's
+backend keeps your session for twelve hours at most, and **Sign out** ends it at once.
 
 ## 2. Pick an agent
 
-**Agents** lists the agents you may use, with what each one can do.
+The column on the left lists the agents you may use, with what each one does. Choose one to
+open its board; if there is only one, its board opens by itself.
 
-![The agents page](../images/ui/agents.png)
+![An agent's board](../images/ui/board.png)
 
 An agent works on one repository of records, its **context repository**: for the example
 agent `discovery`, product hypotheses and solutions. Each run does one step on one record:
@@ -32,38 +33,37 @@ that needs that step; you do not choose it.
 
 ## 3. Write a goal and start
 
-Choose **Give discovery a task** (or **New task**), pick the agent, write a goal, **Start**.
+Write the goal in **New task for discovery** at the top of the board and choose **Start**.
 
-![The new task form](../images/ui/new-task.png)
+![A goal ready to start](../images/ui/new-task.png)
 
 The goal is what the agent's role reads first: say what you want considered and where to
 look ("from the support tickets of the last quarter"). It does not pick the record: the agent
-works on the next record that needs work, which may be another one than you named. Clicking
+works on the next record that needs work, which may be another one than you named. Choosing
 **Start** twice starts one run.
 
-## 4. Watch the task
+## 4. Watch the board
 
-**My tasks** lists your tasks, newest first, fifty to a page (**Older tasks** for more).
+Each of your tasks for this agent is a card, in the column of what it needs next:
 
-![My tasks](../images/ui/tasks.png)
+| Column | Holds | What you do |
+| --- | --- | --- |
+| **Waiting for me** | tasks that need your answer | answer on the card |
+| **To review** | completed tasks whose merge request is still open | open the merge request and decide |
+| **In progress** | submitted and working tasks | wait; a run takes minutes, at most the platform's deadline (an hour by default). **Cancel** stops it |
+| **Failed** | runs that ended without a proposal, and runs that were refused; the card says why | read the reason; tell the agent's author if it is the agent's mistake, the platform team otherwise |
+| **Archive** (folded) | canceled tasks, and completed ones whose merge request was merged or closed, or that had nothing to propose | nothing; **Show older tasks** loads more |
 
-A task's page shows its state and, once it has ended, the outcome. Reload the page to see a
-change: nothing updates by itself.
+The board updates itself about every ten seconds while its tab is visible; you do not reload
+it. It shows your last hundred tasks for the agent; older ones are in the archive. Choose a
+card's goal to open the task: its state, the messages, and any result.
 
 ![A working task](../images/ui/task-working.png)
 
-| State | Means | What you do |
-| --- | --- | --- |
-| `submitted` | received, not yet admitted | wait a moment |
-| `working` | the run is going: a role is writing its proposal, then the merge request is opened | wait; a run takes minutes, at most the platform's deadline (an hour by default). **Cancel** stops it |
-| `completed` | the run ended well: the page links the merge request, or says there was nothing to do | open the merge request |
-| `failed` | the run ended without a proposal; the message says why | read the reason; tell the agent's author if it is the agent's mistake, the platform team otherwise |
-| `rejected` | the run was not started; the message says why (for example, you already have as many runs going as allowed) | wait for your other runs, then start again |
-| `canceled` | you canceled it | nothing |
-
 ## 5. Open the merge request
 
-A completed task links its merge request.
+A completed task's card links its merge request, and stays in **To review** until the merge
+request is merged or closed.
 
 ![A completed task with its merge request](../images/ui/task-completed.png)
 
@@ -77,9 +77,30 @@ needs a step already has a proposal waiting for a decision.
 
 ## 6. Accept or reject
 
-Accepting is merging the merge request; rejecting is recording the decision on the record.
-Who may do either, and how to do it so the agent does not propose the same thing again:
-[reviewing-proposals.md](reviewing-proposals.md).
+Accepting is merging the merge request; rejecting is closing it and recording the decision on
+the record. Who may do either, and how to do it so the agent does not propose the same thing
+again: [reviewing-proposals.md](reviewing-proposals.md).
+
+## A process: several agents in turn
+
+Some entries in the left column are **processes**: a fixed sequence of stages, each one an
+agent's run, set up by your platform team ([ADR 0019](../adr/0019-processes.md)). You start a
+process like an agent, with a goal; the platform runs the first stage, and each next stage
+starts once you have merged the previous stage's merge request. You see one card for the whole
+process, never the stages' own tasks.
+
+![A process's board](../images/ui/process-board.png)
+
+The card says which stage runs (**Stage 1 of 2: evidence**), and, once a stage ran again, which
+attempt it is on. It moves through the columns like a task's card: **To review** while the
+stage's merge request waits for you, **In progress** while a stage runs, **Archive** when the
+last stage is merged, **Failed** with the reason when the process gave up.
+
+To send a stage back, close its merge request **with a comment saying why**: the stage runs
+again with your comment as its brief, up to the process's limit of attempts. If you close it
+without a comment, the card goes to **Waiting for me** and asks for the reason: write it and
+choose **Rerun the stage**, or choose **End the process**. More in
+[reviewing-proposals.md](reviewing-proposals.md#a-stage-of-a-process).
 
 ## When something goes wrong
 
@@ -88,22 +109,23 @@ was proposed:
 
 ![A failed task](../images/ui/task-failed.png)
 
-A rejected run was never started; here the caller had four runs going, the limit:
+A refused run was never started; here the caller had four runs going, the limit:
 
-![A rejected task](../images/ui/task-rejected.png)
+![A refused task](../images/ui/task-rejected.png)
 
 A canceled task shows no outcome:
 
 ![A canceled task](../images/ui/task-canceled.png)
 
-Starting many tasks within a minute is limited; the page says when to try again:
+Starting many tasks within a minute is limited; the form says when to try again, and keeps
+the goal you wrote:
 
-![The rate limit page](../images/ui/error-rate-limited.png)
+![A start refused by the rate limit](../images/ui/error-rate-limited.png)
 
-The pages work on a phone:
+The board works on a phone, one column under another:
 
-![My tasks on a phone](../images/ui/tasks-narrow.png)
+![The board on a phone](../images/ui/board-narrow.png)
 
-Tasks started from Jira or Mattermost are not in **My tasks**: they belong to the channel, and
-the outcome comes back there ([channels.md](channels.md)). Programs can do everything the UI
+Tasks started from Jira or Mattermost are not on your board: they belong to the channel, and
+the outcome comes back there ([channels.md](channels.md)). Programs can do everything the board
 does over A2A with your own token ([install.md, step 10](../operations/install.md#10-first-run)).

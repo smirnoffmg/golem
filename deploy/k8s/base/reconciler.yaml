@@ -13,6 +13,11 @@ data:
   GOLEM_GITLAB_PROJECTS_FILE: /etc/golem/gitlab-projects.yaml
   GOLEM_KUBERNETES_NAMESPACE: golem-jobs
   GOLEM_KUBERNETES: in-cluster
+  # Processes' stages start through the edge's a2a port, with call tokens the reconciler signs
+  # with the run token key, the task service's (ADR 0019).
+  GOLEM_EDGE_URL: http://edge.golem-system.svc:8000
+  GOLEM_RUN_TOKEN_KEY_FILE: /var/run/golem/run-token/key.pem
+  GOLEM_RUN_TOKEN_KID: golem-1
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -74,6 +79,9 @@ spec:
             - name: config
               mountPath: /etc/golem
               readOnly: true
+            - name: run-token-key
+              mountPath: /var/run/golem/run-token
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
@@ -83,6 +91,11 @@ spec:
             items:
               - key: gitlab-projects.yaml
                 path: gitlab-projects.yaml
+        - name: run-token-key
+          secret:
+            secretName: golem-run-token-key
+            # Group-readable through fsGroup; the container user is not the file's owner.
+            defaultMode: 0440
 ---
 apiVersion: v1
 kind: Service

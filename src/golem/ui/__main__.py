@@ -36,7 +36,6 @@ def build_app(settings: UiSettings, metrics: Metrics | None = None) -> ASGIApp:
         ),
         store=SessionStore(settings.dsn, settings.session_key),
         edge=httpx.AsyncClient(base_url=settings.edge_url, timeout=OUTBOUND_TIMEOUT_SECONDS),
-        agents=settings.agents,
         public_base_url=settings.public_base_url,
         logins=Limiter(settings.login_rate),
         starts=Limiter(settings.start_rate),

@@ -129,7 +129,10 @@ Golem's; it needs the partners' agreement and the security partner's.
   well as against the chain's limits.
 - **The tool is a tool group**, `agents.delegate`, entered in the platform's MCP registry with
   the edge's A2A URL and served by the runtime; a role names it in its catalog, and the call
-  registry (`agent:<name>`) decides what it reaches.
+  registry (`agent:<name>`) decides what it reaches. Since [ADR 0019](0019-processes.md)
+  the tool offers only the neighbours the agent's catalog lists under `delegates`, and the
+  registry's `agent:` callers are derived from those lists and from processes' stages, not
+  written in the registry file.
 - **Keys at startup.** A verifier that has never loaded keys (an MCP server or the edge started
   before the task service) retries after 1 s, doubling up to its refresh interval, instead of
   refusing every token for the whole interval; an unknown key id with keys loaded stays rate

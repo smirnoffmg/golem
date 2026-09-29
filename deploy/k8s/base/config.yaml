@@ -6,11 +6,9 @@ metadata:
   name: golem-config
   namespace: golem-system
 data:
-  # The edge's call registry: callee agent to the callers allowed to call it. The adapters
-  # call as service:<their OIDC client id>.
-  # An agent delegating to another calls as agent:<its name> (ADR 0014), and must be listed by
-  # name: never "agent:*". For example, a planner that may hand work to discovery:
-  #   discovery: ["user:*", ..., "agent:planner"]
+  # The edge's call registry: callee to the people and services allowed to call it. The
+  # adapters call as service:<their OIDC client id>. Agent callers are never listed here: the
+  # edge derives them from the catalogs' delegates and process stages (ADR 0019).
   call-registry.yaml: |
     discovery: ["user:*", "service:golem-jira-adapter", "service:golem-mattermost-adapter"]
   catalogs.yaml: |

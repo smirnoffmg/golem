@@ -134,3 +134,31 @@ def test_phrases_on_a_missing_record_fail_must_contain_only():
     assert check(expect, report(), published()) == (
         "must_contain: S-1 is not a record of the result",
     )
+
+
+# Routing
+
+
+def test_the_neighbours_asked_must_be_the_ones_the_case_names_in_any_order():
+    expect = Expectation(outcome=Outcome.PROPOSED, delegates=("checker", "writer"))
+
+    assert check(expect, report(), published(), ("writer", "checker", "writer")) == ()
+
+
+def test_a_missed_or_extra_neighbour_is_a_failure():
+    expect = Expectation(outcome=Outcome.PROPOSED, delegates=("checker",))
+
+    assert check(expect, report(), published(), ()) == ("delegates: expected checker, got none",)
+    assert check(expect, report(), published(), ("checker", "writer")) == (
+        "delegates: expected checker, got checker, writer",
+    )
+
+
+def test_an_empty_list_expects_no_delegation_and_none_expects_nothing():
+    alone = Expectation(outcome=Outcome.PROPOSED, delegates=())
+    unchecked = Expectation(outcome=Outcome.PROPOSED)
+
+    assert check(alone, report(), published(), ("writer",)) == (
+        "delegates: expected none, got writer",
+    )
+    assert check(unchecked, report(), published(), ("writer",)) == ()

@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -9,10 +10,15 @@ from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import JobSpec, JobStatus
 from golem.orchestrator.reconcile import (
     LAUNCH_GRACE_SECONDS,
+    MAX_REPORT_CHARS,
+    Reporter,
+    Settlement,
     SucceededRun,
     TaskOutcome,
     outcome_detail,
     reconcile_once,
+    report_record,
+    run_outcome,
 )
 from golem.orchestrator.runs import (
     RecordedRun,
@@ -322,7 +328,7 @@ async def test_only_what_the_outbox_would_deliver_is_final(runs_db: str) -> None
         await conn.execute("UPDATE runs SET status = 'failed' WHERE id = %s", (failed,))
     inbox = Inbox()
 
-    async def cannot_propose(run: SucceededRun) -> str:
+    async def cannot_propose(run: SucceededRun) -> Settlement:
         raise RuntimeError("GitLab is down")
 
     async with await connect(runs_db) as conn:
@@ -341,3 +347,168 @@ async def test_only_what_the_outbox_would_deliver_is_final(runs_db: str) -> None
     }
     assert delivered == sorted([settled, failed])
     assert sorted(r for r, final in finals.items() if final) == delivered
+
+
+# Goal runs that found nothing to propose (ADR 0017): the report, then the branch goes
+
+
+@dataclass
+class FakeReporter:
+    """The target record at the branch head, as GitLab would serve it."""
+
+    text: str | None = "# alert-0a1b2c3d4e5f\n\nThe spike was a deploy."
+    read_runs: list[SucceededRun] = field(default_factory=list)
+    discarded: list[SucceededRun] = field(default_factory=list)
+    discard_fails: int = 0
+
+    async def read(self, run: SucceededRun) -> str | None:
+        self.read_runs.append(run)
+        return self.text
+
+    async def discard(self, run: SucceededRun) -> None:
+        if self.discard_fails:
+            self.discard_fails -= 1
+            raise RuntimeError("GitLab is down")
+        self.discarded.append(run)
+
+    def reporter(self) -> Reporter:
+        return Reporter(read=self.read, discard=self.discard)
+
+
+def reported_message(record: str = "hypotheses/alert-0a1b2c3d4e5f.md") -> str:
+    return (
+        '{"outcome": "reported", "target_id": "alert-0a1b2c3d4e5f",'
+        f' "record": "{record}", "summary": "nothing to act on"}}'
+    )
+
+
+async def never_propose(run: SucceededRun) -> Settlement:
+    raise AssertionError("a reported run has nothing to propose")
+
+
+async def reconcile_reported(dsn: str, board: StatusBoard, inbox: Inbox, fake: FakeReporter):
+    async with await connect(dsn) as conn:
+        await reconcile_once(conn, board, inbox.notify, never_propose, report=fake.reporter())
+
+
+async def test_a_reported_run_settles_with_its_report_and_no_proposal(
+    runs_db: str, board: StatusBoard, inbox: Inbox
+):
+    run_id = await new_run(runs_db, "m-1")
+    board.statuses[run_id] = JobStatus.SUCCEEDED
+    board.messages[run_id] = reported_message()
+    fake = FakeReporter()
+
+    await reconcile_reported(runs_db, board, inbox, fake)
+
+    run = SucceededRun(run_id, "discovery", record="hypotheses/alert-0a1b2c3d4e5f.md")
+    assert (fake.read_runs, fake.discarded) == ([run], [run])
+    assert inbox.received == [TaskOutcome(task_id="task-m-1", run_id=run_id)]
+    recorded_run = await recorded(runs_db, "task-m-1")
+    assert (recorded_run.status, recorded_run.final, recorded_run.proposal) == (
+        "succeeded",
+        True,
+        None,
+    )
+    assert recorded_run.report == fake.text
+    assert "reported" in (recorded_run.detail or "")
+
+
+async def test_a_report_is_read_once_though_discarding_the_branch_is_retried(
+    runs_db: str, board: StatusBoard, inbox: Inbox
+):
+    run_id = await new_run(runs_db, "m-1")
+    board.statuses[run_id] = JobStatus.SUCCEEDED
+    board.messages[run_id] = reported_message()
+    fake = FakeReporter(discard_fails=1)
+
+    await reconcile_reported(runs_db, board, inbox, fake)
+    assert inbox.received == []
+
+    await reconcile_reported(runs_db, board, inbox, fake)
+
+    assert len(fake.read_runs) == 1
+    assert len(fake.discarded) == 1
+    assert (await recorded(runs_db, "task-m-1")).report == fake.text
+
+
+async def test_a_long_report_is_cut(runs_db: str, board: StatusBoard, inbox: Inbox):
+    run_id = await new_run(runs_db, "m-1")
+    board.statuses[run_id] = JobStatus.SUCCEEDED
+    board.messages[run_id] = reported_message()
+
+    await reconcile_reported(runs_db, board, inbox, FakeReporter(text="x" * 25_000))
+
+    report = (await recorded(runs_db, "task-m-1")).report
+    assert report is not None and len(report) == MAX_REPORT_CHARS
+
+
+async def test_a_report_whose_branch_is_gone_says_so(
+    runs_db: str, board: StatusBoard, inbox: Inbox
+):
+    run_id = await new_run(runs_db, "m-1")
+    board.statuses[run_id] = JobStatus.SUCCEEDED
+    board.messages[run_id] = reported_message()
+
+    await reconcile_reported(runs_db, board, inbox, FakeReporter(text=None))
+
+    report = (await recorded(runs_db, "task-m-1")).report
+    assert report is not None and "could not be read" in report
+
+
+async def test_a_report_naming_an_unsafe_record_is_not_read(
+    runs_db: str, board: StatusBoard, inbox: Inbox
+):
+    run_id = await new_run(runs_db, "m-1")
+    board.statuses[run_id] = JobStatus.SUCCEEDED
+    board.messages[run_id] = reported_message(record="../../etc/passwd")
+    fake = FakeReporter()
+
+    await reconcile_reported(runs_db, board, inbox, fake)
+
+    assert fake.read_runs == []
+    assert len(fake.discarded) == 1
+    report = (await recorded(runs_db, "task-m-1")).report
+    assert report is not None and "could not be read" in report
+
+
+async def test_a_proposing_run_is_not_reported(runs_db: str, board: StatusBoard, inbox: Inbox):
+    run_id = await new_run(runs_db, "m-1")
+    board.statuses[run_id] = JobStatus.SUCCEEDED
+    board.messages[run_id] = '{"outcome": "proposed", "record": "hypotheses/H-2.md"}'
+    fake = FakeReporter()
+    proposed: list[SucceededRun] = []
+
+    async def propose(run: SucceededRun) -> Settlement:
+        proposed.append(run)
+        return Settlement(f"Run {run.run_id} succeeded.")
+
+    async with await connect(runs_db) as conn:
+        await reconcile_once(conn, board, inbox.notify, propose, report=fake.reporter())
+
+    assert [run.run_id for run in proposed] == [run_id]
+    assert fake.read_runs == [] and fake.discarded == []
+    assert (await recorded(runs_db, "task-m-1")).report is None
+
+
+def test_a_reported_run_is_its_own_outcome():
+    assert run_outcome(JobStatus.SUCCEEDED, reported_message()) == "reported"
+    assert run_outcome(JobStatus.FAILED, reported_message()) == "failed"
+    assert "reported" in outcome_detail("r-1", JobStatus.SUCCEEDED, reported_message())
+
+
+@pytest.mark.parametrize(
+    ("record", "safe"),
+    [
+        ("hypotheses/alert-1.md", "hypotheses/alert-1.md"),
+        ("../x.md", None),
+        ("/etc/x.md", None),
+        ("hypotheses/../../x.md", None),
+        ("hypotheses/alert-1.txt", None),
+        ("a/" * 300 + "x.md", None),
+        (None, None),
+        (42, None),
+    ],
+)
+def test_only_a_markdown_path_inside_the_repository_is_read_as_a_report(record, safe):
+    assert report_record(json.dumps({"outcome": "reported", "record": record})) == safe

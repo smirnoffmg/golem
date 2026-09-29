@@ -1,11 +1,15 @@
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from psycopg import AsyncConnection, AsyncCursor
+from psycopg.types.json import Jsonb
 
 from golem.orchestrator.admission import Limits, Load, Rejected, RunRequest, admit
+from golem.tasks.ports import ProposalView
 
 SCHEMA = Path(__file__).with_name("schema.sql")
 
@@ -13,9 +17,14 @@ SCHEMA = Path(__file__).with_name("schema.sql")
 # settled, so its tasks learn the merge request (or that there is none) rather than a bare
 # "succeeded". The outbox delivers by this rule and the task service reads by it, so a
 # notification can only ever lead to an outcome the outbox would deliver itself.
+# A run the platform withdrew (a stage of a canceled process, ADR 0019) is final as well: its task
+# hears it was canceled, since nobody canceled that task through A2A.
 FINAL_OUTCOME = (
-    "(r.status = 'failed' OR (r.status = 'succeeded' AND r.proposal_settled_at IS NOT NULL))"
+    "(r.status = 'failed' OR (r.status = 'succeeded' AND r.proposal_settled_at IS NOT NULL)"
+    " OR r.outcome = 'withdrawn')"
 )
+WITHDRAWN = "withdrawn"
+PROCESS_KIND = "process"
 
 
 @dataclass(frozen=True)
@@ -70,6 +79,10 @@ class RecordedRun:
     status: str
     detail: str | None
     final: bool
+    proposal: ProposalView | None = None
+    # A goal run that found nothing to propose: the report its task shows (ADR 0017).
+    report: str | None = None
+    withdrawn: bool = False
 
 
 async def apply_schema(conn: AsyncConnection) -> None:
@@ -130,6 +143,43 @@ async def start_run(
     return RunCreated(run_id=run_id, root_run_id=root_run_id)
 
 
+async def start_process(
+    conn: AsyncConnection, request: StartRequest, definition: Mapping[str, Any], person_input: str
+) -> RunCreated | RunReused:
+    """Record a process run at most once per (caller, message id), with its first stage to
+    start (ADR 0019). It launches no Job and takes no admission slot: its stages do, as runs
+    of the caller under it as their root."""
+    run_id = str(uuid.uuid4())
+    async with conn.transaction():
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (f"caller:{request.caller}",)
+        )
+        existing = await _find_run(conn, request.caller, request.message_id)
+        if existing is not None:
+            run_id_found, root_found, status = existing
+            await _map_task(conn, request.task_id, run_id_found)
+            return RunReused(run_id=run_id_found, root_run_id=root_found, status=status)
+        await conn.execute(
+            "INSERT INTO runs (id, root_run_id, caller, message_id, task_id, agent,"
+            " estimated_cost, kind) VALUES (%s, %s, %s, %s, %s, %s, 0, %s)",
+            (
+                run_id,
+                run_id,
+                request.caller,
+                request.message_id,
+                request.task_id,
+                request.agent,
+                PROCESS_KIND,
+            ),
+        )
+        await conn.execute(
+            "INSERT INTO process_stages (process_run_id, definition, input) VALUES (%s, %s, %s)",
+            (run_id, Jsonb(dict(definition)), person_input),
+        )
+        await _map_task(conn, request.task_id, run_id)
+    return RunCreated(run_id=run_id, root_run_id=run_id)
+
+
 async def cancel_run_of_task(conn: AsyncConnection, task_id: str) -> EndedRun | None:
     cursor = await conn.execute(
         "UPDATE runs SET status = 'canceled' FROM run_tasks"
@@ -152,15 +202,33 @@ async def run_status(conn: AsyncConnection, run_id: str) -> str | None:
 
 async def run_of_task(conn: AsyncConnection, task_id: str) -> RecordedRun | None:
     cursor = await conn.execute(
-        "SELECT r.id, r.caller, r.agent, r.status, r.detail, " + FINAL_OUTCOME + " AS final"
-        " FROM run_tasks t JOIN runs r ON r.id = t.run_id WHERE t.task_id = %s",
-        (task_id,),
+        "SELECT r.id, r.caller, r.agent, r.status, r.detail, " + FINAL_OUTCOME + " AS final,"
+        " p.id, p.kind, p.state, p.url, CASE WHEN r.outcome = 'reported' THEN r.report END,"
+        " r.outcome IS NOT DISTINCT FROM %s"
+        " FROM run_tasks t JOIN runs r ON r.id = t.run_id"
+        " LEFT JOIN proposals p ON p.run_id = r.id WHERE t.task_id = %s",
+        (WITHDRAWN, task_id),
     )
     row = await cursor.fetchone()
     if row is None:
         return None
-    run_id, caller, agent, status, detail, final = row
-    return RecordedRun(str(run_id), caller, agent, status, detail, final)
+    (run_id, caller, agent, status, detail, final) = row[:6]
+    (proposal_id, kind, state, url, report, withdrawn) = row[6:]
+    proposal = (
+        None if proposal_id is None else ProposalView(str(proposal_id), kind, state, url or "")
+    )
+    return RecordedRun(
+        str(run_id), caller, agent, status, detail, final, proposal, report, withdrawn
+    )
+
+
+async def agents_of_tasks(conn: AsyncConnection, task_ids: tuple[str, ...]) -> dict[str, str]:
+    cursor = await conn.execute(
+        "SELECT t.task_id, r.agent FROM run_tasks t JOIN runs r ON r.id = t.run_id"
+        " WHERE t.task_id = ANY(%s)",
+        (list(task_ids),),
+    )
+    return dict(await cursor.fetchall())
 
 
 async def fail_run(conn: AsyncConnection, run_id: str) -> EndedRun | None:
@@ -192,8 +260,11 @@ async def _find_run(
 async def _load(conn: AsyncConnection, caller: str, root_run_id: str) -> Load:
     cursor = await conn.execute(
         "SELECT"
-        " (SELECT count(*) FROM runs WHERE caller = %(caller)s AND status = 'running'),"
-        " (SELECT count(*) FROM runs WHERE root_run_id = %(root)s AND status = 'running'),"
+        # A process run is no Job: only runs count against the limits (ADR 0019).
+        " (SELECT count(*) FROM runs WHERE caller = %(caller)s AND status = 'running'"
+        "  AND kind = 'run'),"
+        " (SELECT count(*) FROM runs WHERE root_run_id = %(root)s AND status = 'running'"
+        "  AND kind = 'run'),"
         " (SELECT coalesce(sum(estimated_cost), 0) FROM runs WHERE root_run_id = %(root)s)",
         {"caller": caller, "root": root_run_id},
     )

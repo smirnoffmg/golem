@@ -44,7 +44,9 @@ The orchestrator issues a run token when it launches a run's Job.
   `GET /internal/run-keys`. The route is internal: the edge forwards only `/a2a`. Verification
   takes the algorithm from a fixed list, never from the token header.
 - **Audience.** `golem-mcp`, so a run token is refused by the edge and anything else that checks
-  its own audience, and no other token is accepted by the MCP servers.
+  its own audience, and no other token is accepted by the MCP servers. Since
+  [ADR 0016](0016-observability-tools.md) the audience is the canonical URI of one MCP server:
+  a run gets one token per server, delivered as `GOLEM_RUN_TOKENS`.
 - **Lifetime.** `exp` = issue time + the Job's `activeDeadlineSeconds` + 60 s of grace for clock
   skew. The token cannot outlive the run by more than a minute, however it leaks.
 - **Delivery.** The launcher creates the Job first, then a Secret `golem-run-<run id>-token`

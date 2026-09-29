@@ -13,6 +13,10 @@ images:
   - name: golem
     newName: registry.internal/golem
     newTag: "0.1.0"
+  # The board's image (board/Dockerfile), built and tagged with the same release.
+  - name: golem-board
+    newName: registry.internal/golem-board
+    newTag: "0.1.0"
 
 patches:
   - path: config.yaml

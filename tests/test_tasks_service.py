@@ -11,8 +11,23 @@ from starlette.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from golem.run_token import RunClaims, SigningKey, issue, verify
-from golem.tasks.app import EDGE_TOKEN_HEADER, OUTCOME_PATH, PushDelivery, create_listeners
-from golem.tasks.ports import Orchestrator, Refused, RunOutcome, RunStart, Started, TaskRun
+from golem.tasks.app import (
+    EDGE_TOKEN_HEADER,
+    OUTCOME_PATH,
+    PROPOSAL_STATE_PATH,
+    PushDelivery,
+    create_listeners,
+)
+from golem.tasks.ports import (
+    Orchestrator,
+    ProposalRecord,
+    ProposalView,
+    Refused,
+    RunOutcome,
+    RunStart,
+    Started,
+    TaskRun,
+)
 
 TEST_EDGE_TOKEN = "test-edge-token"
 
@@ -25,6 +40,7 @@ class FakeOrchestrator:
     started: list[RunStart] = field(default_factory=list)
     canceled: list[str] = field(default_factory=list)
     runs: dict[str, TaskRun] = field(default_factory=dict)
+    proposals: dict[str, ProposalRecord] = field(default_factory=dict)
 
     async def start(self, run: RunStart) -> Started | Refused:
         self.started.append(run)
@@ -32,9 +48,18 @@ class FakeOrchestrator:
             self.runs[run.task_id] = TaskRun(self.decision.run_id, run.caller, run.agent, None)
         return self.decision
 
-    def finish(self, task_id: str, *, succeeded: bool, detail: str) -> None:
+    def finish(
+        self,
+        task_id: str,
+        *,
+        succeeded: bool,
+        detail: str,
+        proposal: ProposalView | None = None,
+        report: str | None = None,
+    ) -> None:
         run = self.runs[task_id]
-        self.runs[task_id] = replace(run, outcome=RunOutcome(run.run_id, succeeded, detail))
+        outcome = RunOutcome(run.run_id, succeeded, detail, proposal, report)
+        self.runs[task_id] = replace(run, outcome=outcome)
 
     async def run_of_task(self, task_id: str) -> TaskRun | None:
         return self.runs.get(task_id)
@@ -44,6 +69,12 @@ class FakeOrchestrator:
 
     async def status(self, run_id: str) -> str | None:
         return None
+
+    async def proposal(self, proposal_id: str) -> ProposalRecord | None:
+        return self.proposals.get(proposal_id)
+
+    async def agents_of_tasks(self, task_ids: tuple[str, ...]) -> dict[str, str]:
+        return {t: run.agent for t, run in self.runs.items() if t in task_ids}
 
 
 def make_card() -> AgentCard:
@@ -86,7 +117,7 @@ def create_app(
     async def app(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await listeners.public(scope, receive, send)
-        elif scope["path"] == OUTCOME_PATH:
+        elif scope["path"] in (OUTCOME_PATH, PROPOSAL_STATE_PATH):
             await listeners.internal_write(scope, receive, send)
         elif scope["path"].startswith("/internal/"):
             await listeners.internal_read(scope, receive, send)
@@ -166,6 +197,45 @@ def test_admitted_run_stays_working_and_records_run_id(
             message_id="m1",
         )
     ]
+
+
+def send_with_target(client: TestClient, target: Any) -> None:
+    rpc(
+        client,
+        "SendMessage",
+        {
+            "tenant": "reviewer",
+            "message": {
+                "role": "ROLE_USER",
+                "messageId": "m1",
+                "parts": [{"text": "disk usage alert"}],
+                "metadata": {"golemTarget": target},
+            },
+        },
+    )
+
+
+def test_the_starter_names_a_goal_runs_target_in_the_message(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    send_with_target(client, "alert-0a1b2c3d4e5f")
+
+    assert orchestrator.started[0].target == "alert-0a1b2c3d4e5f"
+
+
+@pytest.mark.parametrize("target", ["../etc", "Alert-1", 42, "a" * 65])
+def test_a_malformed_target_is_dropped(
+    client: TestClient, orchestrator: FakeOrchestrator, target: Any
+) -> None:
+    send_with_target(client, target)
+
+    assert orchestrator.started[0].target == ""
+
+
+def test_a_new_task_records_the_agent_the_edge_forwarded(client: TestClient) -> None:
+    task = send(client, "fix the flaky test")
+
+    assert task["metadata"]["golemAgent"] == "reviewer"
 
 
 def test_caller_is_the_authenticated_principal(orchestrator: FakeOrchestrator) -> None:
@@ -293,7 +363,11 @@ def test_a_delegated_run_starts_with_the_chain_and_root_the_edge_forwarded(
         ("discovery", "planner"),
         "root-run",
     )
-    assert task["metadata"] == {"runId": "run-1", "chain": ["discovery", "planner"]}
+    assert task["metadata"] == {
+        "golemAgent": "reviewer",
+        "runId": "run-1",
+        "chain": ["discovery", "planner"],
+    }
 
 
 def test_a_run_started_by_a_person_has_no_chain(
@@ -351,6 +425,105 @@ def test_a_succeeded_run_completes_its_task(
     done = get_task(client, task["id"])
     assert done["status"]["state"] == "TASK_STATE_COMPLETED"
     assert "MR !42 opened" in status_text(done)
+
+
+MERGE_REQUEST = ProposalView(
+    id="p-1",
+    kind="merge_request",
+    state="pending",
+    url="https://gitlab.example.test/p/-/merge_requests/7",
+)
+
+
+def finished_with_a_proposal(client: TestClient, orchestrator: FakeOrchestrator) -> str:
+    task = send(client, "fix the flaky test")
+    orchestrator.finish(task["id"], succeeded=True, detail="MR !7", proposal=MERGE_REQUEST)
+    assert notify(client, task["id"]).status_code == 200
+    return task["id"]
+
+
+def test_a_succeeded_run_shows_its_proposal_on_the_task(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task_id = finished_with_a_proposal(client, orchestrator)
+
+    done = get_task(client, task_id)
+    assert done["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert done["metadata"]["golemProposal"] == {
+        "id": "p-1",
+        "kind": "merge_request",
+        "state": "pending",
+        "url": "https://gitlab.example.test/p/-/merge_requests/7",
+    }
+
+
+def test_a_reported_run_completes_its_task_with_the_report(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task = send(client, "disk usage alert on node-3")
+    orchestrator.finish(
+        task["id"], succeeded=True, detail="Run run-1 reported.", report="# Seen\n\nA deploy."
+    )
+
+    assert notify(client, task["id"]).status_code == 200
+
+    done = get_task(client, task["id"])
+    assert done["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert done["metadata"]["golemOutcome"] == "reported"
+    assert "golemProposal" not in done["metadata"]
+    [artifact] = done["artifacts"]
+    assert artifact["name"] == "report"
+    assert artifact["parts"] == [{"text": "# Seen\n\nA deploy."}]
+
+
+def test_a_proposal_state_change_moves_only_the_status_timestamp(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task_id = finished_with_a_proposal(client, orchestrator)
+    before = get_task(client, task_id)
+    orchestrator.proposals["p-1"] = ProposalRecord(
+        view=replace(MERGE_REQUEST, state="applied"),
+        caller="anonymous",
+        agent="reviewer",
+        task_ids=(task_id,),
+    )
+
+    response = client.post(PROPOSAL_STATE_PATH, json={"proposal_id": "p-1"})
+
+    after = get_task(client, task_id)
+    assert response.status_code == 200
+    assert after["metadata"]["golemProposal"]["state"] == "applied"
+    assert after["metadata"]["runId"] == "run-1"
+    # The board's delta reads by status timestamp, so a proposal's change must move it; the
+    # state and the message stay what the run's outcome made them.
+    assert after["status"]["timestamp"] > before["status"]["timestamp"]
+    assert {k: v for k, v in after["status"].items() if k != "timestamp"} == {
+        k: v for k, v in before["status"].items() if k != "timestamp"
+    }
+
+
+def test_a_state_change_that_changes_nothing_keeps_the_timestamp(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task_id = finished_with_a_proposal(client, orchestrator)
+    client.post(PROPOSAL_STATE_PATH, json={"proposal_id": "p-1"})
+    before = get_task(client, task_id)
+
+    client.post(PROPOSAL_STATE_PATH, json={"proposal_id": "p-1"})
+
+    assert get_task(client, task_id)["status"] == before["status"]
+
+
+def test_a_state_change_of_an_unknown_proposal_is_not_found(client: TestClient) -> None:
+    response = client.post(PROPOSAL_STATE_PATH, json={"proposal_id": "p-404"})
+
+    assert response.status_code == 404
+
+
+def test_a_state_change_without_a_proposal_id_is_refused(client: TestClient) -> None:
+    response = client.post(PROPOSAL_STATE_PATH, json={"state": "applied"})
+
+    assert response.status_code == 422
 
 
 def test_a_failed_run_fails_its_task(client: TestClient, orchestrator: FakeOrchestrator) -> None:

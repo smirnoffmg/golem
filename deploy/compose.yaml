@@ -74,13 +74,14 @@ services:
 
   tasks:
     <<: *app
-    # A throwaway run token key per start: nothing outside compose verifies these tokens.
+    # A throwaway run token key, made once per volume: nothing outside compose verifies these
+    # tokens. The reconciler signs processes' call tokens with it too.
     command:
       - sh
       - -c
       - >-
-        python -c "from golem.run_token import SigningKey;
-        print(SigningKey.generate('dev').private_pem)" > /tmp/run-token-key.pem
+        { [ -s /run/golem/run-token-key.pem ] || python -c "from golem.run_token import SigningKey;
+        print(SigningKey.generate('dev').private_pem)" > /run/golem/run-token-key.pem; }
         && exec python -m golem.tasks
     environment:
       GOLEM_RUNS_DSN: &runs-dsn host=postgres dbname=golem_runs user=golem_runs password=dev-only-golem-runs
@@ -97,12 +98,15 @@ services:
       GOLEM_JOB_MEMORY: 1Gi
       GOLEM_CATALOGS_FILE: /etc/golem/catalogs.yaml
       GOLEM_AGENT_TOOLS_FILE: /etc/golem/agent-tools.yaml
-      GOLEM_RUN_TOKEN_KEY_FILE: /tmp/run-token-key.pem
-      GOLEM_RUN_TOKEN_KID: dev
+      GOLEM_RUN_TOKEN_KEY_FILE: &run-token-key /run/golem/run-token-key.pem
+      GOLEM_RUN_TOKEN_KID: &run-token-kid dev
       GOLEM_KUBERNETES_NAMESPACE: golem-jobs
       GOLEM_KUBERNETES: none
       GOLEM_PUBLIC_BASE_URL: http://127.0.0.1:${GOLEM_EDGE_PORT:-8480}
       GOLEM_EDGE_TOKEN: *edge-token
+      GOLEM_CATALOGS_DIR: /app/examples
+    volumes:
+      - run-token:/run/golem
     configs:
       - source: catalogs
         target: /etc/golem/catalogs.yaml
@@ -114,7 +118,13 @@ services:
 
   reconciler:
     <<: *app
-    command: ["python", "-m", "golem.orchestrator.reconciler"]
+    # The task service makes the run token key; wait for it rather than crash-loop.
+    command:
+      - sh
+      - -c
+      - >-
+        until [ -s /run/golem/run-token-key.pem ]; do sleep 1; done;
+        exec python -m golem.orchestrator.reconciler
     environment:
       GOLEM_RUNS_DSN: *runs-dsn
       GOLEM_RECONCILE_INTERVAL_SECONDS: "5"
@@ -125,12 +135,19 @@ services:
       GOLEM_GITLAB_PROJECTS_FILE: /etc/golem/projects.yaml
       GOLEM_KUBERNETES_NAMESPACE: golem-jobs
       GOLEM_KUBERNETES: none
+      GOLEM_EDGE_URL: http://edge:8000
+      GOLEM_RUN_TOKEN_KEY_FILE: *run-token-key
+      GOLEM_RUN_TOKEN_KID: *run-token-kid
+    volumes:
+      - run-token:/run/golem:ro
     configs:
       - source: projects
         target: /etc/golem/projects.yaml
     depends_on:
       postgres:
         condition: service_healthy
+      tasks:
+        condition: service_started
 
 configs:
   registry:
@@ -150,3 +167,4 @@ configs:
 
 volumes:
   pgdata:
+  run-token:

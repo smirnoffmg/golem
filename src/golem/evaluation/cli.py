@@ -12,10 +12,12 @@ import json
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
 from golem.evaluation.cases import CaseError, load_cases
+from golem.evaluation.delegations import DelegationRecorder
 from golem.evaluation.gate import BaselineError, judge, parse_baseline
 from golem.evaluation.report import ReportError, baseline_of, format_table, report_data
 from golem.evaluation.run import CATALOG_FILE, run_cases
@@ -25,14 +27,19 @@ GATEWAY_SETTINGS = ("GOLEM_MODEL_GATEWAY_URL", "GOLEM_MODEL_KEY", "GOLEM_MODEL")
 DEFAULT_THRESHOLD = 0.8
 PASSED, FAILED, USAGE = 0, 1, 2
 
-RunnerFactory = Callable[[Mapping[str, str]], RoleRunner]
+# Stands in for the run's call token: the recorder is the edge, and it checks no token.
+EVALUATION_CALL_TOKEN = "evaluation"
+
+RunnerFactory = Callable[[Mapping[str, str], DelegationRecorder], RoleRunner]
 
 
 class ConfigError(ValueError):
     pass
 
 
-def deepagents_runner(environ: Mapping[str, str]) -> RoleRunner:
+def deepagents_runner(
+    environ: Mapping[str, str], delegations: DelegationRecorder | None = None
+) -> RoleRunner:
     missing = [name for name in GATEWAY_SETTINGS if not environ.get(name, "").strip()]
     if missing:
         raise ConfigError(f"missing model gateway settings: {', '.join(missing)}")
@@ -41,7 +48,13 @@ def deepagents_runner(environ: Mapping[str, str]) -> RoleRunner:
     from golem.runtime.tools import toolbox_from_env
 
     # The same tools as in production: a role that names tools fails closed without them.
-    return DeepAgentsRunner(model=gateway_model(environ), toolbox=toolbox_from_env(environ))
+    # Delegation alone goes to the recorder, so a case checks routing without starting runs.
+    toolbox = replace(
+        toolbox_from_env(environ),
+        call_token=EVALUATION_CALL_TOKEN,
+        edge_transport=(delegations or DelegationRecorder()).transport,
+    )
+    return DeepAgentsRunner(model=gateway_model(environ), toolbox=toolbox)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -93,9 +106,12 @@ def evaluate(
         raise ConfigError(f"{args.catalog / CATALOG_FILE}: missing: --catalog is not a catalog")
     cases = load_cases(args.cases)
     baseline = read_baseline(args.baseline, err)
-    runner = runner_factory(environ)
+    delegations = DelegationRecorder()
+    runner = runner_factory(environ, delegations)
     with tempfile.TemporaryDirectory(prefix="golem-evaluation-") as workdir:
-        results = asyncio.run(run_cases(cases, args.catalog, runner, Path(workdir)))
+        results = asyncio.run(
+            run_cases(cases, args.catalog, runner, Path(workdir), delegations=delegations)
+        )
     verdict = judge({r.case_id: r.passed for r in results}, args.threshold, baseline)
     print(format_table(results, verdict), file=out)
     if args.report:

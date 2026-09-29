@@ -21,13 +21,27 @@ class Published:
     records: Mapping[str, str]
 
 
-def check(expect: Expectation, report: RunReport, result: Published) -> Failures:
+def check(
+    expect: Expectation, report: RunReport, result: Published, delegated: tuple[str, ...] = ()
+) -> Failures:
     return (
         *compare("outcome", expect.outcome.value, report.outcome.value),
         *compare("role", expect.role, report.role),
         *compare("target", expect.target, report.target_id),
         *apply_checks(expect.checks, result),
+        *compare_delegates(expect.delegates, delegated),
     )
+
+
+def compare_delegates(expected: tuple[str, ...] | None, delegated: tuple[str, ...]) -> Failures:
+    # Which neighbours, not how often or in which order: a retried call is the same child.
+    if expected is None or set(expected) == set(delegated):
+        return ()
+    return (f"delegates: expected {listed(expected)}, got {listed(delegated)}",)
+
+
+def listed(agents: tuple[str, ...]) -> str:
+    return ", ".join(sorted(set(agents))) or "none"
 
 
 def compare(name: str, expected: str | None, actual: str | None) -> Failures:

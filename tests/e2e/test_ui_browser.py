@@ -1,31 +1,58 @@
-"""The web UI in a real browser: headless Chromium against the demo stack (tests/support/demo.py),
-the real UI, edge, task service and orchestrator on localhost ports.
+"""The board in a real browser: headless Chromium against the demo stack (tests/support/demo.py),
+the board's own nginx image and the real backend-for-frontend, edge, task service and
+orchestrator behind one front that routes like the ingress (ADR 0018).
 
-What only a browser shows: whether the Content-Security-Policy blocks anything the pages need,
-whether the stylesheet applies, and whether the pages fit a phone screen.
+What only a browser shows: whether the Content-Security-Policy blocks anything the board needs,
+whether the stylesheet applies, whether polling moves a card without a reload, and whether the
+pages fit a phone screen.
 """
 
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
+import httpx
 import pytest
-from playwright.sync_api import Browser, BrowserContext, Page, Response, sync_playwright
-from support.demo import AGENT, Demo, databases_of, run_count, running, seed
+from playwright.sync_api import (
+    Browser,
+    BrowserContext,
+    ConsoleMessage,
+    Page,
+    Response,
+    expect,
+)
+from support.demo import (
+    AGENT,
+    MERGE_REQUEST_URL,
+    USER,
+    Demo,
+    databases_of,
+    in_own_loop,
+    run_count,
+    running,
+    seed,
+)
 from testcontainers.community.postgres import PostgresContainer
+
+from golem.ui.edge import rpc
 
 pytestmark = pytest.mark.e2e
 
 TIMEOUT_MS = 10_000
-# golem.css gives the header this background; the browser default is transparent.
-HEADER_BACKGROUND = "rgb(29, 35, 41)"
+# The board polls every 10 s; a card must have moved by the poll after next.
+POLL_TIMEOUT_MS = 25_000
+BOARD = f"/agents/{AGENT}"
+# styles.css gives the top bar this background; the browser default is transparent.
+TOPBAR_BACKGROUND = "rgb(35, 64, 95)"
 SECURITY_HEADERS = {
     "x-content-type-options": "nosniff",
     "referrer-policy": "same-origin",
     "cross-origin-opener-policy": "same-origin",
-    "cache-control": "no-store",
 }
-CSP_PREFIX = "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
+CSP = (
+    "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; "
+    "object-src 'none'"
+)
 # Reported through a binding, which the page's CSP cannot block.
 REPORT_CSP_VIOLATIONS = """
 document.addEventListener('securitypolicyviolation', (event) => {
@@ -46,29 +73,28 @@ class Watched:
 
     def page(self) -> Page:
         page = self.context.new_page()
-        page.on("console", lambda m: m.type == "error" and self.console_errors.append(m.text))
+        page.on("console", self._console)
         page.on("pageerror", lambda error: self.page_errors.append(str(error)))
         page.on("response", lambda response: self.responses.append(response))
         return page
 
+    def _console(self, message: ConsoleMessage) -> None:
+        # Signed out, the board asks for the session and gets the 401 that says so; Chromium
+        # logs every 4xx resource as an error.
+        signed_out = message.location.get("url", "").endswith("/api/session")
+        if message.type == "error" and not signed_out:
+            self.console_errors.append(message.text)
+
 
 @pytest.fixture(scope="module")
-def demo(postgres: PostgresContainer) -> Iterator[Demo]:
-    with running(databases_of(postgres)) as demo:
+def demo(postgres: PostgresContainer, board_url: str) -> Iterator[Demo]:
+    with running(databases_of(postgres), board_url) as demo:
         yield demo
 
 
 @pytest.fixture(scope="module")
 def tasks(demo: Demo) -> dict[str, str]:
     return seed(demo)
-
-
-@pytest.fixture(scope="module")
-def browser() -> Iterator[Browser]:
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
-        yield browser
-        browser.close()
 
 
 def watched(browser: Browser, demo: Demo, **options: object) -> Watched:
@@ -80,48 +106,48 @@ def watched(browser: Browser, demo: Demo, **options: object) -> Watched:
     return result
 
 
-def sign_in(page: Page, demo: Demo) -> None:
+def sign_in(page: Page, demo: Demo, board: str = BOARD) -> None:
     page.goto("/")
     page.get_by_role("link", name="Sign in").click()
-    page.wait_for_url(f"{demo.ui_url}/tasks")
+    # One entry to choose from: the agent, or with a process pinned only the process.
+    page.wait_for_url(f"{demo.ui_url}/")
+    expect(page.get_by_role("navigation", name="Agents").locator(".rail-link")).to_have_count(1)
+    page.goto(board)
+    expect(page.get_by_role("heading", name=board.rsplit("/", 1)[-1], level=1)).to_be_visible()
+
+
+def column(page: Page, title: str):
+    return page.get_by_role("region", name=re.compile(rf"^{re.escape(title)}"))
 
 
 @dataclass
 class Walk:
     watched: Watched
     pages: list[str]
-    header_backgrounds: dict[str, str]
-    link_statuses: dict[str, int]
+    topbar_backgrounds: dict[str, str]
 
 
 @pytest.fixture(scope="module")
 def walk(browser: Browser, demo: Demo, tasks: dict[str, str]) -> Iterator[Walk]:
-    """alice signs in and opens every page, following every link on them."""
+    """alice signs in and opens the board and every seeded task."""
     watch = watched(browser, demo)
     page = watch.page()
     page.goto("/")
-    backgrounds = {"/": header_background(page)}
-    links = hrefs(page)
+    expect(page.get_by_role("link", name="Sign in")).to_be_visible()
+    backgrounds = {"/": topbar_background(page)}
     sign_in(page, demo)
-    paths = ["/agents", "/tasks/new", "/tasks", *tasks.values()]
+    paths = [BOARD, *tasks.values()]
     for path in paths:
         page.goto(path)
-        backgrounds[path] = header_background(page)
-        links |= hrefs(page)
-    internal = sorted(link for link in links if link.startswith("/"))
-    statuses = {link: watch.context.request.get(link).status for link in internal}
-    yield Walk(watch, ["/", *paths], backgrounds, statuses)
+        expect(page.get_by_role("heading", level=1)).to_be_visible()
+        expect(page.get_by_text("This page does not exist.")).to_have_count(0)
+        backgrounds[path] = topbar_background(page)
+    yield Walk(watch, ["/", *paths], backgrounds)
     watch.context.close()
 
 
-def header_background(page: Page) -> str:
-    return page.evaluate("getComputedStyle(document.querySelector('header')).backgroundColor")
-
-
-def hrefs(page: Page) -> set[str]:
-    return set(
-        page.eval_on_selector_all("a[href]", "links => links.map(a => a.getAttribute('href'))")
-    )
+def topbar_background(page: Page) -> str:
+    return page.evaluate("getComputedStyle(document.querySelector('.topbar')).backgroundColor")
 
 
 def test_pages_log_no_errors(walk: Walk) -> None:
@@ -129,7 +155,7 @@ def test_pages_log_no_errors(walk: Walk) -> None:
     assert walk.watched.page_errors == []
 
 
-def test_the_content_security_policy_blocks_nothing_the_pages_use(walk: Walk) -> None:
+def test_the_content_security_policy_blocks_nothing_the_board_uses(walk: Walk) -> None:
     assert walk.watched.csp_violations == []
 
 
@@ -149,27 +175,55 @@ def test_a_violation_would_be_seen(browser: Browser, demo: Demo) -> None:
 
 
 def test_the_stylesheet_applies_on_every_page(walk: Walk) -> None:
-    assert walk.header_backgrounds == dict.fromkeys(walk.pages, HEADER_BACKGROUND)
+    assert walk.topbar_backgrounds == dict.fromkeys(walk.pages, TOPBAR_BACKGROUND)
 
 
-def test_every_response_carries_the_security_headers(walk: Walk, demo: Demo) -> None:
+def test_both_containers_send_the_security_headers(walk: Walk, demo: Demo) -> None:
     ours = [r for r in walk.watched.responses if r.url.startswith(demo.ui_url)]
     kinds = {r.request.resource_type for r in ours}
-    assert {"document", "stylesheet"} <= kinds
+    assert {"document", "script", "stylesheet", "fetch"} <= kinds
 
     for response in ours:
         headers = response.all_headers()
-        assert headers["content-security-policy"].startswith(CSP_PREFIX), response.url
-        assert "object-src 'none'" in headers["content-security-policy"], response.url
+        assert headers["content-security-policy"] == CSP, response.url
         for name, value in SECURITY_HEADERS.items():
             assert headers.get(name) == value, (response.url, name)
 
 
-def test_every_link_on_the_pages_leads_somewhere(walk: Walk) -> None:
-    assert {"/", "/agents", "/tasks", "/tasks/new", f"/tasks/new?agent={AGENT}"} <= set(
-        walk.link_statuses
+def test_caching_follows_what_each_answer_is(walk: Walk, demo: Demo) -> None:
+    ours = [r for r in walk.watched.responses if r.url.startswith(demo.ui_url) and r.ok]
+
+    for response in ours:
+        path = response.url.removeprefix(demo.ui_url)
+        cache = response.all_headers().get("cache-control")
+        if path.startswith("/api/"):
+            assert cache == "no-store", path
+        elif path.startswith("/assets/"):
+            assert cache == "public, max-age=31536000, immutable", path
+        elif response.request.resource_type == "document":
+            assert cache == "no-cache", path
+
+
+def test_every_seeded_task_is_in_its_column(
+    browser: Browser, demo: Demo, tasks: dict[str, str]
+) -> None:
+    watch = watched(browser, demo)
+    page = watch.page()
+    sign_in(page, demo)
+
+    expect(column(page, "In progress").locator(".card")).to_have_count(1)
+    expect(column(page, "To review").locator(".card")).to_have_count(1)
+    expect(column(page, "Failed").locator(".card")).to_have_count(2)
+    expect(column(page, "Waiting for me").locator(".card")).to_have_count(0)
+    review = column(page, "To review")
+    expect(review.get_by_role("link", name="Merge request")).to_have_attribute(
+        "href", MERGE_REQUEST_URL
     )
-    assert {link: status for link, status in walk.link_statuses.items() if status != 200} == {}
+    expect(column(page, "Failed")).to_contain_text("status changes are human decisions")
+    page.locator(".archive summary").click()
+    expect(page.locator(".archive .card")).to_have_count(1)
+    assert watch.console_errors == watch.csp_violations == []
+    watch.context.close()
 
 
 def test_the_form_starts_exactly_one_run_and_shows_the_goal_as_text(
@@ -181,18 +235,48 @@ def test_the_form_starts_exactly_one_run_and_shows_the_goal_as_text(
     runs_before, launched_before = run_count(demo), len(demo.launcher.launched)
     goal = "Check <b>H-4</b> & report"
 
-    page.goto("/tasks/new")
-    page.get_by_label("Goal").fill(goal)
+    page.get_by_label(f"New task for {AGENT}").fill(goal)
     page.get_by_role("button", name="Start").click()
-    page.wait_for_url(re.compile(rf"/tasks/{AGENT}/[0-9a-f-]+$"))
 
+    card = column(page, "In progress").locator(".card", has_text="Check <b>H-4</b> & report")
+    expect(card).to_have_count(1)
     assert run_count(demo) == runs_before + 1
     assert len(demo.launcher.launched) == launched_before + 1
-    assert page.locator("dd.state").inner_text() == "working"
-    assert goal in page.locator("main").inner_text()
     assert page.locator("main b").count() == 0
     assert watch.console_errors == watch.csp_violations == []
     watch.context.close()
+
+
+def test_a_card_moves_when_its_task_changes_elsewhere(
+    browser: Browser, demo: Demo, tasks: dict[str, str]
+) -> None:
+    watch = watched(browser, demo)
+    page = watch.page()
+    sign_in(page, demo)
+    goal = "Moved by a poll, not by a reload."
+    page.get_by_label(f"New task for {AGENT}").fill(goal)
+    page.get_by_role("button", name="Start").click()
+    card = page.locator(".card", has_text=goal)
+    expect(column(page, "In progress").locator(".card", has_text=goal)).to_have_count(1)
+    task_id = card.get_by_role("link").get_attribute("href").rsplit("/", 1)[-1]  # type: ignore[union-attr]
+
+    cancel_elsewhere(demo, task_id)
+
+    page.locator(".archive summary").click()
+    expect(page.locator(".archive .card", has_text=goal)).to_have_count(1, timeout=POLL_TIMEOUT_MS)
+    expect(column(page, "In progress").locator(".card", has_text=goal)).to_have_count(0)
+    watch.context.close()
+
+
+def cancel_elsewhere(demo: Demo, task_id: str) -> None:
+    """Another client of the edge, with alice's token, cancels the task."""
+
+    async def cancel() -> None:
+        async with httpx.AsyncClient(base_url=demo.edge_url, timeout=10) as edge:
+            token = demo.idp.access_token(USER)
+            await rpc(edge, token, "CancelTask", {"tenant": AGENT, "id": task_id})
+
+    in_own_loop(cancel())
 
 
 def test_signing_out_returns_to_the_landing_page(browser: Browser, demo: Demo) -> None:
@@ -203,20 +287,19 @@ def test_signing_out_returns_to_the_landing_page(browser: Browser, demo: Demo) -
     page.get_by_role("button", name="Sign out").click()
     page.wait_for_url(f"{demo.ui_url}/")
 
-    assert page.get_by_role("link", name="Sign in").is_visible()
+    expect(page.get_by_role("link", name="Sign in")).to_be_visible()
     assert [c["name"] for c in watch.context.cookies()] == []
     watch.context.close()
 
 
-def test_the_task_list_fits_a_phone_screen(
-    browser: Browser, demo: Demo, tasks: dict[str, str]
-) -> None:
+def test_the_board_fits_a_phone_screen(browser: Browser, demo: Demo, tasks: dict[str, str]) -> None:
     watch = watched(browser, demo, viewport={"width": 390, "height": 844})
     page = watch.page()
     sign_in(page, demo)
 
-    for path in ("/tasks", tasks["completed"], "/tasks/new", "/agents"):
+    for path in (BOARD, tasks["completed"], tasks["failed"], "/"):
         page.goto(path)
+        expect(page.locator(".topbar")).to_be_visible()
         overflow = page.evaluate("document.documentElement.scrollWidth - window.innerWidth")
         assert overflow <= 0, path
     watch.context.close()

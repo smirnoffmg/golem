@@ -20,6 +20,7 @@ from golem.metrics import DEFAULT_METRICS_PORT
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef
 from golem.orchestrator.merge_requests import GitLabProject
+from golem.orchestrator.proposals import MR_POLL_SECONDS
 from golem.orchestrator.service import JobTemplate
 from golem.ratelimit import (
     AUTH_FAILURE_RATE,
@@ -108,6 +109,21 @@ class TaskServiceSettings:
     push_config_key: str | None = field(default=None, repr=False)
     # Scraped from the monitoring namespace only; no caller of the service reaches it (ADR 0013).
     metrics_port: int = DEFAULT_METRICS_PORT
+    # The pinned catalogs the processes come from (ADR 0019), as the edge's; None: no processes.
+    catalogs_dir: Path | None = None
+
+
+@dataclass(frozen=True)
+class StageSettings:
+    """How the reconciler starts processes' stages (ADR 0019): through the edge, with call
+    tokens signed by the orchestrator's run-token key."""
+
+    edge_url: str
+    run_token_key_file: Path
+    run_token_kid: str
+
+
+PROCESS_STAGE_VARIABLES = ("GOLEM_EDGE_URL", "GOLEM_RUN_TOKEN_KEY_FILE", "GOLEM_RUN_TOKEN_KID")
 
 
 @dataclass(frozen=True)
@@ -121,6 +137,9 @@ class ReconcilerSettings:
     namespace: str
     kubernetes: Kubernetes
     metrics_port: int = DEFAULT_METRICS_PORT
+    mr_poll_seconds: float = MR_POLL_SECONDS
+    # None: processes are not run, their stages never start.
+    stages: StageSettings | None = None
 
 
 def edge_settings(env: Env) -> EdgeSettings:
@@ -283,6 +302,7 @@ def task_service_settings(env: Env) -> TaskServiceSettings:
         push_allowed_prefixes=_push_prefixes(env),
         push_config_key=_push_config_key(env),
         metrics_port=metrics_port,
+        catalogs_dir=_optional_path(env, "GOLEM_CATALOGS_DIR"),
     )
 
 
@@ -301,6 +321,14 @@ def reconciler_settings(env: Env) -> ReconcilerSettings:
     interval = _parsed(v, "GOLEM_RECONCILE_INTERVAL_SECONDS", float, "a number of seconds")
     if not interval > 0:
         raise SettingsError(f"GOLEM_RECONCILE_INTERVAL_SECONDS must be positive: {interval}")
+    poll = {"GOLEM_MR_POLL_SECONDS": env.get("GOLEM_MR_POLL_SECONDS", "").strip()}
+    mr_poll_seconds = (
+        _parsed(poll, "GOLEM_MR_POLL_SECONDS", float, "a number of seconds")
+        if poll["GOLEM_MR_POLL_SECONDS"]
+        else MR_POLL_SECONDS
+    )
+    if not mr_poll_seconds > 0:
+        raise SettingsError(f"GOLEM_MR_POLL_SECONDS must be positive: {mr_poll_seconds}")
     return ReconcilerSettings(
         runs_dsn=v["GOLEM_RUNS_DSN"],
         interval_seconds=interval,
@@ -311,7 +339,26 @@ def reconciler_settings(env: Env) -> ReconcilerSettings:
         namespace=v["GOLEM_KUBERNETES_NAMESPACE"],
         kubernetes=_kubernetes(v),
         metrics_port=metrics_port_setting(env),
+        mr_poll_seconds=mr_poll_seconds,
+        stages=_stage_settings(env),
     )
+
+
+def _stage_settings(env: Env) -> StageSettings | None:
+    given = [name for name in PROCESS_STAGE_VARIABLES if env.get(name, "").strip()]
+    if not given:
+        return None
+    v = _values(env, *PROCESS_STAGE_VARIABLES)
+    return StageSettings(
+        edge_url=_base_url(v, "GOLEM_EDGE_URL"),
+        run_token_key_file=Path(v["GOLEM_RUN_TOKEN_KEY_FILE"]),
+        run_token_kid=v["GOLEM_RUN_TOKEN_KID"],
+    )
+
+
+def _optional_path(env: Env, name: str) -> Path | None:
+    value = env.get(name, "").strip()
+    return Path(value) if value else None
 
 
 def parse_registry(text: str) -> Registry:
@@ -611,7 +658,6 @@ class UiSettings:
     edge_url: str
     dsn: str = field(repr=False)
     session_key: str = field(repr=False)
-    agents: tuple[str, ...]
     public_base_url: str
     port: int
     login_rate: Rate = LOGIN_RATE
@@ -635,7 +681,6 @@ def ui_settings(env: Env) -> UiSettings:
         "GOLEM_EDGE_URL",
         "GOLEM_UI_DSN",
         "GOLEM_UI_SESSION_KEY",
-        "GOLEM_UI_AGENTS",
         "GOLEM_PUBLIC_BASE_URL",
     )
     public_base_url = _base_url(v, "GOLEM_PUBLIC_BASE_URL")
@@ -655,9 +700,6 @@ def ui_settings(env: Env) -> UiSettings:
             f" got {v['GOLEM_OIDC_REDIRECT_URL']!r}"
         )
     _fernet_key(v["GOLEM_UI_SESSION_KEY"], "GOLEM_UI_SESSION_KEY")
-    agents = tuple(a.strip() for a in v["GOLEM_UI_AGENTS"].split(",") if a.strip())
-    if not agents:
-        raise SettingsError("GOLEM_UI_AGENTS must list at least one name, separated by commas")
     return UiSettings(
         issuer=v["GOLEM_OIDC_ISSUER"],
         discovery_url=v["GOLEM_OIDC_DISCOVERY_URL"],
@@ -667,7 +709,6 @@ def ui_settings(env: Env) -> UiSettings:
         edge_url=_base_url(v, "GOLEM_EDGE_URL"),
         dsn=v["GOLEM_UI_DSN"],
         session_key=v["GOLEM_UI_SESSION_KEY"],
-        agents=tuple(dict.fromkeys(agents)),
         public_base_url=public_base_url,
         port=_port(env),
         login_rate=rate_setting(env, "GOLEM_RATE_LOGIN", LOGIN_RATE),

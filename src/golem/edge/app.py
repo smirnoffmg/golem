@@ -20,7 +20,14 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from golem.edge.audit import AuditEntry, audit_entry, directory_entry, record, source_ip_of
+from golem.edge.audit import (
+    AuditEntry,
+    audit_entry,
+    directory_entry,
+    record,
+    resolution_entry,
+    source_ip_of,
+)
 from golem.edge.auth import AuthFailure, Principal
 from golem.edge.card_signing import KEYS_PATH
 from golem.edge.policy import Call, ChainLimits, Deny, Registry, callable_agents, evaluate
@@ -35,10 +42,16 @@ from golem.ratelimit import (
     address_key,
     client_address,
 )
+from golem.resolution import ACTIONS as RESOLUTION_ACTIONS
+from golem.resolution import MAX_REASON_CHARS, RERUN
 from golem.run_status import RUNNING, RunStatuses, StatusUnavailable
 
 RPC_PATH = "/a2a"
 DIRECTORY_PATH = "/agents"
+# A process's owner answers a process waiting for a reason (ADR 0019); not an A2A method.
+RESOLUTION_PATH = "/processes/{task_id}/resolution"
+MAX_RESOLUTION_BYTES = 16 * 1024
+TASK_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 PRINCIPAL_HEADER = "X-Golem-Principal"
 EDGE_TOKEN_HEADER = "X-Golem-Edge-Token"
 # A delegated call's chain and root run, for the child run's admission and its task (ADR 0014).
@@ -574,6 +587,58 @@ def create_edge_app(
             return plain_error("audit log unavailable", 503)
         return listing(names, public=False)
 
+    async def resolution(request: Request) -> Response:
+        """Only a person decides; the task service checks it is the process task's owner."""
+        address = request_address(request, trusted_proxies)
+        outcome = await verified(request, address_key(address))
+        if isinstance(outcome, Decision):
+            return plain_too_many(outcome)
+        if not isinstance(outcome, Principal):
+            return plain_unauthenticated(outcome)
+        principal = outcome
+        task_id = request.path_params["task_id"]
+        body = await read_body(request, MAX_RESOLUTION_BYTES)
+        action, reason, problem = resolution_of(body)
+        decision = callers.take(principal.name)
+        if not decision.allowed:
+            metrics.rate_limit_refused("caller")
+            return plain_too_many(decision)
+        refusal: tuple[str, int] | None = None
+        if principal.chain:
+            refusal = ("agents_do_not_decide", 403)
+        elif not TASK_ID.fullmatch(task_id):
+            refusal = ("not_found", 404)
+        elif problem is not None:
+            refusal = (problem, 400)
+        entry = resolution_entry(
+            principal=principal,
+            task_id=task_id if TASK_ID.fullmatch(task_id) else "",
+            action=action or "",
+            refusal=refusal[0] if refusal else None,
+            source_ip=source_ip_of(address),
+        )
+        if not await written(entry):
+            return plain_error("audit log unavailable", 503)
+        if refusal is not None:
+            return plain_error(*refusal)
+        payload = {"action": action} | ({"reason": reason} if reason is not None else {})
+        try:
+            upstream = await forward.post(
+                f"/processes/{task_id}/resolution",
+                json=payload,
+                headers=forward_headers(request, principal, edge_token),
+            )
+        except httpx.HTTPError:
+            return plain_error("task service unavailable", 502)
+        if upstream.status_code == 401:
+            log.error("the task service refused the edge token; check GOLEM_EDGE_TOKEN")
+            return plain_error("task service refused the edge", 502)
+        return Response(
+            upstream.content,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type"),
+        )
+
     def listing(names: tuple[str, ...], *, public: bool) -> Response:
         # One URL, two answers: a cache must key on Authorization and never share a caller's.
         scope = "public" if public else "private"
@@ -589,12 +654,29 @@ def create_edge_app(
         routes=[
             Route(RPC_PATH, a2a, methods=["POST"]),
             Route(DIRECTORY_PATH, agents, methods=["GET"]),
+            Route(RESOLUTION_PATH, resolution, methods=["POST"]),
             Route(f"/agents/{{name}}{AGENT_CARD_WELL_KNOWN_PATH}", agent_card, methods=["GET"]),
             Route(KEYS_PATH, key_set, methods=["GET"]),
         ]
     )
     headed = edge_headers(app, hsts=urlsplit(public_base_url).scheme == "https")
     return Instrumented(headed, routes=app.routes, metrics=metrics)
+
+
+def resolution_of(body: bytes | None) -> tuple[str | None, str | None, str | None]:
+    """The action and the reason of a resolution, or what is wrong with it."""
+    try:
+        parsed = json.loads(body) if body is not None else None
+    except (ValueError, RecursionError):
+        parsed = None
+    if not isinstance(parsed, dict) or parsed.get("action") not in RESOLUTION_ACTIONS:
+        return None, None, "malformed"
+    action, reason = parsed["action"], parsed.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return action, None, "malformed"
+    if action == RERUN and not (reason and len(reason) <= MAX_REASON_CHARS):
+        return action, None, "reason_required"
+    return action, reason if action == RERUN else None, None
 
 
 def _rpc_id(value: Any) -> RpcId:

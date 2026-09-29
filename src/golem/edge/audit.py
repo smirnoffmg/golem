@@ -75,6 +75,32 @@ def directory_entry(
     )
 
 
+PROCESSES = "processes"
+RESOLVE_PROCESS = "ResolveProcess"
+
+
+def resolution_entry(
+    *,
+    principal: Principal,
+    task_id: str,
+    action: str,
+    refusal: str | None,
+    source_ip: str | None,
+) -> AuditEntry:
+    """A process owner's answer to a process waiting for a reason (ADR 0019): the task and the
+    action, never the reason, which is the person's free text."""
+    return AuditEntry(
+        account=principal.on_behalf_of,
+        request=f"{RESOLVE_PROCESS} task={task_id} action={action}",
+        target_system=PROCESSES,
+        operation=RESOLVE_PROCESS,
+        result="allow" if refusal is None else f"deny: {refusal}",
+        source=SOURCE,
+        source_ip=source_ip,
+        chain=principal.chain,
+    )
+
+
 def source_ip_of(host: str | None) -> str | None:
     if host is None:
         return None

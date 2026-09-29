@@ -43,7 +43,7 @@ registry, rate limits, audit, forwarding to the task service ([ADR 0002](../adr/
 | `GOLEM_MAX_CHAIN_DEPTH` | required | the deepest agent-to-agent chain allowed (positive integer) |
 | `GOLEM_AUDIT_DSN` | required | libpq connection string to `golem_audit` as `golem_edge` |
 | `GOLEM_TASK_SERVICE_URL` | required | the task service's `a2a` listener (`http://tasks.golem-system.svc:8000`) |
-| `GOLEM_CATALOGS_DIR` | required | a directory of `<agent>/agent.yaml` the agent cards are built from ([cards](#agent-cards)) |
+| `GOLEM_CATALOGS_DIR` | required | a directory of `<agent>/agent.yaml` and `<process>/process.yaml` the cards and the agents' part of the call registry are built from ([cards](#agent-cards)) |
 | `GOLEM_PUBLIC_BASE_URL` | required | the edge's public address, written into the agent cards |
 | `GOLEM_EDGE_TOKEN` | required | shared secret sent with every forwarded request |
 | `GOLEM_CARD_SIGNING_KEY_FILE` | required | the key that signs every agent card: an unencrypted EC P-256 private key in PEM, its own, never the run token key ([signed cards](#agent-cards)) |
@@ -87,15 +87,16 @@ A2A tasks, run admission, Job launch, run tokens. Three listeners, one per kind 
 | `GOLEM_PUSH_ALLOWED_PREFIXES` | none: push notifications off | comma-separated URL prefixes, each ending with `/`, a push may go to (the adapters' Services) |
 | `GOLEM_PUSH_CONFIG_KEY` | required with `GOLEM_PUSH_ALLOWED_PREFIXES` | Fernet key that encrypts push configs (they hold the adapters' push tokens) in `golem_tasks` |
 | `GOLEM_MCP_REGISTRY_CONFIGMAP` | none | a ConfigMap in the Jobs namespace mounted into every run as the [MCP registry](#mcp-registry) |
-| `GOLEM_PORT` | `8000` | `a2a`: agent card and `/a2a`, for the edge |
+| `GOLEM_CATALOGS_DIR` | none: no processes | the edge's directory of pinned catalogs; a task for one of its `process.yaml` is a process, not a run ([ADR 0019](../adr/0019-processes.md)), checked with its stage agents at start |
+| `GOLEM_PORT` | `8000` | `a2a`: agent card, `/a2a` and `/processes/{task}/resolution`, for the edge |
 | `GOLEM_INTERNAL_READ_PORT` | `8001` | `internal-read`: `/internal/run-keys`, `/internal/runs/{run_id}`, for the MCP servers |
-| `GOLEM_INTERNAL_WRITE_PORT` | `8002` | `internal-write`: `/internal/run-outcome`, for the reconciler |
+| `GOLEM_INTERNAL_WRITE_PORT` | `8002` | `internal-write`: `/internal/run-outcome`, `/internal/proposal-state` and `/internal/process-state`, for the reconciler |
 | `GOLEM_METRICS_PORT` | `9090` | metrics |
 
 ### Reconciler: `python -m golem.orchestrator.reconciler`
 
 Every interval: finished Jobs to run outcomes, merge requests for succeeded runs, outcomes to
-the task service.
+the task service, and a step for every process, whose stages it starts through the edge.
 
 <!-- settings: reconciler -->
 | Setting | Required or default | Meaning |
@@ -108,6 +109,10 @@ the task service.
 | `GOLEM_GITLAB_PROJECTS_FILE` | required | agent to context repository and target branch ([format](#gitlab-projects)) |
 | `GOLEM_KUBERNETES_NAMESPACE` | required | the Jobs namespace |
 | `GOLEM_KUBERNETES` | required | as for the task service |
+| `GOLEM_MR_POLL_SECONDS` | `300` | how often one open merge request is read back from GitLab for its proposal's state; at most 50 per pass (positive number) |
+| `GOLEM_EDGE_URL` | none: processes' stages never start | the edge's a2a port (`http://edge.golem-system.svc:8000`), where stages start as calls of their process ([ADR 0019](../adr/0019-processes.md)); needs the two below |
+| `GOLEM_RUN_TOKEN_KEY_FILE` | required with `GOLEM_EDGE_URL` | the task service's run token key: stages' call tokens are signed with it |
+| `GOLEM_RUN_TOKEN_KID` | required with `GOLEM_EDGE_URL` | its key id, the task service's |
 | `GOLEM_METRICS_PORT` | `9090` | metrics, its only listener |
 
 ### Jira adapter: `python -m golem.adapters jira`
@@ -187,13 +192,20 @@ One process per tool group ([ADR 0008](../adr/0008-platform-mcp-servers.md)).
 | `GOLEM_EDGE_URL` | required | the edge's Service |
 | `GOLEM_UI_DSN` | required | libpq connection string to `golem_ui` as `golem_ui` |
 | `GOLEM_UI_SESSION_KEY` | required | Fernet key that encrypts the tokens of sessions |
-| `GOLEM_UI_AGENTS` | required | comma-separated agents the UI offers |
 | `GOLEM_PUBLIC_BASE_URL` | required | the UI's public address: `https`, or `http` on localhost only |
-| `GOLEM_PORT` | `8000` | the pages |
+| `GOLEM_PORT` | `8000` | the JSON API and sign-in |
 | `GOLEM_METRICS_PORT` | `9090` | metrics |
 | `GOLEM_RATE_LOGIN_PER_MINUTE`, `GOLEM_RATE_LOGIN_BURST` | `30`, `10` | per client address, `GET /login` |
 | `GOLEM_RATE_START_PER_MINUTE`, `GOLEM_RATE_START_BURST` | `10`, `5` | per session, starting tasks |
 | `GOLEM_TRUSTED_PROXIES` | none | the ingress controller's pods |
+
+### Board: the `golem-board` image
+
+The board's nginx has no settings: its configuration (`board/nginx.conf`) is baked into the
+image, and nothing is templated at start ([ADR 0018](../adr/0018-board.md)). It needs no Secret,
+no ConfigMap and no network access. What it answers is fixed by the image: `index.html` for
+every path but `/assets/`, the security headers of ADR 0018 on every answer, and caching by
+path. A change to either means a new image.
 
 ### Runtime Job: `python -m golem.runtime`
 
@@ -207,6 +219,7 @@ The task service writes the first group into every Job; the rest comes from the 
 | `GOLEM_AGENT` | required | the agent; the catalog's `name` must match |
 | `GOLEM_CATALOG_REF` | required | `<git url>#<revision>` from the catalogs file |
 | `GOLEM_GOAL` | required | the caller's text |
+| `GOLEM_TARGET` | none: the target is `run-<run id>` | a goal agent's target record, from the message's `golemTarget` metadata when it matches `^[a-z][a-z0-9-]{0,63}$` ([ADR 0017](../adr/0017-triggers.md)); a record agent ignores it |
 | `GOLEM_RUN_TOKEN` | none | the run token, from Secret `golem-run-<run id>-token`; a role with tools fails without it |
 | `GOLEM_CALL_TOKEN` | none | the call token, from the same Secret; a role naming `agents.delegate` fails without it ([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)) |
 | `GOLEM_MCP_REGISTRY` | none | path of the mounted MCP registry; without it a role naming tools fails |
@@ -245,7 +258,7 @@ process only when its pod restarts.
 | --- | --- | --- | --- |
 | golem-system | `golem-edge` | `GOLEM_AUDIT_DSN` (role `golem_edge`), `GOLEM_EDGE_TOKEN` | edge |
 | golem-system | `golem-tasks` | `GOLEM_RUNS_DSN`, `GOLEM_TASKS_DB_URL`, `GOLEM_PUSH_CONFIG_KEY`, `GOLEM_EDGE_TOKEN` | task service |
-| golem-system | `golem-run-token-key` | `key.pem`, mounted at `/var/run/golem/run-token/` | task service |
+| golem-system | `golem-run-token-key` | `key.pem`, mounted at `/var/run/golem/run-token/` | task service, reconciler |
 | golem-system | `golem-card-signing-key` | `key.pem`, mounted at `/var/run/golem/card-signing/` | edge |
 | golem-system | `golem-reconciler` | `GOLEM_RUNS_DSN`, `GOLEM_GITLAB_TOKEN` | reconciler |
 | golem-system | `golem-jira-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_JIRA_TOKEN`, `GOLEM_JIRA_WEBHOOK_SECRET`, `GOLEM_PUSH_TOKEN_SECRET` | Jira adapter |
@@ -270,30 +283,32 @@ it reads at `/etc/golem/`. `golem-mcp-registry` lives in `golem-jobs`, because r
 | `registry.yaml` (`golem-mcp-registry`) | every run | `GOLEM_MCP_REGISTRY_CONFIGMAP` |
 
 Adding an agent touches five of them: the call registry, catalogs, agent tools, GitLab projects
-and, if Jira should start it, the labels; plus the agent cards below and `GOLEM_UI_AGENTS` or
-`GOLEM_MATTERMOST_AGENTS` if people should reach it there.
+and, if Jira should start it, the labels; plus the agent cards below, and
+`GOLEM_MATTERMOST_AGENTS` if people should reach it there. The board lists what the call
+registry lets each person call, from the edge's directory.
 
 ### Call registry
 
-Callee agent to the callers allowed to call it. A caller is `user:<name>`,
-`service:<client id>` or `agent:<name>`; `<kind>:*` allows every caller of that kind. An agent
-missing here is refused at the edge (`unknown_agent`).
+Callee to the people and services allowed to call it. A caller is `user:<name>` or
+`service:<client id>`; `<kind>:*` allows every caller of that kind. A callee missing here is
+refused at the edge (`unknown_agent`).
 
 ```yaml
 discovery: ["user:*", "service:golem-jira-adapter", "service:golem-mattermost-adapter"]
 ```
 
-`agent:<name>` is a run of that agent delegating with its call token
-([ADR 0014](../adr/0014-golem-as-an-a2a-node.md)): this file is what lets one agent start
-another. List delegating agents by name, never `agent:*`. The child runs for the person or
-service that started the first run of the chain, so an entry here gives the agent no more than
+Agents are not written here ([ADR 0019](../adr/0019-processes.md)). The edge adds them at
+start from the catalogs in `GOLEM_CATALOGS_DIR`: every agent's `delegates` may be called by
+that agent (`agent:<name>`), and every process's stage agents by that process. The child runs
+for the person or service that started the chain, so a neighbour gives an agent no more than
 that subject could start; `GOLEM_MAX_CHAIN_DEPTH` bounds how many agents one request passes
-through, and a chain never calls an agent already in it. A planner that may hand work to
-discovery:
+through, and a chain never calls an agent already in it.
 
-```yaml
-discovery: ["user:*", "agent:planner"]
-```
+The edge refuses to start when this file grants an `agent:` caller, names a callee no catalog
+in `GOLEM_CATALOGS_DIR` defines, or, once any process is pinned there, grants a `user:` caller
+(`user:*` included) anything but a process: people then start processes, and workers are the
+platform's to call. With a process pinned, `GOLEM_MAX_CHAIN_DEPTH` must be at least 3 (person,
+process, stage agent, neighbour). Services may still be granted agents.
 
 ### Catalogs
 
@@ -354,8 +369,8 @@ agents.delegate:
 
 ### Agent cards
 
-The edge builds a public agent card for each `<GOLEM_CATALOGS_DIR>/<agent>/agent.yaml` at
-start. The base points it at the example catalogs in the image (`/app/examples`). For your own
+The edge builds a public agent card for each `<GOLEM_CATALOGS_DIR>/<agent>/agent.yaml` and
+each `<GOLEM_CATALOGS_DIR>/<process>/process.yaml` at start; a directory holds one of the two. The base points it at the example catalogs in the image (`/app/examples`). For your own
 agents, mount the `agent.yaml` of each catalog, for example from a ConfigMap generated in your
 overlay (`cards/discovery/agent.yaml` next to `kustomization.yaml`):
 
@@ -379,8 +394,8 @@ patches:
         value: {name: cards, mountPath: /etc/golem/cards, readOnly: true}
 ```
 
-An agent without a card is still callable if the registry allows it; the UI shows it as
-unavailable.
+The same catalogs feed the call registry, so every callee the registry names needs its catalog
+here; the edge refuses to start otherwise.
 
 Every card is signed at start with the card key (`GOLEM_CARD_SIGNING_KEY_FILE`, kid
 `GOLEM_CARD_SIGNING_KID`) as A2A 1.0 specifies (a JWS over the card's RFC 8785 canonical form),
@@ -398,7 +413,8 @@ call registry lets them call to an authenticated one. How a caller uses both:
 | tasks | 8000 `a2a`, 8001 `internal-read`, 8002 `internal-write`, 9090 | `GET /internal/run-keys` on 8001 |
 | reconciler | 9090 | none: a crash ends the process and the kubelet restarts it |
 | jira-adapter, mattermost-adapter, mcp-* | 8000, 9090 | TCP on 8000 |
-| ui | 8000, 9090 | readiness `GET /static/golem.css`, liveness TCP |
+| ui | 8000, 9090 | readiness `GET /healthz`, liveness TCP |
+| board | 8080 | readiness `GET /`, liveness TCP |
 
 Moving a port means changing the setting, the container port, the Service and the network
 policies together ([deploy/k8s/README.md](../../deploy/k8s/README.md#what-runs-where)).

@@ -1,4 +1,5 @@
-# Every golem Service with a port named metrics: the platform's processes and nothing else.
+# Every golem Service with a port named metrics: the platform's processes and nothing else
+# (the board has none).
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -8,6 +9,11 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/part-of: golem
+    # The board serves files, not metrics (ADR 0018).
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: NotIn
+        values: ["golem-board"]
   namespaceSelector:
     matchNames:
       - golem-system

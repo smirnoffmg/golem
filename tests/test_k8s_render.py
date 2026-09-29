@@ -53,6 +53,10 @@ SETTINGS: dict[str, Callable[[Mapping[str, str]], object]] = {
     "mcp-wiki-read": mcp_settings,
     "ui": ui_settings,
 }
+# The board's static server (ADR 0018): nginx and files, no settings, no metrics, no egress.
+BOARD = "board"
+BOARD_APP = "golem-board"
+BOARD_PORT = 8080
 FILE_PARSERS: dict[str, Callable[[str], object]] = {
     "GOLEM_CALL_REGISTRY_FILE": parse_registry,
     "GOLEM_CATALOGS_FILE": parse_catalog_refs,
@@ -175,8 +179,8 @@ def test_the_base_and_the_external_secrets_overlay_render() -> None:
     assert of_kind(render(EXTERNAL_SECRETS), "ExternalSecret")
 
 
-def test_there_is_one_deployment_per_process() -> None:
-    assert sorted(d["metadata"]["name"] for d in deployments()) == sorted(SETTINGS)
+def test_there_is_one_deployment_per_process_and_one_for_the_board() -> None:
+    assert sorted(d["metadata"]["name"] for d in deployments()) == sorted([*SETTINGS, BOARD])
     assert {d["metadata"]["namespace"] for d in deployments()} == {SYSTEM}
 
 
@@ -335,7 +339,7 @@ def test_the_delegation_group_routes_to_the_edge_a2a_endpoint() -> None:
 # --- Pod security -------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", sorted(SETTINGS))
+@pytest.mark.parametrize("name", sorted([*SETTINGS, BOARD]))
 def test_every_deployment_is_hardened_like_the_job(name: str) -> None:
     deployment = find(render(BASE), "Deployment", name, SYSTEM)
     pod = deployment["spec"]["template"]["spec"]
@@ -352,7 +356,7 @@ def test_every_deployment_is_hardened_like_the_job(name: str) -> None:
     assert set(resources["requests"]) == set(resources["limits"]) == {"cpu", "memory"}
 
 
-@pytest.mark.parametrize("name", sorted(SETTINGS))
+@pytest.mark.parametrize("name", sorted([*SETTINGS, BOARD]))
 def test_only_the_two_kubernetes_clients_get_a_service_account_token(name: str) -> None:
     pod = find(render(BASE), "Deployment", name, SYSTEM)["spec"]["template"]["spec"]
 
@@ -575,19 +579,6 @@ def test_the_ui_runs_its_own_module() -> None:
     assert container(deployment)["command"] == ["python", "-m", "golem.ui"]
 
 
-def test_the_call_registry_lets_users_start_every_agent_the_ui_offers() -> None:
-    objects = render(EXTERNAL_SECRETS)
-    env = env_of(find(objects, "Deployment", "ui", SYSTEM), objects, secret_keys(objects))
-    registry = parse_registry(
-        find(objects, "ConfigMap", "golem-config", SYSTEM)["data"]["call-registry.yaml"]
-    )
-
-    agents = ui_settings(env).agents
-    assert agents
-    for agent in agents:
-        assert "user:*" in registry.allowed_callers[agent], agent
-
-
 def test_the_ui_is_reached_through_the_ingress_controller_only() -> None:
     policy = find(policies(), "NetworkPolicy", "ui", SYSTEM)
 
@@ -619,6 +610,70 @@ def test_the_ui_calls_the_edge_at_its_service() -> None:
 
     match = SERVICE_URL.fullmatch(env["GOLEM_EDGE_URL"])
     assert match and (match[1], match[2], int(match[3])) == ("edge", SYSTEM, 8000)
+
+
+# --- Board (ADR 0018) --------------------------------------------------------------------------
+
+
+def test_the_board_runs_its_own_image_on_its_port() -> None:
+    objects = render(BASE)
+    deployment = find(objects, "Deployment", BOARD, SYSTEM)
+    service = find(objects, "Service", BOARD, SYSTEM)
+
+    assert container(deployment)["image"] == "golem-board"
+    assert "command" not in container(deployment)
+    assert [p["containerPort"] for p in container(deployment)["ports"]] == [BOARD_PORT]
+    assert [(p["port"], p["targetPort"]) for p in service["spec"]["ports"]] == [
+        (BOARD_PORT, "http")
+    ]
+
+
+def test_the_board_is_reached_through_the_ingress_controller_only() -> None:
+    policy = find(policies(), "NetworkPolicy", BOARD, SYSTEM)
+
+    assert policy["spec"]["podSelector"] == {"matchLabels": {APP_LABEL: BOARD_APP}}
+    assert policy["spec"]["ingress"] == [
+        {"from": [INGRESS_CONTROLLER], "ports": [{"protocol": "TCP", "port": BOARD_PORT}]}
+    ]
+
+
+def selects(policy: dict, labels: Mapping[str, str]) -> bool:
+    selector = policy["spec"]["podSelector"]
+    if not selector.get("matchLabels", {}).items() <= labels.items():
+        return False
+    for expression in selector.get("matchExpressions", []):
+        value = labels.get(expression["key"])
+        if expression["operator"] == "NotIn" and value in expression["values"]:
+            return False
+        if expression["operator"] == "In" and value not in expression["values"]:
+            return False
+    return True
+
+
+def test_the_board_reaches_nothing_and_admits_nothing_but_browsers() -> None:
+    # The static server calls nothing, not even DNS, and serves no metrics.
+    labels = find(render(BASE), "Deployment", BOARD, SYSTEM)["spec"]["template"]["metadata"][
+        "labels"
+    ]
+    selecting = [p for p in policies() if selects(p, labels)]
+
+    assert {p["metadata"]["name"] for p in selecting} == {"default-deny-all", BOARD}
+    assert find(policies(), "NetworkPolicy", BOARD, SYSTEM)["spec"]["policyTypes"] == [
+        "Ingress",
+        "Egress",
+    ]
+    assert "egress" not in find(policies(), "NetworkPolicy", BOARD, SYSTEM)["spec"]
+
+
+def test_every_process_still_resolves_names_and_is_scraped() -> None:
+    by_name = {p["metadata"]["name"]: p for p in policies() if p["metadata"]["namespace"] == SYSTEM}
+
+    for name in SETTINGS:
+        labels = find(render(BASE), "Deployment", name, SYSTEM)["spec"]["template"]["metadata"][
+            "labels"
+        ]
+        assert selects(by_name["allow-dns"], labels), name
+        assert selects(by_name["allow-metrics-scrape"], labels), name
 
 
 # --- Rate limits (ADR 0012) ----------------------------------------------------------------------
@@ -696,7 +751,7 @@ def test_only_the_monitoring_namespace_may_scrape_and_only_the_metrics_port() ->
         if MONITORING in rule.get("from", [])
     ]
 
-    assert policy["spec"]["podSelector"] == {"matchLabels": {"app.kubernetes.io/part-of": "golem"}}
+    assert policy["spec"]["podSelector"]["matchLabels"] == {"app.kubernetes.io/part-of": "golem"}
     assert policy["spec"]["policyTypes"] == ["Ingress"]
     assert policy["spec"]["ingress"] == [
         {"from": [MONITORING], "ports": [{"protocol": "TCP", "port": 9090}]}
@@ -704,24 +759,26 @@ def test_only_the_monitoring_namespace_may_scrape_and_only_the_metrics_port() ->
     assert monitoring_rules == policy["spec"]["ingress"]
 
 
+def process_deployments() -> list[dict]:
+    return [d for d in deployments() if d["metadata"]["name"] in SETTINGS]
+
+
 def test_every_process_pod_is_selected_by_the_scrape_policy() -> None:
     policy = find(policies(), "NetworkPolicy", "allow-metrics-scrape", SYSTEM)
-    selector = policy["spec"]["podSelector"]["matchLabels"]
 
-    for deployment in deployments():
+    for deployment in process_deployments():
         labels = deployment["spec"]["template"]["metadata"]["labels"]
-        assert selector.items() <= labels.items(), deployment["metadata"]["name"]
+        assert selects(policy, labels), deployment["metadata"]["name"]
 
 
 def test_the_prometheus_operator_overlay_scrapes_every_metrics_port() -> None:
     objects = render(PROMETHEUS_OPERATOR)
     [monitor] = of_kind(objects, "ServiceMonitor")
-    selector = monitor["spec"]["selector"]["matchLabels"]
     scraped = [
         s
         for s in of_kind(objects, "Service")
         if s["metadata"]["namespace"] == SYSTEM
-        and selector.items() <= s["metadata"].get("labels", {}).items()
+        and selects({"spec": {"podSelector": monitor["spec"]["selector"]}}, s["metadata"]["labels"])
     ]
 
     assert monitor["apiVersion"] == "monitoring.coreos.com/v1"
@@ -730,7 +787,7 @@ def test_the_prometheus_operator_overlay_scrapes_every_metrics_port() -> None:
         {"port": METRICS, "path": "/metrics", "interval": "30s"}
     ]
     assert {s["metadata"]["name"] for s in scraped} == {
-        service_of(objects, d)["metadata"]["name"] for d in deployments()
+        service_of(objects, d)["metadata"]["name"] for d in process_deployments()
     }
     for service in scraped:
         assert METRICS in [p["name"] for p in service["spec"]["ports"]]

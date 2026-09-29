@@ -30,7 +30,7 @@ A case id is the directory name and matches `^[a-z0-9][a-z0-9-]*$`. Every direct
 goal: Work the discovery backlog      # required: the run's goal, as a caller would send it
 pending: [H-3]                        # optional: targets that already have an open proposal
 expect:
-  outcome: proposed                   # required: proposed | idle | invalid
+  outcome: proposed                   # required: proposed | reported | idle | invalid
   role: researcher                    # optional: the role the lead must pick
   target: H-2                         # optional: the record the lead must pick
   checks:                             # optional, every key optional
@@ -41,13 +41,21 @@ expect:
       H-2: [supports, refutes]
     must_not_contain:                 # record id -> phrases, case-insensitive
       H-4: [supports]
+  delegates: [checker]                # optional: the neighbours the role must ask; [] for none
 ```
 
+- **`reported`** is a goal agent's run that found nothing to propose (ADR 0017): its branch
+  carries only its record, the report. A goal agent's golden set holds cases with and without
+  a finding, so it measures false alarms and misses both.
 - **What the checks read.** What production would publish: the proposal branch the run pushed,
   or the unchanged base branch when it pushed nothing (`idle`, `invalid`, `failed`). A section
   is empty by the context format's rule: only whitespace and HTML comments.
 - **Phrases** are matched against the record's whole file, front matter included, so
   `"links: [H-3]"` checks a link and `"status: accepted"` a status.
+- **`delegates`** checks routing ([ADR 0019](../../../docs/adr/0019-processes.md)): which of
+  the agent's neighbours the role asked through `delegate_to_agent`, in any order and however
+  often. The calls are recorded, not sent, so no child run starts. Without the key routing is
+  not checked.
 - **`pending`** creates a branch `golem/<id>/pending` for each id, as an open merge request does.
 - **Unknown keys are errors**, and every error names the `case.yaml` it comes from: a misspelt
   check would otherwise never run and the case would pass for the wrong reason.

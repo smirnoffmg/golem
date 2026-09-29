@@ -10,7 +10,7 @@ import httpx
 import pytest
 from test_deepagents_runner import make_brief, scripted, tool_call
 
-from golem.catalog import DELEGATE_GROUP, Role
+from golem.catalog import DELEGATE_GROUP, Neighbour, Role
 from golem.runtime.deepagents_runner import DeepAgentsRunner
 from golem.runtime.delegation import DELEGATE_TOOL, message_id
 from golem.runtime.tools import (
@@ -27,6 +27,10 @@ from golem.runtime.tools import (
 CALL_TOKEN = "call-token-s3cr3t"
 EDGE_URL = "http://edge.golem-system.svc:8000/a2a"
 REGISTRY = Registry(groups=(ToolGroup(DELEGATE_GROUP, EDGE_URL, (DELEGATE_TOOL,)),))
+NEIGHBOURS = (
+    Neighbour(agent="reviewer", when="A solution needs a second pair of eyes."),
+    Neighbour(agent="checker", when="The change touches a Kafka topic or an HTTP contract."),
+)
 
 
 @dataclass
@@ -72,7 +76,7 @@ def toolbox(edge: Edge, **changes: Any) -> McpToolbox:
 
 
 async def delegate(box: McpToolbox, agent: str = "reviewer", goal: str = "review S-1") -> str:
-    [tool] = await box.tools_for(planner(DELEGATE_GROUP))
+    [tool] = await box.tools_for(planner(DELEGATE_GROUP), NEIGHBOURS)
     return await tool.ainvoke({"agent": agent, "goal": goal})
 
 
@@ -84,14 +88,43 @@ async def test_a_role_that_does_not_list_the_group_gets_no_delegation_tool() -> 
 
 
 async def test_a_role_that_lists_the_group_gets_exactly_the_delegation_tool() -> None:
-    tools = await toolbox(Edge()).tools_for(planner(DELEGATE_GROUP))
+    tools = await toolbox(Edge()).tools_for(planner(DELEGATE_GROUP), NEIGHBOURS)
 
     assert [tool.name for tool in tools] == [DELEGATE_TOOL]
 
 
 async def test_delegation_without_a_call_token_fails_closed() -> None:
     with pytest.raises(ToolLoadError, match="GOLEM_CALL_TOKEN"):
-        await toolbox(Edge(), call_token=None).tools_for(planner(DELEGATE_GROUP))
+        await toolbox(Edge(), call_token=None).tools_for(planner(DELEGATE_GROUP), NEIGHBOURS)
+
+
+async def test_delegation_without_neighbours_fails_closed() -> None:
+    with pytest.raises(ToolLoadError, match="no delegates"):
+        await toolbox(Edge()).tools_for(planner(DELEGATE_GROUP))
+
+
+# Neighbours (ADR 0019): the tool offers the agent's list and nothing else
+
+
+async def test_the_tool_offers_only_the_neighbours_and_says_when_to_ask_each() -> None:
+    [tool] = await toolbox(Edge()).tools_for(planner(DELEGATE_GROUP), NEIGHBOURS)
+
+    schema = tool.tool_call_schema
+    assert isinstance(schema, dict)
+    assert schema["properties"]["agent"]["enum"] == ["reviewer", "checker"]
+    assert schema["required"] == ["agent", "goal"]
+    for neighbour in NEIGHBOURS:
+        assert f"{neighbour.agent}: {neighbour.when}" in tool.description
+
+
+async def test_a_name_outside_the_neighbours_is_a_tool_error_without_calling_the_edge() -> None:
+    edge = Edge()
+
+    reply = await delegate(toolbox(edge), agent="deployer")
+
+    assert edge.requests == []
+    assert "'deployer' is not a neighbour" in reply
+    assert "reviewer, checker" in reply
 
 
 def test_the_registry_entry_for_delegation_offers_only_the_delegation_tool() -> None:
@@ -228,7 +261,7 @@ async def test_an_answer_that_is_not_json_rpc_is_reported() -> None:
 async def test_a_role_delegates_and_reads_the_child_task_id(tmp_path: Path) -> None:
     edge = Edge()
     model = scripted(tool_call(DELEGATE_TOOL, agent="reviewer", goal="review S-1"), "Delegated.")
-    brief = replace(make_brief(tmp_path), role=planner(DELEGATE_GROUP))
+    brief = replace(make_brief(tmp_path), role=planner(DELEGATE_GROUP), delegates=NEIGHBOURS)
 
     result = await DeepAgentsRunner(model=model, toolbox=toolbox(edge)).run(brief)
 

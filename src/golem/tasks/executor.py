@@ -1,16 +1,32 @@
+from dataclasses import asdict
+from typing import Any
+
 from a2a.helpers.proto_helpers import new_task_from_user_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.context import ServerCallContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
-from a2a.types.a2a_pb2 import TaskState
+from a2a.types.a2a_pb2 import Message, TaskState
 
-from golem.tasks.ports import Orchestrator, Refused, RunOutcome, RunStart, Started
+from golem.catalog import GOAL_TARGET
+from golem.tasks.ports import (
+    REFUSAL_METADATA,
+    Orchestrator,
+    Refused,
+    RunOutcome,
+    RunStart,
+    Started,
+)
 
 MISSING_AGENT = "no agent named: the request carries no tenant"
 # Set only by the task service's internal outcome route, never from a request body, so a
 # caller cannot finish a task by sending a message that claims the run is done.
 RUN_OUTCOME = "golem.run_outcome"
+AGENT_METADATA = "golemAgent"
+PROPOSAL_METADATA = "golemProposal"
+OUTCOME_METADATA = "golemOutcome"
+TARGET_METADATA = "golemTarget"
+REPORT_ARTIFACT = "report"
 CHAIN_HEADER = "x-golem-chain"
 ROOT_RUN_HEADER = "x-golem-root-run"
 
@@ -35,7 +51,16 @@ def run_start_of(context: RequestContext) -> RunStart:
         tracestate=header_of(context.call_context, "tracestate"),
         root_run_id=header_of(context.call_context, ROOT_RUN_HEADER),
         chain=chain_of(header_of(context.call_context, CHAIN_HEADER)),
+        target=target_of(context.message),
     )
+
+
+def target_of(message: Message | None) -> str:
+    # The caller's claim, used only as a record name in the caller's own run: it must be one.
+    if message is None or TARGET_METADATA not in message.metadata:
+        return ""
+    target = message.metadata[TARGET_METADATA]
+    return target if isinstance(target, str) and GOAL_TARGET.fullmatch(target) else ""
 
 
 def chain_of(header: str) -> tuple[str, ...]:
@@ -48,14 +73,34 @@ def header_of(call_context: ServerCallContext, name: str) -> str:
     return call_context.state.get("headers", {}).get(name, "")
 
 
-async def reject(updater: TaskUpdater, reason: str) -> None:
-    await updater.reject(updater.new_agent_message([new_text_part(reason)]))
+async def reject(updater: TaskUpdater, reason: str, code: str | None = None) -> None:
+    await updater.update_status(
+        TaskState.TASK_STATE_REJECTED,
+        message=updater.new_agent_message([new_text_part(reason)]),
+        metadata={REFUSAL_METADATA: code} if code else None,
+    )
 
 
 async def finish(updater: TaskUpdater, outcome: RunOutcome) -> None:
     message = updater.new_agent_message([new_text_part(outcome.detail)])
-    if outcome.succeeded:
-        await updater.complete(message)
+    if outcome.canceled:
+        await updater.cancel(message)
+    elif outcome.succeeded:
+        # Merged into the task's metadata by the SDK's TaskManager, as runId is.
+        metadata: dict[str, Any] | None = (
+            {PROPOSAL_METADATA: asdict(outcome.proposal)} if outcome.proposal else None
+        )
+        if outcome.report is not None:
+            # One id per run, so a delivery repeated before the task ended adds no second one.
+            await updater.add_artifact(
+                [new_text_part(outcome.report)],
+                artifact_id=f"{REPORT_ARTIFACT}-{outcome.run_id}",
+                name=REPORT_ARTIFACT,
+            )
+            metadata = {OUTCOME_METADATA: "reported"}
+        await updater.update_status(
+            TaskState.TASK_STATE_COMPLETED, message=message, metadata=metadata
+        )
     else:
         await updater.failed(message)
 
@@ -81,11 +126,15 @@ class RunExecutor(AgentExecutor):
         if not context.tenant:
             await reject(updater, MISSING_AGENT)
             return
-        await updater.start_work()
+        # The tenant the edge checked against the call registry, not the caller's own claim:
+        # ListTasks filters by it (ADR 0018).
+        await updater.update_status(
+            TaskState.TASK_STATE_WORKING, metadata={AGENT_METADATA: context.tenant}
+        )
         run = run_start_of(context)
         match await self._orchestrator.start(run):
-            case Refused(reason=reason):
-                await reject(updater, reason)
+            case Refused(reason=reason, code=code):
+                await reject(updater, reason, code)
             case Started(run_id=run_id):
                 # The chain comes back with the task: whoever reads it sees which agents
                 # took part (ADR 0014).

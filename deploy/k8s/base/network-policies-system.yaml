@@ -21,6 +21,11 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/part-of: golem
+    # The board calls nothing and serves no metrics (ADR 0018).
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: NotIn
+        values: ["golem-board"]
   policyTypes: ["Egress"]
   egress:
     - to:
@@ -48,6 +53,11 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/part-of: golem
+    # The board calls nothing and serves no metrics (ADR 0018).
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: NotIn
+        values: ["golem-board"]
   policyTypes: ["Ingress"]
   ingress:
     - from:
@@ -91,6 +101,10 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-ui
+        # The reconciler, starting processes' stages with call tokens (ADR 0019).
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-reconciler
       ports:
         - protocol: TCP
           port: 8000
@@ -230,6 +244,15 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+    # The edge's a2a port, where processes' stages start (ADR 0019). Last, so overlays that
+    # patch the placeholders above by index keep working.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-edge
+      ports:
+        - protocol: TCP
+          port: 8000
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -381,7 +404,7 @@ spec:
           port: 443
 ---
 # Browsers through the ingress controller; out to the edge, the identity provider (discovery,
-# token endpoint, keys) and Postgres (golem_ui). ADR 0011.
+# token endpoint, keys) and Postgres (golem_ui). ADRs 0011 and 0018.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -423,3 +446,25 @@ spec:
       ports:
         - protocol: TCP
           port: 5432
+---
+# Browsers through the ingress controller, and nothing out: the static server calls nothing,
+# not even DNS (ADR 0018).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: board
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: golem-board
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Placeholder: the namespace of the ingress controller, labelled by the operator.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              golem.dev/ingress-controller: "true"
+      ports:
+        - protocol: TCP
+          port: 8080

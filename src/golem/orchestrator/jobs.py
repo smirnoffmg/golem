@@ -86,6 +86,8 @@ class JobSpec:
     tracestate: str = ""
     mcp_registry_configmap: str | None = None
     ephemeral_storage: str = EPHEMERAL_STORAGE
+    # The record a goal agent's run works on (ADR 0017); a record agent's runtime ignores it.
+    target: str = ""
 
     def __post_init__(self) -> None:
         # The run id becomes both the Job name suffix and a label value, so it must fit both.
@@ -179,6 +181,7 @@ def _container(spec: JobSpec) -> dict:
             {"name": "GOLEM_GOAL", "value": spec.goal},
             *trace_env(spec),
             *mcp_registry_env(spec),
+            *([{"name": "GOLEM_TARGET", "value": spec.target}] if spec.target else []),
         ],
         # optional: False keeps the pod from starting without keys instead of failing mid-run;
         # the token Secret is created right after the Job, and the pod waits for it.

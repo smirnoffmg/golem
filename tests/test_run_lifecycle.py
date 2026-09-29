@@ -15,9 +15,11 @@ from test_tasks_to_runs import CATALOG, GRANTS, SIGNING_KEY, TEMPLATE
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import JobStatus
 from golem.orchestrator.notify import TaskServiceNotifier
+from golem.orchestrator.proposals import OpenedMergeRequest, PendingMergeRequest, Transition
 from golem.orchestrator.reconcile import (
     LAUNCH_GRACE_SECONDS,
     Propose,
+    Settlement,
     SucceededRun,
     TaskOutcome,
     reconcile_once,
@@ -108,8 +110,9 @@ async def reconcile_undelivered(dsn: str, board: StatusBoard, propose: Propose) 
         await reconcile_once(conn, board, unreachable, propose)
 
 
-async def open_merge_request(run: SucceededRun) -> str:
-    return f"Merge request: https://gitlab.example.test/p/-/merge_requests/{run.run_id}"
+async def open_merge_request(run: SucceededRun) -> Settlement:
+    url = f"https://gitlab.example.test/p/-/merge_requests/{run.run_id}"
+    return Settlement(f"Merge request: {url}", OpenedMergeRequest(url=url, iid=7, target="H-7"))
 
 
 async def test_a_finished_job_completes_the_a2a_task(
@@ -292,3 +295,41 @@ async def test_a_repeated_notification_changes_nothing(
 
     assert again.status_code == 200
     assert await get_task(task_service, task["id"]) == done
+
+
+# A proposal's life after its task completed: GitLab's decision reaches the stored task.
+
+
+async def test_a_merged_merge_request_shows_as_applied_on_the_completed_task(
+    runs_db: str, board: StatusBoard, task_service: httpx.AsyncClient
+) -> None:
+    task = await start_task(task_service)
+    board.statuses[task["metadata"]["runId"]] = JobStatus.SUCCEEDED
+    await reconcile(runs_db, board, task_service, open_merge_request)
+    done = await get_task(task_service, task["id"])
+
+    async def merged(_: PendingMergeRequest) -> Transition:
+        return Transition(state="applied", decided_by="gitlab:bob", decided_at=None)
+
+    notifier = TaskServiceNotifier(task_service)
+    async with await psycopg.AsyncConnection.connect(runs_db, autocommit=True) as conn:
+        await reconcile_once(
+            conn,
+            board,
+            notifier.notify,
+            open_merge_request,
+            check=merged,
+            notify_proposal=notifier.notify_proposal,
+            poll_seconds=0,
+        )
+
+    after = await get_task(task_service, task["id"])
+    assert done["metadata"]["golemProposal"]["state"] == "pending"
+    assert after["metadata"]["golemProposal"] == {
+        **done["metadata"]["golemProposal"],
+        "state": "applied",
+    }
+    # The state and message stay; the timestamp moves, so the board's next delta carries it.
+    assert after["status"]["state"] == done["status"]["state"]
+    assert after["status"]["message"] == done["status"]["message"]
+    assert after["status"]["timestamp"] > done["status"]["timestamp"]

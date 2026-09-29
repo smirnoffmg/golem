@@ -24,7 +24,7 @@ from langchain_mcp_adapters.sessions import StreamableHttpConnection
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.types import CallToolResult, ContentBlock, TextContent
 
-from golem.catalog import DELEGATE_GROUP, TOOL_GROUP, Role
+from golem.catalog import DELEGATE_GROUP, TOOL_GROUP, Neighbour, Role
 from golem.runtime.delegation import DELEGATE_TOOL, Delegation, delegation_tool
 
 GROUP_NAME = re.compile(TOOL_GROUP)
@@ -154,11 +154,11 @@ class McpToolbox:
     # The edge is a network boundary; tests put it behind a transport.
     edge_transport: httpx.AsyncBaseTransport | None = None
 
-    async def tools_for(self, role: Role) -> list[BaseTool]:
+    async def tools_for(self, role: Role, delegates: Sequence[Neighbour] = ()) -> list[BaseTool]:
         groups = allowed_groups(self.registry, role)
         delegating = [group for group in groups if group.name == DELEGATE_GROUP]
         served = [group for group in groups if group.name != DELEGATE_GROUP]
-        tools = [self._delegation(role, group) for group in delegating]
+        tools = [self._delegation(role, group, delegates) for group in delegating]
         if not served:
             return tools
         if not self.run_token:
@@ -170,11 +170,13 @@ class McpToolbox:
         )
         return tools + [tool for group_tools in loaded for tool in group_tools]
 
-    def _delegation(self, role: Role, group: ToolGroup) -> BaseTool:
+    def _delegation(self, role: Role, group: ToolGroup, delegates: Sequence[Neighbour]) -> BaseTool:
         if not self.call_token:
             raise ToolLoadError(
                 f"role {role.name!r} may delegate, but the Job has no GOLEM_CALL_TOKEN"
             )
+        if not delegates:
+            raise ToolLoadError(f"role {role.name!r} may delegate, but its agent has no delegates")
         return delegation_tool(
             Delegation(
                 url=group.url,
@@ -183,7 +185,8 @@ class McpToolbox:
                 call_timeout=self.limits.call_timeout,
                 max_result_chars=self.limits.max_result_chars,
                 transport=self.edge_transport,
-            )
+            ),
+            delegates,
         )
 
 

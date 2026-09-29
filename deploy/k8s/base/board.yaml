@@ -1,0 +1,83 @@
+# The board (ADR 0018): the React client as static files from nginx. It holds no state, reads
+# no Secret and calls nothing; the ingress sends it every path of the UI's host that is not the
+# backend-for-frontend's (/api/, /login, /callback, /logout, /healthz).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: board
+  namespace: golem-system
+  labels:
+    app.kubernetes.io/name: golem-board
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: golem-board
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-board
+        app.kubernetes.io/part-of: golem
+    spec:
+      serviceAccountName: golem-board
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The nginx user of the unprivileged image.
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: board
+          image: golem-board
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          # The pid file and nginx's temporary paths (nginx.conf).
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: board
+  namespace: golem-system
+  labels:
+    app.kubernetes.io/name: golem-board
+spec:
+  selector:
+    app.kubernetes.io/name: golem-board
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

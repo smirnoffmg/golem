@@ -21,7 +21,7 @@ from langchain.agents.middleware.types import (
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphBubbleUp
 from langgraph.graph.state import CompiledStateGraph
@@ -34,10 +34,12 @@ SKILLS_ROUTE = "/.golem/skills/"
 ARTIFACTS_ROOT = "/.golem/artifacts"
 # wcmatch's `**` skips dot-segments, so `/**` alone would leave `/.git/...` writable.
 EVERYWHERE = ["/**", "/**/.*", "/**/.*/**"]
+# A goal run's role says it found something to act on (ADR 0017); without it the run reports.
+PROPOSE_TOOL = "submit_proposal"
 # Names deepagents may bind itself; `execute` included so no MCP tool can bring a shell in.
 BUILTIN_TOOLS = frozenset(
     {"ls", "read_file", "write_file", "edit_file", "delete", "glob", "grep", "execute"}
-    | {"write_todos", "task"}
+    | {"write_todos", "task", PROPOSE_TOOL}
 )
 DEFAULT_MODEL_TIMEOUT_SECONDS = 120.0
 
@@ -62,13 +64,36 @@ class DeepAgentsRunner:
     toolbox: McpToolbox = field(default_factory=McpToolbox)
 
     async def run(self, brief: Brief) -> RoleResult:
-        tools = await self.toolbox.tools_for(brief.role)
-        agent = build_agent(self.model, brief, self.limits, tools)
+        tools = await self.toolbox.tools_for(brief.role, brief.delegates)
+        proposal = Proposal()
+        agent = build_agent(
+            self.model, brief, self.limits, tools, proposal if brief.goal_mode else None
+        )
         state = await agent.ainvoke(
             {"messages": [HumanMessage(task(brief))]},
             config={"recursion_limit": self.limits.recursion_limit, "callbacks": [*self.callbacks]},
         )
-        return RoleResult(summary=last_ai_text(state["messages"]))
+        return RoleResult(summary=last_ai_text(state["messages"]), proposed=proposal.made)
+
+
+@dataclass
+class Proposal:
+    made: bool = False
+
+    def tool(self) -> BaseTool:
+        def submit_proposal(reason: str) -> str:
+            self.made = True
+            return "Noted: this run ends with a proposal a person decides on."
+
+        return StructuredTool.from_function(
+            func=submit_proposal,
+            name=PROPOSE_TOOL,
+            description=(
+                "Call once when you found something a person should act on: the run then ends"
+                " with a proposal. Do not call it when there is nothing to act on; your record is"
+                " the report. `reason` says in one line what you found."
+            ),
+        )
 
 
 def gateway_model(settings: Mapping[str, str]) -> ChatOpenAI:
@@ -98,13 +123,18 @@ def model_timeout(settings: Mapping[str, str]) -> float:
 
 
 def build_agent(
-    model: BaseChatModel, brief: Brief, limits: Limits, tools: Sequence[BaseTool] = ()
+    model: BaseChatModel,
+    brief: Brief,
+    limits: Limits,
+    tools: Sequence[BaseTool] = (),
+    proposal: Proposal | None = None,
 ) -> CompiledStateGraph:
     skills = [SKILLS_ROUTE] if has_skills(brief) else None
     budget = CallBudget(limits.max_model_calls)
+    own = [proposal.tool()] if proposal is not None else []
     return create_deep_agent(
         model=model,
-        tools=unshadowed(tools),
+        tools=[*unshadowed(tools), *own],
         system_prompt=f"{brief.instructions}\n\n{preamble(brief)}",
         backend=workspace_backend(brief.workspace, brief.skills_dir if skills else None),
         permissions=role_permissions(brief.role.writes),
@@ -248,6 +278,7 @@ def preamble(brief: Brief) -> str:
     target = brief.target
     sections = ", ".join(sorted(target.empty_sections)) or "none"
     linked = "\n\n".join(record_block(r.id, r.text) for r in brief.linked) or "None."
+    outcome = goal_rules(brief) if brief.goal_mode else ""
     return f"""# Golem run {brief.run_id}
 
 Goal: {brief.goal}
@@ -259,7 +290,7 @@ Rules:
 - Fill the empty sections of the target; do not change any `status`.
 - Write only under `{writes_root(brief.role.writes)}/`; every other path is read-only.
 - There is no shell; work through the file tools.
-
+{outcome}
 ## Target
 
 {record_block(target.id, brief.target_text)}
@@ -267,6 +298,14 @@ Rules:
 ## Linked records
 
 {linked}
+"""
+
+
+def goal_rules(brief: Brief) -> str:
+    open_ones = ", ".join(f"`{branch}`" for branch in brief.open_proposals) or "none"
+    return f"""- Record what you found in the target either way: it is the report of this run.
+- Call `{PROPOSE_TOOL}` only if a person should act on it; otherwise the run just reports.
+- Proposals still open on this target: {open_ones}. Extend what they propose, do not repeat it.
 """
 
 

@@ -13,7 +13,12 @@ from test_tasks_to_runs import CATALOG, SIGNING_KEY, TEMPLATE, FakeLauncher
 from golem.metrics import OTHER, Metrics, ReconcilerMetrics
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import JobStatus
-from golem.orchestrator.reconcile import LAUNCH_GRACE_SECONDS, SucceededRun, reconcile_once
+from golem.orchestrator.reconcile import (
+    LAUNCH_GRACE_SECONDS,
+    Settlement,
+    SucceededRun,
+    reconcile_once,
+)
 from golem.orchestrator.reconciler import run_forever
 from golem.orchestrator.service import PostgresOrchestrator
 from golem.tasks.ports import Refused, RunStart, Started
@@ -127,7 +132,7 @@ async def test_the_reconciler_gauges_the_outbox_and_unsettled_proposals(runs_db:
     succeeded = await new_run(runs_db, "m-2")
     board = StatusBoard(statuses={failed: JobStatus.FAILED, succeeded: JobStatus.SUCCEEDED})
 
-    async def gitlab_down(run: SucceededRun) -> str:
+    async def gitlab_down(run: SucceededRun) -> Settlement:
         raise RuntimeError("GitLab is down")
 
     async with await psycopg.AsyncConnection.connect(runs_db, autocommit=True) as conn:
@@ -138,8 +143,8 @@ async def test_the_reconciler_gauges_the_outbox_and_unsettled_proposals(runs_db:
     assert r.get_sample_value("golem_proposals_pending") == 1
     assert r.get_sample_value("golem_merge_request_failures_total") == 1
 
-    async def no_branch(run: SucceededRun) -> str:
-        return f"Run {run.run_id} succeeded and proposed no changes."
+    async def no_branch(run: SucceededRun) -> Settlement:
+        return Settlement(f"Run {run.run_id} succeeded and proposed no changes.")
 
     async with await psycopg.AsyncConnection.connect(runs_db, autocommit=True) as conn:
         await reconcile_once(conn, board, Inbox().notify, no_branch, metrics)

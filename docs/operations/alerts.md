@@ -24,7 +24,7 @@ Runs and the reconciler:
 | `golem_runs_started_total` | counter | `agent` | runs admitted and recorded |
 | `golem_admission_rejections_total` | counter | `reason` | run starts refused: `caller_concurrency`, `chain_concurrency`, `chain_budget`, `unknown_agent` |
 | `golem_run_reserved_cost_total` | counter | `agent` | estimated cost reserved at admission |
-| `golem_run_outcomes_total` | counter | `agent`, `outcome` | final statuses: `succeeded`, `idle`, `invalid`, `failed`, `canceled` |
+| `golem_run_outcomes_total` | counter | `agent`, `outcome` | final statuses: `succeeded`, `idle`, `reported`, `invalid`, `failed`, `canceled` |
 | `golem_run_duration_seconds` | histogram | `agent`, `outcome` | from recording a run to its final status |
 | `golem_reconcile_pass_duration_seconds` | histogram | | one reconcile pass |
 | `golem_reconcile_pass_errors_total` | counter | | passes that raised |
