@@ -15,7 +15,7 @@ closed without one.
 
 With ``proposals=True`` three goal agents propose what the platform applies (ADR 0015), and
 ``alice`` reviews them: ``seed`` has ``bob`` start their runs, each run's branch carries its
-golem-proposal.json in GitLab (faked with the branches and files the reconciler reads), and the
+proposal file in GitLab (faked with the branches and files the reconciler reads), and the
 reconciler records the proposals; accepting one applies it through a real write server to
 Confluence, Jira Service Management or Jira, faked at their HTTP boundary (support.atlassian).
 One more run finds nothing to propose and leaves a report.
@@ -79,6 +79,7 @@ from golem.orchestrator.process_runs import ProcessPorts
 from golem.orchestrator.reconcile import Landing, Reporter, SucceededRun, reconcile_once
 from golem.orchestrator.service import JobTemplate, PostgresOrchestrator
 from golem.orchestrator.stages import EdgeStages
+from golem.proposal_payload import proposal_file
 from golem.proposal_status import ProposalStates
 from golem.ratelimit import Limiter, Rate
 from golem.run_status import RunStatuses
@@ -165,7 +166,7 @@ RUNBOOK_EDIT = RUNBOOK.replace(
     "<p>It runs in Kubernetes now: restart it with"
     " <code>kubectl rollout restart deploy/exporter</code>.</p>",
 ).replace("<p>It keeps 30 days of files.</p>", "<p>It keeps 14 days of files.</p>")
-# One run's branch: the target, golem-proposal.json's fields, and the files they name.
+# One run's branch: the target, its proposal file's fields, and the files they name.
 PROPOSED_RUNS: dict[str, tuple[str, str, dict[str, Any], dict[str, str]]] = {
     "wiki": (
         "docs",
@@ -799,7 +800,7 @@ async def _seed_proposals(demo: Demo) -> dict[str, str]:
             task = await send(agent, name, goal)
             run_id = task["metadata"]["runId"]
             demo.gitlab.push(
-                run_id, f"{agent}-{name}", {"golem-proposal.json": json.dumps(manifest)} | files
+                run_id, f"{agent}-{name}", {proposal_file(run_id): json.dumps(manifest)} | files
             )
             demo.launcher.finish(run_id, JobStatus.SUCCEEDED)
             runs[name] = run_id

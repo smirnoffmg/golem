@@ -42,7 +42,7 @@ class RoleResult:
     summary: str
     # Whether a goal run's role found something to act on; a record run always proposes.
     proposed: bool = False
-    # What the role submitted for a kind the platform applies: golem-proposal.json's content,
+    # What the role submitted for a kind the platform applies: the proposal file's content,
     # body files as paths in the workspace. Checked again before it leaves the Job.
     proposal: Mapping[str, Any] | None = None
 

@@ -1,7 +1,7 @@
 """What a run proposes when a person decides it in Golem and the platform applies it (ADR 0015).
 
-The runtime writes ``golem-proposal.json`` at its branch's root: the kind, the kind's fields and
-the paths of its body files. The reconciler reads the same file at the branch's head commit and
+The runtime writes ``golem-proposals/<run id>.json`` on its branch: the kind, the kind's fields
+and the paths of its body files. The reconciler reads the same file at the branch's head commit and
 checks it again, since it comes from an untrusted Job. Both turn it into the payload with
 ``payload_of``; the payload is what a person decides on, what the write server applies, and what
 the proposal's digest binds a token to.
@@ -13,7 +13,9 @@ from collections.abc import Callable, Mapping
 from pathlib import PurePosixPath
 from typing import Any
 
-PROPOSAL_FILE = "golem-proposal.json"
+# One file per run: an applied proposal's branch lands in main, and two proposals from one main
+# must not both change the same file.
+PROPOSALS_DIR = "golem-proposals"
 MERGE_REQUEST = "merge_request"
 WIKI_EDIT = "wiki_edit"
 DESK_REPLY = "desk_reply"
@@ -45,6 +47,11 @@ class ProposalError(ValueError):
     pass
 
 
+def proposal_file(run_id: str) -> str:
+    """Where a run's proposal is on its branch."""
+    return f"{PROPOSALS_DIR}/{run_id}.json"
+
+
 def payload_of(
     kind: str, manifest: object, read: ReadFile, *, under: str | None = None
 ) -> dict[str, Any]:
@@ -52,9 +59,9 @@ def payload_of(
     raises ProposalError for anything off. ``under`` requires the body files in that directory.
     """
     if not isinstance(manifest, dict):
-        raise ProposalError(f"{PROPOSAL_FILE} must hold a JSON object")
+        raise ProposalError("the proposal file must hold a JSON object")
     if manifest.get("kind") != kind:
-        raise ProposalError(f"{PROPOSAL_FILE} names kind {manifest.get('kind')!r}, not {kind!r}")
+        raise ProposalError(f"the proposal file names kind {manifest.get('kind')!r}, not {kind!r}")
     fields = {key: value for key, value in manifest.items() if key != "kind"}
     body = _Body(read, under)
     match kind:
@@ -64,7 +71,7 @@ def payload_of(
             return _desk_reply(fields, body)
         case "tracker_issue":
             return _tracker_issue(fields, body)
-    raise ProposalError(f"proposals of kind {kind!r} have no {PROPOSAL_FILE}")
+    raise ProposalError(f"proposals of kind {kind!r} have no proposal file")
 
 
 def _wiki_edit(fields: dict[str, Any], body: "_Body") -> dict[str, Any]:

@@ -84,7 +84,7 @@ class DeepAgentsRunner:
 @dataclass
 class Proposal:
     """What the role submits through `submit_proposal`: that a goal run found something, and for
-    a kind the platform applies, golem-proposal.json's content (ADR 0015)."""
+    a kind the platform applies, the proposal file's content (ADR 0015)."""
 
     kind: str = MERGE_REQUEST
     workspace: Path | None = None

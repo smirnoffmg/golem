@@ -64,7 +64,7 @@ CREATE INDEX IF NOT EXISTS proposals_pending_merge_requests ON proposals (checke
     WHERE kind = 'merge_request' AND state = 'pending';
 
 -- What a run's agent proposes, from its pinned catalog when the run started (ADR 0015): a
--- merge request, or a kind the platform applies, read back from golem-proposal.json.
+-- merge request, or a kind the platform applies, read back from its proposal file (golem-proposals/<run id>.json).
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS proposal_kind text NOT NULL DEFAULT 'merge_request';
 -- The digest binds a decision's token to the payload a person saw; the commit is where the
 -- payload was read, and the one the record lands at. The reason is the decider's own words.

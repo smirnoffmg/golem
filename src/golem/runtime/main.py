@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TextIO
 
 from golem.catalog import AgentCatalog, ContextRepo, Goal, Kind, goal_target, load_catalog
-from golem.proposal_payload import APPLIED_KINDS, PROPOSAL_FILE, ProposalError, payload_of
+from golem.proposal_payload import APPLIED_KINDS, ProposalError, payload_of, proposal_file
 from golem.runtime.brief import build_brief
 from golem.runtime.lead import Command, Idle, decide
 from golem.runtime.ports import Brief, RoleResult, RoleRunner
@@ -284,7 +284,9 @@ async def propose(
     if outcome is Outcome.PROPOSED and result.proposal is not None:
         # Written by the runtime after validation, outside the role's directory: the one file
         # the reconciler reads to learn what the run proposes (ADR 0015).
-        (repo / PROPOSAL_FILE).write_text(
+        manifest = repo / proposal_file(settings.run_id)
+        manifest.parent.mkdir(exist_ok=True)
+        manifest.write_text(
             json.dumps(result.proposal, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )

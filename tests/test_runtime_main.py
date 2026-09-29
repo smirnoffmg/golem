@@ -339,7 +339,7 @@ class FakeRunner:
     fill_target: bool = True
     status_to: str | None = None
     propose: bool = False
-    # golem-proposal.json's content the role submits, for a kind the platform applies.
+    # the proposal file's content the role submits, for a kind the platform applies.
     proposal: dict[str, Any] | None = None
     briefs: list[Brief] = field(default_factory=list)
 
@@ -681,10 +681,26 @@ async def test_a_goal_run_of_an_applied_kind_carries_golem_proposal_json(tmp_pat
     assert report.outcome is Outcome.PROPOSED
     assert runner.briefs[0].proposal_kind == "desk_reply"
     branch = "golem/alert-0a1b2c3d4e5f/run-1"
-    assert json.loads(sh("show", f"{branch}:golem-proposal.json", cwd=remotes.context)) == REPLY
+    manifest = sh("show", f"{branch}:golem-proposals/run-1.json", cwd=remotes.context)
+    assert json.loads(manifest) == REPLY
     assert sh("show", f"{branch}:hypotheses/replies/sd-12.txt", cwd=remotes.context) == (
         "The export works again."
     )
+
+
+async def test_two_runs_proposals_never_share_a_file_that_lands_in_main(tmp_path):
+    # Applied proposals land their branch in main; one manifest path for every run made the
+    # second of two proposals from one main conflict with the first (ADR 0015).
+    remotes = remotes_with(tmp_path, extra=GOAL + "proposal: desk_reply\n")
+    runner = FakeRunner(
+        edits={"hypotheses/replies/sd-12.txt": "The export works again."}, proposal=REPLY
+    )
+
+    report = await run(goal_settings(remotes, tmp_path), runner)
+
+    files = sh("ls-tree", "-r", "--name-only", report.branch, cwd=remotes.context).split()
+    assert "golem-proposal.json" not in files
+    assert "golem-proposals/run-1.json" in files
 
 
 async def test_a_goal_run_of_an_applied_kind_with_nothing_to_propose_reports(tmp_path):
@@ -716,7 +732,9 @@ async def test_a_record_run_of_an_applied_kind_proposes_with_its_file(tmp_path):
     report = await run(settings_for(remotes, tmp_path), runner)
 
     assert report.outcome is Outcome.PROPOSED
-    assert json.loads(sh("show", f"{report.branch}:golem-proposal.json", cwd=remotes.context))
+    assert json.loads(
+        sh("show", f"{report.branch}:golem-proposals/run-1.json", cwd=remotes.context)
+    )
 
 
 @pytest.mark.parametrize(

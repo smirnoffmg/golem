@@ -26,7 +26,7 @@ from golem.orchestrator.reconcile import (
     reconcile_once,
 )
 from golem.orchestrator.runs import RunCreated, StartRequest, start_run
-from golem.proposal_payload import payload_digest
+from golem.proposal_payload import payload_digest, proposal_file
 
 REPLY = {
     "kind": "desk_reply",
@@ -56,11 +56,11 @@ async def merge_requests(gitlab: FakeGitLab) -> AsyncIterator[GitLabMergeRequest
 
 
 def pushed(gitlab: FakeGitLab, run_id: str, manifest: object = REPLY) -> str:
-    """A run's branch as the runtime pushes it: golem-proposal.json and the body, at its head."""
+    """A run's branch as the runtime pushes it: its proposal file and the body, at its head."""
     branch = f"golem/alert-1/{run_id}"
     gitlab.branches.append(branch)
     head = f"sha-{branch}"
-    gitlab.files[(head, "golem-proposal.json")] = json.dumps(manifest)
+    gitlab.files[(head, proposal_file(run_id))] = json.dumps(manifest)
     gitlab.files[(head, "hypotheses/replies/sd-12.txt")] = REPLY_TEXT
     return branch
 
@@ -154,7 +154,7 @@ async def test_a_proposal_is_read_at_the_head_commit_and_needs_no_merge_request(
     assert gitlab.merge_requests == []
 
 
-async def test_a_branch_without_golem_proposal_json_proposes_nothing(
+async def test_a_branch_without_its_proposal_file_proposes_nothing(
     gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
 ) -> None:
     gitlab.branches.append("golem/alert-1/run-1")
@@ -164,7 +164,7 @@ async def test_a_branch_without_golem_proposal_json_proposes_nothing(
     )
 
     assert settlement.proposal is None
-    assert "golem-proposal.json" in settlement.detail
+    assert "golem-proposals/run-1.json" in settlement.detail
 
 
 @pytest.mark.parametrize(
@@ -193,7 +193,7 @@ async def test_malformed_json_on_the_branch_is_refused(
     gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
 ) -> None:
     branch = pushed(gitlab, "run-1")
-    gitlab.files[(f"sha-{branch}", "golem-proposal.json")] = "{not json"
+    gitlab.files[(f"sha-{branch}", proposal_file("run-1"))] = "{not json"
 
     settlement = await propose_result(
         merge_requests, SucceededRun("run-1", "discovery", proposal_kind="desk_reply")

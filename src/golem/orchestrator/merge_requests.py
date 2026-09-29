@@ -5,10 +5,10 @@ context repository; the orchestrator does not know the target id, so it finds th
 the run id suffix, then opens the merge request idempotently per source branch. The merge
 request is the run's proposal (ADR 0015): a person decides it in GitLab, and the reconciler reads
 the decision back from there. A run of a kind the platform applies proposes through
-``golem-proposal.json`` on its branch instead, read at the head commit and checked again; once a
-person decided it, its branch is merged at that commit or deleted. A goal run that found nothing
-to propose has no merge request: its target record, read at the branch's head commit, is its
-report, and then the branch goes (ADR 0017).
+``golem-proposals/<run id>.json`` on its branch instead, read at the head commit and checked
+again; once a person decided it, its branch is merged at that commit or deleted. A goal run
+that found nothing to propose has no merge request: its target record, read at the branch's
+head commit, is its report, and then the branch goes (ADR 0017).
 """
 
 import json
@@ -37,10 +37,10 @@ from golem.orchestrator.reconcile import (
 )
 from golem.proposal_payload import (
     APPLIED_KINDS,
-    PROPOSAL_FILE,
     ProposalError,
     payload_digest,
     payload_of,
+    proposal_file,
     summary_of,
 )
 from golem.resolution import MAX_REASON_CHARS
@@ -343,7 +343,7 @@ async def propose_result(gitlab: GitLabMergeRequests, run: SucceededRun) -> Sett
 
 
 async def propose_payload(gitlab: GitLabMergeRequests, run: SucceededRun) -> Settlement:
-    """The run's golem-proposal.json and its body files, read at the branch's head commit and
+    """The run's proposal file and its body files, read at the branch's head commit and
     checked again: they come from an untrusted Job. Anything off leaves no proposal."""
     try:
         branch = await gitlab.find_branch(run.agent, run.run_id)
@@ -352,15 +352,16 @@ async def propose_payload(gitlab: GitLabMergeRequests, run: SucceededRun) -> Set
     if branch is None:
         return Settlement(idle_detail(run.run_id))
     commit = await gitlab.head_commit(run.agent, branch)
+    manifest_path = proposal_file(run.run_id)
     try:
-        manifest = json.loads(await gitlab.raw_file(run.agent, PROPOSAL_FILE, commit))
+        manifest = json.loads(await gitlab.raw_file(run.agent, manifest_path, commit))
     except NotFound:
         return Settlement(
-            f"Run {run.run_id} succeeded, but its branch carries no {PROPOSAL_FILE};"
+            f"Run {run.run_id} succeeded, but its branch carries no {manifest_path};"
             " nothing was proposed."
         )
     except ValueError:
-        return _invalid(run, f"{PROPOSAL_FILE} is not JSON")
+        return _invalid(run, f"{manifest_path} is not JSON")
     files: dict[str, str] = {}
     if isinstance(manifest, dict):
         for name, path in manifest.items():
