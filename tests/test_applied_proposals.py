@@ -189,6 +189,57 @@ async def test_a_proposal_the_job_got_wrong_is_checked_again_and_refused(
     assert "invalid" in settlement.detail
 
 
+def raw_reads(gitlab: FakeGitLab) -> list[str]:
+    return [r.url.path for r in gitlab.requests if r.url.path.endswith("/raw")]
+
+
+async def test_a_manifest_naming_files_the_kind_has_no_field_for_fetches_none_of_them(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    # The manifest comes from an untrusted Job: it must not decide how many requests the
+    # reconciler makes before it is refused.
+    flood = REPLY | {f"a{n}_file": "x" for n in range(200)}
+    pushed(gitlab, "run-1", flood)
+
+    settlement = await propose_result(
+        merge_requests, SucceededRun("run-1", "discovery", proposal_kind="desk_reply")
+    )
+
+    assert settlement.proposal is None
+    assert "unknown field" in settlement.detail
+    assert len(raw_reads(gitlab)) == 1
+
+
+async def test_an_oversized_manifest_is_refused_unread(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    branch = pushed(gitlab, "run-1")
+    gitlab.files[(f"sha-{branch}", proposal_file("run-1"))] = json.dumps(
+        REPLY | {"padding": "x" * 100_000}
+    )
+
+    settlement = await propose_result(
+        merge_requests, SucceededRun("run-1", "discovery", proposal_kind="desk_reply")
+    )
+
+    assert settlement.proposal is None
+    assert "larger than" in settlement.detail
+    assert len(raw_reads(gitlab)) == 1
+
+
+async def test_a_valid_manifest_fetches_only_its_kinds_body_file(
+    gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    pushed(gitlab, "run-1")
+
+    settlement = await propose_result(
+        merge_requests, SucceededRun("run-1", "discovery", proposal_kind="desk_reply")
+    )
+
+    assert settlement.proposal is not None
+    assert len(raw_reads(gitlab)) == 2
+
+
 async def test_malformed_json_on_the_branch_is_refused(
     gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
 ) -> None:

@@ -33,6 +33,8 @@ MAX_TITLE = 255
 MAX_SUMMARY = 255
 MAX_ISSUE_TYPE = 64
 MAX_PATH = 512
+# A manifest names fields and file paths only; bodies are in the files.
+MAX_MANIFEST = 16_384
 # The largest integer a JSON number carries exactly (RFC 8785 3.2.2.3 serializes as IEEE 754).
 MAX_EXACT_INT = 2**53 - 1
 
@@ -72,6 +74,19 @@ def payload_of(
         case "tracker_issue":
             return _tracker_issue(fields, body)
     raise ProposalError(f"proposals of kind {kind!r} have no proposal file")
+
+
+def body_paths(kind: str, manifest: object) -> tuple[str, ...]:
+    """The body files ``manifest`` names, once everything but the files' contents checks out:
+    what a reader of an untrusted manifest fetches, and nothing more. Raises ProposalError."""
+    named: list[str] = []
+
+    def note(path: str) -> str:
+        named.append(path)
+        return "."
+
+    payload_of(kind, manifest, note)
+    return tuple(named)
 
 
 def _wiki_edit(fields: dict[str, Any], body: "_Body") -> dict[str, Any]:

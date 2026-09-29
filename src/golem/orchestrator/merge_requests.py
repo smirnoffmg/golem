@@ -37,7 +37,9 @@ from golem.orchestrator.reconcile import (
 )
 from golem.proposal_payload import (
     APPLIED_KINDS,
+    MAX_MANIFEST,
     ProposalError,
+    body_paths,
     payload_digest,
     payload_of,
     proposal_file,
@@ -354,23 +356,27 @@ async def propose_payload(gitlab: GitLabMergeRequests, run: SucceededRun) -> Set
     commit = await gitlab.head_commit(run.agent, branch)
     manifest_path = proposal_file(run.run_id)
     try:
-        manifest = json.loads(await gitlab.raw_file(run.agent, manifest_path, commit))
+        text = await gitlab.raw_file(run.agent, manifest_path, commit)
     except NotFound:
         return Settlement(
             f"Run {run.run_id} succeeded, but its branch carries no {manifest_path};"
             " nothing was proposed."
         )
+    if len(text) > MAX_MANIFEST:
+        return _invalid(run, f"{manifest_path} is larger than {MAX_MANIFEST} characters")
+    try:
+        manifest = json.loads(text)
     except ValueError:
         return _invalid(run, f"{manifest_path} is not JSON")
     files: dict[str, str] = {}
-    if isinstance(manifest, dict):
-        for name, path in manifest.items():
-            if name.endswith("_file") and isinstance(path, str):
-                try:
-                    files[path] = await gitlab.raw_file(run.agent, path, commit)
-                except NotFound:
-                    continue
     try:
+        # Checked before anything it names is fetched: the manifest is the Job's, and must not
+        # decide how many requests a pass makes.
+        for path in body_paths(run.proposal_kind, manifest):
+            try:
+                files[path] = await gitlab.raw_file(run.agent, path, commit)
+            except NotFound:
+                continue
         payload = payload_of(run.proposal_kind, manifest, files.__getitem__)
     except ProposalError as error:
         return _invalid(run, str(error))
