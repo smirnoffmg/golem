@@ -36,7 +36,8 @@ UNMATCHED = "unmatched"
 METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"})
 PROPOSAL_KINDS = frozenset({"merge_request", "wiki_edit", "desk_reply", "tracker_issue"})
 DECISIONS = frozenset({"accept", "reject"})
-APPLY_RESULTS = frozenset({"applied", "stale", "failed", "unanswered"})
+# "unrecorded": the write server answered, but the row had moved on and kept another state.
+APPLY_RESULTS = frozenset({"applied", "stale", "failed", "unanswered", "unrecorded"})
 # The edge waits up to 30 s for the task service; the last bucket catches that.
 HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0)
 # A Job's deadline is an hour by default.

@@ -51,6 +51,9 @@ MERGE_REQUEST = "merge_request"
 REPORTED = "reported"
 # A proposal in these states still waits for a person or for its apply.
 UNDECIDED = ("pending", "accepted", "failed")
+# What a canceled process withdraws: an accepted proposal is not among them, its apply may be
+# writing already, and it ends as that apply says (ADR 0019).
+WITHDRAWN_STATES = ("pending", "failed")
 
 
 @dataclass(frozen=True)
@@ -372,7 +375,7 @@ async def _withdraw(
     conn: AsyncConnection, row: Row, ports: ProcessPorts, launcher: JobLauncher
 ) -> None:
     """A canceled process: its running stage run is canceled, a result not yet proposed is
-    settled with nothing proposed, and an open proposal is rejected."""
+    settled with nothing proposed, and a proposal waiting for a person is rejected."""
     run_id = row.run_id
     if run_id is None:
         # Started, but not yet linked: the run is still the stage's, found by its message.
@@ -403,13 +406,13 @@ async def _withdraw(
                     run_id,
                 ),
             )
-        elif stage_run.proposal_id is not None and stage_run.proposal_state in UNDECIDED:
+        elif stage_run.proposal_id is not None and stage_run.proposal_state in WITHDRAWN_STATES:
             if stage_run.kind == MERGE_REQUEST and stage_run.iid is not None:
                 await ports.close_merge_request(stage_run.agent, stage_run.iid)
             await conn.execute(
                 "UPDATE proposals SET state = 'rejected', decided_by = %s, decided_at = now(),"
                 " detail = %s WHERE id = %s AND state = ANY(%s)",
-                (row.owner, PROCESS_CANCELED, stage_run.proposal_id, list(UNDECIDED)),
+                (row.owner, PROCESS_CANCELED, stage_run.proposal_id, list(WITHDRAWN_STATES)),
             )
     await conn.execute(
         "UPDATE process_stages SET state = 'canceled', updated_at = now()"

@@ -158,7 +158,19 @@ async def apply_accepted(
         return
     if metrics is not None:
         metrics.proposal_applied(kind, result.state)
-    await orchestrator.record_apply(decided.summary.id, result.state, result.detail, ("accepted",))
+    recorded = await orchestrator.record_apply(
+        decided.summary.id, result.state, result.detail, ("accepted",)
+    )
+    if not recorded:
+        # The target changed, and Golem shows another state: someone must know.
+        log.warning(
+            "proposal %s was applied as %s, but it was no longer accepted: %s",
+            decided.summary.id,
+            result.state,
+            result.detail,
+        )
+        if metrics is not None:
+            metrics.proposal_applied(kind, "unrecorded")
 
 
 def proposal_routes(

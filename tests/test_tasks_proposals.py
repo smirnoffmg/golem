@@ -489,3 +489,42 @@ def test_decisions_and_applies_are_counted_by_kind_and_result(runs_db: str) -> N
     assert decided("desk_reply", "accept") == 1
     assert applied("wiki_edit", "stale") == 1
     assert applied("desk_reply", "unanswered") == 1
+
+
+def test_an_apply_whose_result_finds_the_row_moved_on_is_logged_and_counted(
+    runs_db: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    metrics = Metrics("tasks")
+    applier = FakeApplier()
+    listeners = create_listeners(
+        make_card(),
+        _orchestrator(runs_db),
+        edge_token=TEST_EDGE_TOKEN,
+        applier=applier,
+        metrics=metrics,
+    )
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        token = (EDGE_TOKEN_HEADER.encode(), TEST_EDGE_TOKEN.encode())
+        await listeners.public(
+            {**scope, "headers": [*scope.get("headers", []), token]}, receive, send
+        )
+
+    with TestClient(app) as client:
+        proposal_id = proposal_for(runs_db, start(client, "desk"))
+        original = applier.apply
+
+        async def moved_meanwhile(decided: ProposalDetail) -> Applied:
+            # Something else moved the row while the write server wrote.
+            with psycopg.connect(runs_db, autocommit=True) as conn:
+                conn.execute(
+                    "UPDATE proposals SET state = 'rejected' WHERE id = %s", (proposal_id,)
+                )
+            return await original(decided)
+
+        applier.apply = moved_meanwhile  # type: ignore[method-assign]
+        decide(client, proposal_id, {"decision": "accept"})
+
+    labels = {"kind": "desk_reply", "result": "unrecorded"}
+    assert metrics.registry.get_sample_value("golem_proposal_applies_total", labels) == 1
+    assert f"proposal {proposal_id} was applied" in caplog.text
