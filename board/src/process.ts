@@ -1,7 +1,7 @@
 // What a process card says of its process (ADR 0019), as pure functions of the BFF's view.
 
 import type { Resolution } from "./api";
-import type { ProcessView } from "./board";
+import type { ProcessView, Task } from "./board";
 
 export const MAX_REASON_CHARS = 4000;
 
@@ -38,4 +38,10 @@ export function resolutionProblem(action: Resolution, reason: string): string | 
   if (reason.length > MAX_REASON_CHARS) return "Keep the reason under 4000 characters.";
   if (action === "rerun" && reason.trim() === "") return "Say why the stage should run again.";
   return null;
+}
+
+// What a task in "Waiting for me" asks of its owner, wherever the task is shown.
+export function answerForm(task: Task): "resolution" | "reply" | null {
+  if (task.column !== "waiting") return null;
+  return task.process?.state === "needs_reason" ? "resolution" : "reply";
 }

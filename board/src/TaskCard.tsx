@@ -1,11 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useState } from "react";
 import { api } from "./api";
-import { ACTIVE_STATES, type Board, type Proposal, type Task, snapshotNext } from "./board";
+import { ACTIVE_STATES, type Proposal, type Task } from "./board";
 import { Link } from "./navigation";
 import { taskPath } from "./route";
 import {
   MAX_REASON_CHARS,
+  answerForm,
   attemptText,
   failureText,
   resolutionProblem,
@@ -91,12 +92,10 @@ export function TaskCard(props: { agent: string; task: Task; onChanged: (task: T
         <p className="card-message">{task.message}</p>
       )}
       {task.proposal && <ProposalLink proposal={task.proposal} inProcess={task.process !== null} />}
-      {task.column === "waiting" &&
-        (task.process?.state === "needs_reason" ? (
-          <ResolutionForm agent={agent} task={task} />
-        ) : (
-          <ReplyForm agent={agent} task={task} onChanged={props.onChanged} />
-        ))}
+      {answerForm(task) === "resolution" && <ResolutionForm agent={agent} task={task} />}
+      {answerForm(task) === "reply" && (
+        <ReplyForm agent={agent} task={task} onChanged={props.onChanged} />
+      )}
       {ACTIVE_STATES.has(task.state) && (
         <button type="button" className="quiet" disabled={busy} onClick={cancel}>
           {busy ? "Canceling…" : "Cancel"}
@@ -195,10 +194,10 @@ export function ResolutionForm(props: { agent: string; task: Task }) {
     setError(null);
     try {
       await api.resolve(props.task.id, action, action === "rerun" ? reason.trim() : undefined);
-      // The process's change does not move its task's timestamp: only a snapshot shows it.
-      const key = ["board", props.agent];
-      queryClient.setQueryData<Board>(key, (current) => snapshotNext(current));
-      await queryClient.invalidateQueries({ queryKey: key });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["board", props.agent] }),
+        queryClient.invalidateQueries({ queryKey: ["task", props.agent, props.task.id] }),
+      ]);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "The answer was not sent.");
     } finally {

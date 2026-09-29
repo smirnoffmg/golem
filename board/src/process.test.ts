@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { ProcessView } from "./board";
-import { attemptText, failureText, resolutionProblem, stageText, staleText } from "./process";
+import type { ProcessView, Task } from "./board";
+import {
+  answerForm,
+  attemptText,
+  failureText,
+  resolutionProblem,
+  stageText,
+  staleText,
+} from "./process";
 
 function view(overrides: Partial<ProcessView> = {}): ProcessView {
   return {
@@ -60,5 +67,32 @@ describe("the answer to a process waiting for a reason", () => {
     expect(resolutionProblem("rerun", "x".repeat(4001))).toBe(
       "Keep the reason under 4000 characters.",
     );
+  });
+});
+
+describe("the answer a waiting task asks for", () => {
+  function waiting(process: ProcessView | null): Task {
+    return {
+      id: "t-1",
+      state: "working",
+      column: "waiting",
+      goal: "g",
+      message: "",
+      updated: "2026-09-28T10:00:00Z",
+      proposal: null,
+      process,
+    };
+  }
+
+  it("is a reason for a process waiting for one, on the card and on the task's page alike", () => {
+    expect(answerForm(waiting(view({ state: "needs_reason" })))).toBe("resolution");
+  });
+
+  it("is a reply for a task waiting for input", () => {
+    expect(answerForm({ ...waiting(null), state: "input-required" })).toBe("reply");
+  });
+
+  it("is none for a task not waiting", () => {
+    expect(answerForm({ ...waiting(null), column: "in_progress" })).toBeNull();
   });
 });

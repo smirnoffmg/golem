@@ -6,7 +6,8 @@ import { ACTIVE_STATES } from "./board";
 import { Link } from "./navigation";
 import { boardInterval } from "./poll";
 import { agentPath } from "./route";
-import { ProposalLink, ReplyForm, stateName } from "./TaskCard";
+import { answerForm } from "./process";
+import { ProposalLink, ReplyForm, ResolutionForm, stateName } from "./TaskCard";
 import { since } from "./text";
 
 export function TaskPage(props: { agent: string; taskId: string }) {
@@ -64,7 +65,10 @@ export function TaskPage(props: { agent: string; taskId: string }) {
           </dl>
           {task.data.message && <p className="card-message">{task.data.message}</p>}
           {task.data.proposal && <ProposalLink proposal={task.data.proposal} />}
-          {task.data.column === "waiting" && (
+          {answerForm(task.data) === "resolution" && (
+            <ResolutionForm agent={agent} task={task.data} />
+          )}
+          {answerForm(task.data) === "reply" && (
             <ReplyForm agent={agent} task={task.data} onChanged={changed} />
           )}
           {ACTIVE_STATES.has(task.data.state) && (
