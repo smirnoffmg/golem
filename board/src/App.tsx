@@ -3,7 +3,10 @@ import { type ReactNode, useEffect, useState } from "react";
 import { type Agent, ApiError, type Session, api } from "./api";
 import { AgentBoard } from "./AgentBoard";
 import { Link, navigate, useRoute } from "./navigation";
-import { agentPath, signinNotice } from "./route";
+import { ProposalPage } from "./ProposalPage";
+import { ReportPage } from "./Reports";
+import { REVIEW_COUNTS_INTERVAL_MS, ReviewPage } from "./Review";
+import { REVIEW_PATH, agentPath, signinNotice } from "./route";
 import { TaskPage } from "./TaskPage";
 
 export function App() {
@@ -93,12 +96,29 @@ function SignedIn(props: { session: Session }) {
     queryFn: () => api.agents(),
     staleTime: 60_000,
   });
-  const current = route.page === "board" || route.page === "task" ? route.agent : null;
+  const counts = useQuery({
+    queryKey: ["review-counts"],
+    queryFn: () => api.reviewCounts(),
+    refetchInterval: REVIEW_COUNTS_INTERVAL_MS,
+  });
+  const current = "agent" in route ? route.agent : null;
+  const waiting = Object.values(counts.data?.agents ?? {}).reduce((sum, n) => sum + n, 0);
 
   return (
     <Shell session={props.session}>
       <div className="workspace">
         <nav className="rail" aria-label="Agents">
+          <Link to={REVIEW_PATH} className="rail-link rail-review" current={route.page === "review"}>
+            <span className="rail-name">
+              To review
+              {waiting > 0 && (
+                <span className="count">
+                  {waiting}
+                  {counts.data?.more ? "+" : ""}
+                </span>
+              )}
+            </span>
+          </Link>
           <h2 className="rail-title">Agents</h2>
           {agents.isPending && <p className="muted">Loading…</p>}
           {agents.error && <p role="alert">{agents.error.message}</p>}
@@ -109,7 +129,12 @@ function SignedIn(props: { session: Session }) {
             {agents.data?.map((agent) => (
               <li key={agent.name}>
                 <Link to={agentPath(agent.name)} className="rail-link" current={agent.name === current}>
-                  <span className="rail-name">{agent.name}</span>
+                  <span className="rail-name">
+                    {agent.name}
+                    {(counts.data?.agents[agent.name] ?? 0) > 0 && (
+                      <span className="count">{counts.data?.agents[agent.name]}</span>
+                    )}
+                  </span>
                   {agent.description && <span className="rail-description">{agent.description}</span>}
                 </Link>
               </li>
@@ -138,6 +163,8 @@ function Home(props: { agents: Agent[] | undefined }) {
 function Page(props: { route: ReturnType<typeof useRoute>; agents: Agent[] | undefined }) {
   const { route, agents } = props;
   if (route.page === "home") return <Home agents={agents} />;
+  if (route.page === "review") return <ReviewPage />;
+  if (route.page === "proposal") return <ProposalPage proposalId={route.proposalId} />;
   if (route.page === "missing") {
     return (
       <main className="notice-page">
@@ -158,5 +185,6 @@ function Page(props: { route: ReturnType<typeof useRoute>; agents: Agent[] | und
     );
   }
   if (route.page === "task") return <TaskPage agent={route.agent} taskId={route.taskId} />;
+  if (route.page === "report") return <ReportPage agent={route.agent} taskId={route.taskId} />;
   return <AgentBoard agent={route.agent} description={agent?.description ?? ""} />;
 }

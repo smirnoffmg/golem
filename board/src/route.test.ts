@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentPath, parseRoute, signinNotice, taskPath } from "./route";
+import { agentPath, parseRoute, proposalPath, reportPath, signinNotice, taskPath } from "./route";
 
 describe("parseRoute", () => {
   it("knows the three pages", () => {
@@ -17,10 +17,22 @@ describe("parseRoute", () => {
     expect(parseRoute(agentPath("a b"))).toEqual({ page: "board", agent: "a b" });
   });
 
+  it("knows the review queue, a proposal and a report", () => {
+    expect(parseRoute("/review")).toEqual({ page: "review" });
+    expect(parseRoute(proposalPath("p-1"))).toEqual({ page: "proposal", proposalId: "p-1" });
+    expect(parseRoute(reportPath("discovery", "t/1"))).toEqual({
+      page: "report",
+      agent: "discovery",
+      taskId: "t/1",
+    });
+  });
+
   it("treats anything else as not found", () => {
     expect(parseRoute("/agents")).toEqual({ page: "missing" });
     expect(parseRoute("/tasks/new")).toEqual({ page: "missing" });
     expect(parseRoute("/agents/%E0%A4%A")).toEqual({ page: "missing" });
+    expect(parseRoute("/proposals")).toEqual({ page: "missing" });
+    expect(parseRoute("/review/x")).toEqual({ page: "missing" });
   });
 });
 

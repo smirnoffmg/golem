@@ -8,9 +8,12 @@ import {
   columnsOf,
   cursorToAsk,
   nextBoard,
+  reviewCards,
   withTask,
 } from "./board";
 import { boardInterval } from "./poll";
+import { ReportsLane } from "./Reports";
+import { ProposalCardView } from "./Review";
 import { TaskCard } from "./TaskCard";
 import { newNonce } from "./text";
 
@@ -24,8 +27,7 @@ export function AgentBoard(props: { agent: string; description: string }) {
   const board = useQuery({
     queryKey: boardKey(agent),
     // Each poll asks for what changed since the last one and merges it into what the board
-    // already shows; a snapshot answer replaces it, and every sixth poll asks for one
-    // (ADR 0018).
+    // already shows; a snapshot answer replaces it (ADR 0018).
     queryFn: async () => {
       const previous = queryClient.getQueryData<Board>(boardKey(agent));
       return nextBoard(previous, await api.board(agent, cursorToAsk(previous)));
@@ -38,6 +40,7 @@ export function AgentBoard(props: { agent: string; description: string }) {
   }
 
   const columns = board.data && columnsOf(board.data);
+  const reviewing = board.data ? reviewCards(board.data) : [];
   const active = COLUMNS.filter((c) => c.id !== "archive");
 
   return (
@@ -64,9 +67,12 @@ export function AgentBoard(props: { agent: string; description: string }) {
               >
                 <h2 id={`column-${column.id}`} className="column-title">
                   {column.title}
-                  <span className="count">{columns[column.id].length}</span>
+                  <span className="count">
+                    {columns[column.id].length + (column.id === "review" ? reviewing.length : 0)}
+                  </span>
                 </h2>
-                {columns[column.id].length === 0 ? (
+                {columns[column.id].length === 0 &&
+                (column.id !== "review" || reviewing.length === 0) ? (
                   <p className="empty">{column.empty}</p>
                 ) : (
                   <ul className="cards">
@@ -75,12 +81,19 @@ export function AgentBoard(props: { agent: string; description: string }) {
                         <TaskCard agent={agent} task={task} onChanged={show} />
                       </li>
                     ))}
+                    {column.id === "review" &&
+                      reviewing.map((proposal) => (
+                        <li key={proposal.id}>
+                          <ProposalCardView proposal={proposal} />
+                        </li>
+                      ))}
                   </ul>
                 )}
               </section>
             ))}
           </div>
           <Archive agent={agent} tasks={columns.archive} onChanged={show} />
+          <ReportsLane agent={agent} />
         </>
       )}
     </main>

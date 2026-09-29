@@ -2,7 +2,7 @@
 // browser never holds a token; the session cookie rides along, and the CSRF token the session
 // hands out lives in this closure only.
 
-import type { BoardResponse, Task } from "./board";
+import type { BoardResponse, ProposalCard, Task } from "./board";
 
 export type Session = { name: string; csrf: string; expiresAt: string };
 export type Agent = { name: string; description: string; skills: string[] };
@@ -12,6 +12,33 @@ export type TaskDetail = Task & {
 };
 export type TaskPage = { tasks: Task[]; next: string | null };
 export type Resolution = "rerun" | "end";
+export type Decision = "accept" | "reject";
+// A page edit's diff as the backend folds it: unchanged runs far from a change are counted.
+export type DiffRun =
+  | { op: "equal" | "insert" | "delete"; lines: string[] }
+  | { op: "fold"; count: number };
+export type ProposalDetail = ProposalCard & {
+  payload: Record<string, unknown>;
+  target: string | null;
+  reason: string | null;
+  detail: string | null;
+  report: string | null;
+  stage: boolean;
+  live: { title: unknown; version: unknown } | null;
+  liveError: string | null;
+  diff: DiffRun[] | null;
+};
+export type ProposalQueue = { proposals: ProposalCard[]; next: string | null };
+export type ReviewCounts = { agents: Record<string, number>; more: boolean };
+export type ReportCard = {
+  taskId: string;
+  agent: string;
+  target: string | null;
+  completedAt: string;
+  summary: string;
+};
+export type ReportPage = { reports: ReportCard[]; next: string | null };
+export type ReportDetail = Omit<ReportCard, "summary"> & { text: string };
 
 type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -90,6 +117,7 @@ export function createApi(fetch: Fetch) {
   }
 
   const tasksOf = (agent: string) => `/api/agents/${segment(agent)}/tasks`;
+  const paged = (page?: string) => (page === undefined ? "" : `?page=${encodeURIComponent(page)}`);
 
   return {
     async session(): Promise<Session> {
@@ -124,6 +152,26 @@ export function createApi(fetch: Fetch) {
     async resolve(taskId: string, action: Resolution, reason?: string): Promise<void> {
       const url = `/api/processes/${segment(taskId)}/resolution`;
       await write(url, reason === undefined ? { action } : { action, reason });
+    },
+    reviewCounts(): Promise<ReviewCounts> {
+      return request<ReviewCounts>("/api/review-counts");
+    },
+    reviewQueue(page?: string): Promise<ProposalQueue> {
+      return request<ProposalQueue>(`/api/proposals${paged(page)}`);
+    },
+    proposal(id: string): Promise<ProposalDetail> {
+      return request<ProposalDetail>(`/api/proposals/${segment(id)}`);
+    },
+    decide(id: string, decision: Decision, reason: string): Promise<ProposalDetail> {
+      const trimmed = reason.trim();
+      const body = trimmed === "" ? { decision } : { decision, reason: trimmed };
+      return write<ProposalDetail>(`/api/proposals/${segment(id)}/decision`, body);
+    },
+    reports(agent: string, page?: string): Promise<ReportPage> {
+      return request<ReportPage>(`/api/agents/${segment(agent)}/reports${paged(page)}`);
+    },
+    report(taskId: string): Promise<ReportDetail> {
+      return request<ReportDetail>(`/api/reports/${segment(taskId)}`);
     },
     async logout(): Promise<string> {
       const { redirect } = await write<{ redirect: string }>("/logout", {});
