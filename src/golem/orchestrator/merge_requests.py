@@ -12,6 +12,7 @@ head commit, is its report, and then the branch goes (ADR 0017).
 """
 
 import json
+import logging
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -47,6 +48,8 @@ from golem.proposal_payload import (
 )
 from golem.resolution import MAX_REASON_CHARS
 
+log = logging.getLogger(__name__)
+
 BRANCH_PREFIX = "golem"
 # A comment the closer wrote up to this long after closing still explains the close.
 CLOSING_COMMENT_GRACE = timedelta(minutes=1)
@@ -58,7 +61,10 @@ NOTES_PER_PAGE = "50"
 
 
 class GitLabError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        # GitLab's HTTP status; None when it did not answer.
+        self.status = status
 
 
 class ProjectNotConfigured(GitLabError):
@@ -71,6 +77,12 @@ class NotFound(GitLabError):
 
 class Conflict(GitLabError):
     """A merge whose ``sha`` is no longer the source branch's HEAD."""
+
+
+# GitLab's documented refusals of a merge (Merge requests API, "Merge a merge request"): 400
+# `sha` required, 401 no permission to merge, 405 cannot merge, 409 `sha` not the source's
+# HEAD, 422 failed to merge. Asked again, GitLab answers the same.
+MERGE_REFUSED = frozenset({400, 401, 405, 409, 422})
 
 
 @dataclass(frozen=True)
@@ -181,7 +193,10 @@ class GitLabMergeRequests:
             raise GitLabError(f"{method} {url}: {error}") from error
         if not response.is_success:
             error_type = {404: NotFound, 409: Conflict}.get(response.status_code, GitLabError)
-            raise error_type(f"{method} {url}: {response.status_code} {response.text[:200]}")
+            raise error_type(
+                f"{method} {url}: {response.status_code} {response.text[:200]}",
+                response.status_code,
+            )
         return response
 
 
@@ -424,5 +439,9 @@ async def land_record(gitlab: GitLabMergeRequests, landing: Landing) -> None:
     )
     try:
         await gitlab.merge(landing.agent, merge_request.iid, landing.commit)
-    except Conflict:
-        return
+    except GitLabError as error:
+        # GitLab's documented refusals of this merge are final: the merge request stays open for
+        # a person. Anything else (5xx, a timeout) is tried again later.
+        if error.status not in MERGE_REFUSED:
+            raise
+        log.warning("proposal %s: its record is left for a person: %s", landing.proposal_id, error)

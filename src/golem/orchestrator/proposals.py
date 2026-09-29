@@ -144,12 +144,23 @@ async def mark_retried(conn: AsyncConnection, proposal_id: str) -> None:
     await conn.execute("UPDATE proposals SET checked_at = now() WHERE id = %s", (proposal_id,))
 
 
+# A landing that failed waits a minute, then twice as long each time, at most an hour.
+LAND_BACKOFF_SECONDS = 60.0
+MAX_LAND_BACKOFF_SECONDS = 3600.0
+
+
 async def unlanded(conn: AsyncConnection) -> list[Landing]:
     cursor = await conn.execute(
         "SELECT p.id, p.run_id, p.agent, p.state, p.commit FROM proposals p"
         " WHERE p.kind <> 'merge_request' AND p.state IN ('applied', 'stale')"
-        " AND p.landed_at IS NULL ORDER BY p.decided_at LIMIT %s",
-        (MAX_CHECKS_PER_PASS,),
+        " AND p.landed_at IS NULL AND (p.land_tried_at IS NULL OR p.land_tried_at"
+        "  <= now() - make_interval(secs => least(%(most)s, %(base)s * 2 ^ p.land_attempts)))"
+        " ORDER BY p.land_tried_at NULLS FIRST, p.decided_at LIMIT %(limit)s",
+        {
+            "base": LAND_BACKOFF_SECONDS,
+            "most": MAX_LAND_BACKOFF_SECONDS,
+            "limit": MAX_CHECKS_PER_PASS,
+        },
     )
     return [
         Landing(str(proposal_id), str(run_id), agent, state, commit or "")
@@ -159,6 +170,14 @@ async def unlanded(conn: AsyncConnection) -> list[Landing]:
 
 async def mark_landed(conn: AsyncConnection, proposal_id: str) -> None:
     await conn.execute("UPDATE proposals SET landed_at = now() WHERE id = %s", (proposal_id,))
+
+
+async def mark_land_failed(conn: AsyncConnection, proposal_id: str) -> None:
+    await conn.execute(
+        "UPDATE proposals SET land_attempts = land_attempts + 1, land_tried_at = now()"
+        " WHERE id = %s",
+        (proposal_id,),
+    )
 
 
 async def due_merge_requests(

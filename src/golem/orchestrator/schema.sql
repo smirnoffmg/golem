@@ -73,6 +73,10 @@ ALTER TABLE proposals ADD COLUMN IF NOT EXISTS commit text;
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS reason text;
 -- When a decided proposal's branch was merged or deleted, or left for a person.
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS landed_at timestamptz;
+-- A landing GitLab could not do now: tried again later, each time later, so rows that keep
+-- failing never hold back newer ones.
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS land_attempts integer NOT NULL DEFAULT 0;
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS land_tried_at timestamptz;
 -- Who is applying an accepted proposal, until when: one apply at a time (ADR 0015). The write
 -- servers look before they write, which holds only if no two applies of one proposal overlap.
 ALTER TABLE proposals ADD COLUMN IF NOT EXISTS apply_lease_until timestamptz;

@@ -25,6 +25,7 @@ from golem.orchestrator.proposals import (
     due_merge_requests,
     due_retries,
     mark_delivered,
+    mark_land_failed,
     mark_landed,
     mark_retried,
     record_check,
@@ -413,6 +414,7 @@ async def _land(conn: AsyncConnection, land: Land) -> None:
             await land(landing)
         except Exception:
             log.exception("could not land the record of proposal %s", landing.proposal_id)
+            await mark_land_failed(conn, landing.proposal_id)
             continue
         await mark_landed(conn, landing.proposal_id)
 

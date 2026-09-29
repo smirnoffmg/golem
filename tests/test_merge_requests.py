@@ -65,6 +65,8 @@ class FakeGitLab:
     notes: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
     # branch -> its head commit's message.
     messages: dict[str, str] = field(default_factory=dict)
+    # source branch -> the status GitLab answers a merge of it with, instead of merging.
+    refuse_merge: dict[str, int] = field(default_factory=dict)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -159,6 +161,9 @@ class FakeGitLab:
         # GitLab: with `sha`, the merge fails with 409 unless it is the source branch's HEAD.
         for mr in self.merge_requests:
             if mr["iid"] == iid:
+                refused = self.refuse_merge.get(mr["source_branch"])
+                if refused is not None:
+                    return httpx.Response(refused, json={"message": f"{refused} refused"})
                 if body.get("sha") not in (None, f"sha-{mr['source_branch']}"):
                     return httpx.Response(409, json={"message": "SHA does not match HEAD"})
                 mr.update(state="merged", merge_user={"username": "golem"})

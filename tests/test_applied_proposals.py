@@ -12,6 +12,7 @@ from test_merge_requests import PROJECT, TOKEN, FakeGitLab
 from test_proposals import ProposalInbox
 from test_reconcile import LIMITS, Inbox, StatusBoard, age, connect, recorded
 
+from golem.orchestrator import proposals
 from golem.orchestrator.merge_requests import (
     GitLabMergeRequests,
     GitLabProject,
@@ -398,6 +399,77 @@ async def test_a_branch_that_moved_after_the_decision_is_left_for_a_person(
     assert len([r for r in gitlab.requests if r.url.path.endswith("/merge")]) == 1
 
 
+def merges(gitlab: FakeGitLab) -> int:
+    return len([r for r in gitlab.requests if r.url.path.endswith("/merge")])
+
+
+@pytest.mark.parametrize("status", [400, 401, 405, 422])
+async def test_a_merge_gitlab_refuses_for_good_is_left_for_a_person(
+    runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests, status: int
+) -> None:
+    # GitLab documents these as final for this merge: a conflict with main (405, 422), a
+    # pipeline or approval it requires (405), a token without merge rights (401).
+    run_id = await succeeded_run(runs_db)
+    branch = pushed(gitlab, run_id)
+    await reconcile(runs_db, merge_requests)
+    gitlab.refuse_merge[branch] = status
+
+    await set_state(runs_db, run_id, "applied")
+    await reconcile(runs_db, merge_requests)
+    await reconcile(runs_db, merge_requests)
+
+    [mr] = gitlab.merge_requests
+    assert mr["state"] == "opened"
+    assert (await row_of(runs_db, run_id))["landed_at"] is not None
+    assert merges(gitlab) == 1
+
+
+async def test_a_landing_gitlab_fails_now_is_tried_again_later_not_every_pass(
+    runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
+) -> None:
+    run_id = await succeeded_run(runs_db)
+    branch = pushed(gitlab, run_id)
+    await reconcile(runs_db, merge_requests)
+    gitlab.refuse_merge[branch] = 500
+
+    await set_state(runs_db, run_id, "applied")
+    await reconcile(runs_db, merge_requests)
+    await reconcile(runs_db, merge_requests)
+
+    assert (await row_of(runs_db, run_id))["landed_at"] is None
+    assert merges(gitlab) == 1
+
+    del gitlab.refuse_merge[branch]
+    async with await connect(runs_db) as conn:
+        await conn.execute(
+            "UPDATE proposals SET land_tried_at = now() - interval '1 hour' WHERE run_id = %s",
+            (run_id,),
+        )
+    await reconcile(runs_db, merge_requests)
+    assert (await row_of(runs_db, run_id))["landed_at"] is not None
+
+
+async def test_landings_that_keep_failing_do_not_hold_back_newer_ones(
+    runs_db: str,
+    gitlab: FakeGitLab,
+    merge_requests: GitLabMergeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(proposals, "MAX_CHECKS_PER_PASS", 1)
+    stuck = await succeeded_run(runs_db, message_id="m-1")
+    gitlab.refuse_merge[pushed(gitlab, stuck)] = 503
+    fresh = await succeeded_run(runs_db, message_id="m-2")
+    pushed(gitlab, fresh)
+    await reconcile(runs_db, merge_requests)
+    await set_state(runs_db, stuck, "applied", decided_seconds_ago=60)
+    await set_state(runs_db, fresh, "applied")
+
+    await reconcile(runs_db, merge_requests)
+    await reconcile(runs_db, merge_requests)
+
+    assert (await row_of(runs_db, fresh))["landed_at"] is not None
+
+
 async def test_a_stale_proposal_deletes_its_branch(
     runs_db: str, gitlab: FakeGitLab, merge_requests: GitLabMergeRequests
 ) -> None:
@@ -440,5 +512,10 @@ async def test_landing_waits_for_gitlab(
     assert (await row_of(runs_db, run_id))["landed_at"] is None
 
     gitlab.down = False
+    async with await connect(runs_db) as conn:
+        await conn.execute(
+            "UPDATE proposals SET land_tried_at = now() - interval '1 hour' WHERE run_id = %s",
+            (run_id,),
+        )
     await reconcile(runs_db, merge_requests)
     assert (await row_of(runs_db, run_id))["landed_at"] is not None
