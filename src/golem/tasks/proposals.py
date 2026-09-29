@@ -8,7 +8,6 @@ is 404. Accepting applies at once through the write server; an apply that does n
 
 import asyncio
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -16,6 +15,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
+from golem.decisions import DECISIONS, NAME, PAGE, REVIEWS_HEADER, STATES
 from golem.resolution import MAX_REASON_CHARS
 from golem.tasks.ports import (
     ALREADY_DECIDED,
@@ -32,12 +32,7 @@ from golem.tasks.ports import (
 )
 
 PRINCIPAL_HEADER = "x-golem-principal"
-REVIEWS_HEADER = "x-golem-reviews"
 APPLY_SECONDS = 15.0
-STATES = frozenset({"pending", "accepted", "applied", "rejected", "stale", "failed"})
-DECISIONS = frozenset({"accept", "reject"})
-NAME = re.compile(r"^[a-z][a-z0-9-]*$")
-PAGE = re.compile(r"^[A-Za-z0-9_=-]{1,512}$")
 REFUSALS = {
     NOT_FOUND: 404,
     ALREADY_DECIDED: 409,

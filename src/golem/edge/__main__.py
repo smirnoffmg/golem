@@ -92,6 +92,15 @@ def public_cards(
     return cards
 
 
+def reviewers_of(catalogs: Catalogs) -> dict[str, frozenset[str]]:
+    """Who may decide each agent's proposals besides their owner (ADR 0015)."""
+    return {
+        name: frozenset(agent.reviewers)
+        for name, agent in catalogs.agents.items()
+        if agent.reviewers
+    }
+
+
 def build_app(
     settings: EdgeSettings, jwks_client: httpx.Client, metrics: Metrics | None = None
 ) -> ASGIApp:
@@ -142,6 +151,7 @@ def build_app(
             ),
             ttl_seconds=settings.run_status_ttl_seconds,
         ),
+        reviewers=reviewers_of(catalogs),
     )
 
 

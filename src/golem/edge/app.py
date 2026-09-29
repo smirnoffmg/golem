@@ -3,10 +3,11 @@ import hashlib
 import json
 import logging
 import re
+import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import psycopg
@@ -20,9 +21,13 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from golem.decisions import DECISIONS, NAME, PAGE, REVIEWS_HEADER, STATES
 from golem.edge.audit import (
+    PROPOSALS,
+    REPORTS,
     AuditEntry,
     audit_entry,
+    decision_entry,
     directory_entry,
     record,
     resolution_entry,
@@ -50,6 +55,12 @@ RPC_PATH = "/a2a"
 DIRECTORY_PATH = "/agents"
 # A process's owner answers a process waiting for a reason (ADR 0019); not an A2A method.
 RESOLUTION_PATH = "/processes/{task_id}/resolution"
+LIST_PROPOSALS = "ListProposals"
+READ_PROPOSAL = "ReadProposal"
+DECIDE_PROPOSAL = "DecideProposal"
+LIST_REPORTS = "ListReports"
+READ_REPORT = "ReadReport"
+EMPTY_REVIEWERS: Mapping[str, frozenset[str]] = {}
 MAX_RESOLUTION_BYTES = 16 * 1024
 TASK_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 PRINCIPAL_HEADER = "X-Golem-Principal"
@@ -401,6 +412,7 @@ def create_edge_app(
     metrics: Metrics | None = None,
     run_statuses: RunStatuses | None = None,
     audit_connections: int = AUDIT_CONNECTIONS,
+    reviewers: Mapping[str, frozenset[str]] = EMPTY_REVIEWERS,
 ) -> ASGIApp:
     """``cards`` are served as given, so they arrive signed (``golem.edge.card_signing``), and
     ``card_keys`` is the JWKS that verifies them."""
@@ -639,6 +651,91 @@ def create_edge_app(
             media_type=upstream.headers.get("content-type"),
         )
 
+    def reviews_of(principal: Principal) -> str:
+        # From the pinned catalogs alone: what a client sends in this header never counts.
+        return ",".join(sorted(a for a, people in reviewers.items() if principal.name in people))
+
+    async def for_a_person(
+        request: Request, operation: str, system: str, asked: "Asked | Malformed"
+    ) -> Response:
+        """Only a person reads or decides (ADR 0015): audited before it is served, forwarded
+        with the principal and the agents it reviews, and failing closed."""
+        address = request_address(request, trusted_proxies)
+        outcome = await verified(request, address_key(address))
+        if isinstance(outcome, Decision):
+            return plain_too_many(outcome)
+        if not isinstance(outcome, Principal):
+            return plain_unauthenticated(outcome)
+        principal = outcome
+        decision = callers.take(principal.name)
+        if not decision.allowed:
+            metrics.rate_limit_refused("caller")
+            return plain_too_many(decision)
+        refusal: tuple[str, int] | None = None
+        if principal.chain:
+            refusal = ("agents_do_not_decide", 403)
+        elif isinstance(asked, Malformed):
+            refusal = (asked.error, asked.status)
+        entry = decision_entry(
+            principal=principal,
+            operation=operation,
+            target_system=system,
+            request=asked.described,
+            refusal=refusal[0] if refusal else None,
+            source_ip=source_ip_of(address),
+        )
+        if not await written(entry):
+            return plain_error("audit log unavailable", 503)
+        if refusal is not None or isinstance(asked, Malformed):
+            return plain_error(*(refusal or ("malformed", 400)))
+        headers = forward_headers(request, principal, edge_token)
+        headers[REVIEWS_HEADER] = reviews_of(principal)
+        try:
+            upstream = await forward.request(
+                request.method, asked.path, json=asked.body, headers=headers
+            )
+        except httpx.HTTPError:
+            return plain_error("task service unavailable", 502)
+        if upstream.status_code == 401:
+            log.error("the task service refused the edge token; check GOLEM_EDGE_TOKEN")
+            return plain_error("task service refused the edge", 502)
+        return Response(
+            upstream.content,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type"),
+        )
+
+    async def proposals(request: Request) -> Response:
+        asked = listing_of(request, "/proposals", ("agent", "state", "process", "page"))
+        return await for_a_person(request, LIST_PROPOSALS, PROPOSALS, asked)
+
+    async def proposal(request: Request) -> Response:
+        proposal_id = request.path_params["proposal_id"]
+        asked: Asked | Malformed = (
+            Asked(f"/proposals/{proposal_id}", f"id={proposal_id}")
+            if is_uuid(proposal_id)
+            else Malformed("not_found", 404, "id=")
+        )
+        return await for_a_person(request, READ_PROPOSAL, PROPOSALS, asked)
+
+    async def decision_on(request: Request) -> Response:
+        proposal_id = request.path_params["proposal_id"]
+        asked = decision_of(proposal_id, await read_body(request, MAX_RESOLUTION_BYTES))
+        return await for_a_person(request, DECIDE_PROPOSAL, PROPOSALS, asked)
+
+    async def reports(request: Request) -> Response:
+        asked = listing_of(request, "/reports", ("agent", "page"))
+        return await for_a_person(request, LIST_REPORTS, REPORTS, asked)
+
+    async def report(request: Request) -> Response:
+        task_id = request.path_params["task_id"]
+        asked: Asked | Malformed = (
+            Asked(f"/reports/{task_id}", f"task={task_id}")
+            if TASK_ID.fullmatch(task_id)
+            else Malformed("not_found", 404, "task=")
+        )
+        return await for_a_person(request, READ_REPORT, REPORTS, asked)
+
     def listing(names: tuple[str, ...], *, public: bool) -> Response:
         # One URL, two answers: a cache must key on Authorization and never share a caller's.
         scope = "public" if public else "private"
@@ -655,12 +752,78 @@ def create_edge_app(
             Route(RPC_PATH, a2a, methods=["POST"]),
             Route(DIRECTORY_PATH, agents, methods=["GET"]),
             Route(RESOLUTION_PATH, resolution, methods=["POST"]),
+            Route("/proposals", proposals, methods=["GET"]),
+            Route("/proposals/{proposal_id}", proposal, methods=["GET"]),
+            Route("/proposals/{proposal_id}/decision", decision_on, methods=["POST"]),
+            Route("/reports", reports, methods=["GET"]),
+            Route("/reports/{task_id}", report, methods=["GET"]),
             Route(f"/agents/{{name}}{AGENT_CARD_WELL_KNOWN_PATH}", agent_card, methods=["GET"]),
             Route(KEYS_PATH, key_set, methods=["GET"]),
         ]
     )
     headed = edge_headers(app, hsts=urlsplit(public_base_url).scheme == "https")
     return Instrumented(headed, routes=app.routes, metrics=metrics)
+
+
+@dataclass(frozen=True)
+class Asked:
+    """A well-formed request about proposals or reports, as the edge forwards it."""
+
+    path: str
+    described: str
+    body: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class Malformed:
+    error: str
+    status: int
+    described: str
+
+
+def is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def listing_of(request: Request, path: str, allowed: tuple[str, ...]) -> Asked | Malformed:
+    """A listing's query, only the parameters it takes and only in their form: anything else
+    is refused here rather than passed to the task service."""
+    params = request.query_params
+    described = " ".join(f"{key}={params[key]}" for key in allowed if key in params)[:400]
+    if set(params) - set(allowed) or any(len(params.getlist(key)) > 1 for key in params):
+        return Malformed("malformed", 400, described)
+    for key in ("agent", "process"):
+        if key in params and not NAME.fullmatch(params[key]):
+            return Malformed("malformed", 400, described)
+    if "page" in params and not PAGE.fullmatch(params["page"]):
+        return Malformed("malformed", 400, described)
+    if "state" in params and not set(params["state"].split(",")) <= STATES:
+        return Malformed("malformed", 400, described)
+    query = urlencode([(key, params[key]) for key in allowed if key in params])
+    return Asked(f"{path}?{query}" if query else path, described)
+
+
+def decision_of(proposal_id: str, body: bytes | None) -> Asked | Malformed:
+    if not is_uuid(proposal_id):
+        return Malformed("not_found", 404, "id=")
+    try:
+        parsed = json.loads(body) if body is not None else None
+    except (ValueError, RecursionError):
+        parsed = None
+    choice = parsed.get("decision") if isinstance(parsed, dict) else None
+    described = f"id={proposal_id} decision={choice if choice in DECISIONS else ''}"
+    reason = parsed.get("reason") if isinstance(parsed, dict) else None
+    if choice not in DECISIONS or not (
+        reason is None or (isinstance(reason, str) and len(reason) <= MAX_REASON_CHARS)
+    ):
+        return Malformed("malformed", 400, described)
+    # Only what a decision is: the reason is the person's text and is not audited.
+    forwarded = {"decision": choice} | ({"reason": reason} if reason is not None else {})
+    return Asked(f"/proposals/{proposal_id}/decision", described, forwarded)
 
 
 def resolution_of(body: bytes | None) -> tuple[str | None, str | None, str | None]:

@@ -16,6 +16,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from test_tasks_service import TEST_EDGE_TOKEN, make_card
 from test_tasks_to_runs import CATALOG, GRANTS, SIGNING_KEY, TEMPLATE, FakeLauncher
 
+from golem.decisions import REVIEWS_HEADER
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.service import PostgresOrchestrator
 from golem.proposal_payload import payload_digest
@@ -27,7 +28,6 @@ from golem.tasks.app import (
 )
 from golem.tasks.apply import ApplyUnavailable
 from golem.tasks.ports import Applied, LivePage, ProposalDetail
-from golem.tasks.proposals import REVIEWS_HEADER
 
 REPLY = {"request": "SD-12", "public": True, "text": "The export works again."}
 PAGE = {"page_id": "123", "title": "Home", "version": 7, "body": "<p>New</p>"}

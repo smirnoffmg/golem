@@ -101,6 +101,33 @@ def resolution_entry(
     )
 
 
+PROPOSALS = "proposals"
+REPORTS = "reports"
+
+
+def decision_entry(
+    *,
+    principal: Principal,
+    operation: str,
+    target_system: str,
+    request: str,
+    refusal: str | None,
+    source_ip: str | None,
+) -> AuditEntry:
+    """A person reading or deciding proposals, or reading reports (ADR 0015, ADR 0018): what
+    they asked for, never a payload or a reason, which are free text."""
+    return AuditEntry(
+        account=principal.on_behalf_of,
+        request=f"{operation} {request}".strip(),
+        target_system=target_system,
+        operation=operation,
+        result="allow" if refusal is None else f"deny: {refusal}",
+        source=SOURCE,
+        source_ip=source_ip,
+        chain=principal.chain,
+    )
+
+
 def source_ip_of(host: str | None) -> str | None:
     if host is None:
         return None
