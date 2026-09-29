@@ -37,7 +37,7 @@ data:
       tools: [search_issues, get_issue]
     wiki.read:
       url: http://mcp-wiki-read.golem-system.svc:8000/mcp
-      tools: [search_pages, get_page]
+      tools: [search_pages, get_page, get_page_source]
     # Served by the runtime, not an MCP server: delegate_to_agent calls the edge with the run's
     # call token. A role gets it only by naming the group in its catalog (ADR 0014).
     agents.delegate:

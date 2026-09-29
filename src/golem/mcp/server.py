@@ -37,7 +37,12 @@ def wiki_tools(server: FastMCP, confluence: httpx.AsyncClient) -> None:
         """Read one Confluence page by its numeric id: title, space, URL and its text."""
         return await atlassian.get_page(confluence, page_id)
 
-    for tool in (search_pages, get_page):
+    async def get_page_source(page_id: str) -> str:
+        """Read one Confluence page as Confluence stores it, to propose an edit of it: JSON with
+        page_id, title, version and body (storage format, whole). Propose back that version."""
+        return await atlassian.get_page_source(confluence, page_id)
+
+    for tool in (search_pages, get_page, get_page_source):
         server.add_tool(tool, annotations=READ_ONLY, structured_output=False)
 
 

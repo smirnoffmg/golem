@@ -14,6 +14,10 @@ GROUPS = {
     group.name: group
     for group in (
         Group(name="tracker.read", system="jira", tools=("search_issues", "get_issue")),
-        Group(name="wiki.read", system="confluence", tools=("search_pages", "get_page")),
+        Group(
+            name="wiki.read",
+            system="confluence",
+            tools=("search_pages", "get_page", "get_page_source"),
+        ),
     )
 }

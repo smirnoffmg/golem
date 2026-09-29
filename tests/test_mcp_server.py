@@ -28,7 +28,7 @@ from golem.mcp.atlassian import JiraDeployment
 from golem.mcp.auth import run_token_verifier
 from golem.mcp.gate import Gate
 from golem.mcp.groups import GROUPS
-from golem.mcp.server import create_mcp_app
+from golem.mcp.server import create_mcp_app, mcp_server
 from golem.metrics import Metrics
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.runs import RunCreated, StartRequest, cancel_run_of_task, start_run
@@ -586,3 +586,14 @@ async def test_refusals_and_audit_failures_are_counted(
         value("golem_rate_limit_refusals_total", {"process": "mcp", "limit": "auth_failures"}) == 1
     )
     assert value("golem_audit_write_failures_total", {"process": "mcp"}) == 2
+
+
+@pytest.mark.parametrize("group", sorted(GROUPS))
+async def test_a_server_offers_exactly_its_groups_tools(group: str) -> None:
+    # The gate refuses a tools/call outside the group's list, so a tool the server offers but
+    # the list lacks would be offered and then refused.
+    async with httpx.AsyncClient() as upstream:
+        server = mcp_server(GROUPS[group], upstream, JiraDeployment.CLOUD)
+        offered = {tool.name for tool in await server.list_tools()}
+
+    assert offered == set(GROUPS[group].tools)

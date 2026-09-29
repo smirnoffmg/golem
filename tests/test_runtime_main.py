@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -338,6 +339,8 @@ class FakeRunner:
     fill_target: bool = True
     status_to: str | None = None
     propose: bool = False
+    # golem-proposal.json's content the role submits, for a kind the platform applies.
+    proposal: dict[str, Any] | None = None
     briefs: list[Brief] = field(default_factory=list)
 
     async def run(self, brief: Brief) -> RoleResult:
@@ -351,7 +354,11 @@ class FakeRunner:
             path = brief.workspace / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
-        return RoleResult(summary=f"worked on {brief.target.id}", proposed=self.propose)
+        return RoleResult(
+            summary=f"worked on {brief.target.id}",
+            proposed=self.propose or self.proposal is not None,
+            proposal=self.proposal,
+        )
 
 
 class BrokenRunner:
@@ -655,15 +662,84 @@ async def test_a_goal_run_that_changes_nothing_is_invalid(goal_remotes, tmp_path
     assert remote_golem_branches(goal_remotes.context) == []
 
 
-async def test_a_proposal_of_a_kind_not_built_yet_is_invalid(tmp_path):
+REPLY = {
+    "kind": "desk_reply",
+    "request": "SD-12",
+    "public": True,
+    "text_file": "hypotheses/replies/sd-12.txt",
+}
+
+
+async def test_a_goal_run_of_an_applied_kind_carries_golem_proposal_json(tmp_path):
+    remotes = remotes_with(tmp_path, extra=GOAL + "proposal: desk_reply\n")
+    runner = FakeRunner(
+        edits={"hypotheses/replies/sd-12.txt": "The export works again."}, proposal=REPLY
+    )
+
+    report = await run(goal_settings(remotes, tmp_path), runner)
+
+    assert report.outcome is Outcome.PROPOSED
+    assert runner.briefs[0].proposal_kind == "desk_reply"
+    branch = "golem/alert-0a1b2c3d4e5f/run-1"
+    assert json.loads(sh("show", f"{branch}:golem-proposal.json", cwd=remotes.context)) == REPLY
+    assert sh("show", f"{branch}:hypotheses/replies/sd-12.txt", cwd=remotes.context) == (
+        "The export works again."
+    )
+
+
+async def test_a_goal_run_of_an_applied_kind_with_nothing_to_propose_reports(tmp_path):
     remotes = remotes_with(tmp_path, extra=GOAL + "proposal: tracker_issue\n")
 
-    report = await run(goal_settings(remotes, tmp_path), FakeRunner(propose=True))
+    report = await run(goal_settings(remotes, tmp_path), FakeRunner())
+
+    assert report.outcome is Outcome.REPORTED
+
+
+async def test_a_record_run_of_an_applied_kind_without_its_proposal_is_invalid(tmp_path):
+    remotes = remotes_with(tmp_path, extra="proposal: wiki_edit\n")
+
+    report = await run(settings_for(remotes, tmp_path), FakeRunner())
 
     assert report.outcome is Outcome.INVALID
     assert report.reasons == (
-        "proposals of kind 'tracker_issue' are not built yet; only merge_request is",
+        "the role submitted no wiki_edit proposal; the run must end with one",
     )
+    assert remote_golem_branches(remotes.context) == []
+
+
+async def test_a_record_run_of_an_applied_kind_proposes_with_its_file(tmp_path):
+    remotes = remotes_with(tmp_path, extra="proposal: desk_reply\n")
+    runner = FakeRunner(
+        edits={"hypotheses/replies/sd-12.txt": "The export works again."}, proposal=REPLY
+    )
+
+    report = await run(settings_for(remotes, tmp_path), runner)
+
+    assert report.outcome is Outcome.PROPOSED
+    assert json.loads(sh("show", f"{report.branch}:golem-proposal.json", cwd=remotes.context))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # Outside the role's directory: the platform would never read it back as the role's.
+        {"text_file": "README.md"},
+        {"text_file": "hypotheses/replies/missing.txt"},
+        {"kind": "wiki_edit"},
+        {"public": "yes"},
+    ],
+)
+async def test_a_proposal_the_platform_would_refuse_is_invalid(tmp_path, change):
+    remotes = remotes_with(tmp_path, extra=GOAL + "proposal: desk_reply\n")
+    runner = FakeRunner(
+        edits={"hypotheses/replies/sd-12.txt": "The export works again."},
+        proposal=REPLY | change,
+    )
+
+    report = await run(goal_settings(remotes, tmp_path), runner)
+
+    assert report.outcome is Outcome.INVALID
+    assert report.reasons[0].startswith("the proposal is invalid: ")
     assert remote_golem_branches(remotes.context) == []
 
 

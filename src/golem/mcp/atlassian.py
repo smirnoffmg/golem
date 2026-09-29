@@ -13,6 +13,7 @@ endpoint serves both deployments.
 The client passed in carries the server's own credentials; nothing from the caller reaches it.
 """
 
+import json
 import re
 from collections.abc import Mapping
 from enum import StrEnum
@@ -20,6 +21,8 @@ from html.parser import HTMLParser
 from typing import Any
 
 import httpx
+
+from golem.proposal_payload import MAX_PAGE_BODY
 
 MAX_LIMIT = 50
 BODY_CHARS = 8_000
@@ -153,6 +156,37 @@ async def get_page(client: httpx.AsyncClient, page_id: str) -> str:
         raise UpstreamError(f"no page with id {page_id}")
     base = (body.get("_links") or {}).get("base") or ""
     return page_text(pages[0], base)
+
+
+async def get_page_source(client: httpx.AsyncClient, page_id: str) -> str:
+    """The page as Confluence stores it, for a role that proposes it back: never cut, since a
+    cut body applied as the whole would delete the rest of the page (ADR 0015)."""
+    if not PAGE_ID.match(page_id):
+        raise UpstreamError(f"{page_id!r} is not a page id (digits only)")
+    body = await get_json(
+        client,
+        "/rest/api/content/search",
+        {"cql": f"id = {page_id}", "limit": 1, "expand": "body.storage,version"},
+    )
+    pages = [p for p in body.get("results") or [] if isinstance(p, dict)]
+    if not pages:
+        raise UpstreamError(f"no page with id {page_id}")
+    found = pages[0]
+    storage = ((found.get("body") or {}).get("storage") or {}).get("value") or ""
+    if len(storage) > MAX_PAGE_BODY:
+        raise UpstreamError(
+            f"page {page_id} holds {len(storage)} characters of storage format;"
+            f" at most {MAX_PAGE_BODY} can be proposed back"
+        )
+    return json.dumps(
+        {
+            "page_id": page_id,
+            "title": found.get("title") or "",
+            "version": (found.get("version") or {}).get("number"),
+            "body": storage,
+        },
+        ensure_ascii=False,
+    )
 
 
 def page_line(page: Mapping[str, Any]) -> str:

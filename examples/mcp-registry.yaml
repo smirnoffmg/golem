@@ -7,7 +7,7 @@ tracker.read:
   tools: [search_issues, get_issue]
 wiki.read:
   url: http://mcp-wiki.golem.svc/mcp
-  tools: [search_pages, get_page]
+  tools: [search_pages, get_page, get_page_source]
 # Served by the runtime itself, not an MCP server: `delegate_to_agent` asks another agent for
 # work through the edge, with the run's call token (ADR 0014). The url is the edge's A2A
 # endpoint; the edge's call registry decides which agents this agent may call.

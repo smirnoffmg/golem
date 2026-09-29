@@ -361,7 +361,7 @@ tracker.read:
   tools: [search_issues, get_issue]
 wiki.read:
   url: http://mcp-wiki-read.golem-system.svc:8000/mcp
-  tools: [search_pages, get_page]
+  tools: [search_pages, get_page, get_page_source]
 agents.delegate:
   url: http://edge.golem-system.svc:8000/a2a
   tools: [delegate_to_agent]

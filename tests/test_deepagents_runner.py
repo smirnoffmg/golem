@@ -444,3 +444,89 @@ async def test_the_response_limit_also_holds_in_a_subagent(tmp_path: Path) -> No
         await runner.run(brief)
 
     assert (tmp_path / "hypotheses" / "H-1.md").read_text() == before
+
+
+def kind_brief(workspace: Path, kind: str, goal_mode: bool = False) -> Brief:
+    return replace(make_brief(workspace), proposal_kind=kind, goal_mode=goal_mode)
+
+
+async def test_a_record_run_of_an_applied_kind_submits_its_proposal(tmp_path: Path) -> None:
+    brief = kind_brief(tmp_path, "desk_reply")
+    (tmp_path / "hypotheses" / "reply.txt").write_text("The export works again.")
+    model = scripted(
+        tool_call(
+            PROPOSE_TOOL,
+            reason="The customer asked about exports.",
+            request="SD-12",
+            public=True,
+            text_file="/hypotheses/reply.txt",
+        ),
+        "Proposed the reply.",
+    )
+
+    result = await DeepAgentsRunner(model=model).run(brief)
+
+    assert PROPOSE_TOOL in model.bound_tools
+    assert result.proposed is True
+    assert result.proposal == {
+        "kind": "desk_reply",
+        "request": "SD-12",
+        "public": True,
+        "text_file": "hypotheses/reply.txt",
+    }
+
+
+async def test_a_proposal_the_platform_would_refuse_is_told_to_the_role(tmp_path: Path) -> None:
+    brief = kind_brief(tmp_path, "wiki_edit")
+    model = scripted(
+        tool_call(
+            PROPOSE_TOOL,
+            reason="Outdated page.",
+            page_id="123",
+            title="Home",
+            version=7,
+            body_file="/hypotheses/missing.xhtml",
+        ),
+        "Could not propose.",
+    )
+
+    result = await DeepAgentsRunner(model=model).run(brief)
+
+    assert result.proposed is False
+    assert result.proposal is None
+    replies = [m for m in model.prompts[-1] if getattr(m, "type", "") == "tool"]
+    assert "missing" in replies[-1].text
+
+
+async def test_a_tracker_issue_is_a_new_issue_or_a_comment(tmp_path: Path) -> None:
+    brief = kind_brief(tmp_path, "tracker_issue", goal_mode=True)
+    (tmp_path / "hypotheses" / "comment.md").write_text("Seen again at 12:00.")
+    model = scripted(
+        tool_call(
+            PROPOSE_TOOL,
+            reason="The alert fired again.",
+            action="comment",
+            issue="CORSAR-12",
+            comment_file="hypotheses/comment.md",
+        ),
+        "Proposed a comment.",
+    )
+
+    result = await DeepAgentsRunner(model=model).run(brief)
+
+    assert result.proposal == {
+        "kind": "tracker_issue",
+        "action": "comment",
+        "issue": "CORSAR-12",
+        "comment_file": "hypotheses/comment.md",
+    }
+
+
+def test_the_preamble_of_an_applied_kind_says_the_run_ends_with_its_proposal(
+    tmp_path: Path,
+) -> None:
+    text = preamble(kind_brief(tmp_path, "wiki_edit"))
+
+    assert PROPOSE_TOOL in text
+    assert "wiki_edit" in text
+    assert "get_page_source" in text
