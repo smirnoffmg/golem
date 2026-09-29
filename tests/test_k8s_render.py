@@ -31,6 +31,7 @@ from golem.settings import (
     parse_gitlab_projects,
     parse_label_agents,
     parse_registry,
+    parse_write_servers,
     reconciler_settings,
     task_service_settings,
     ui_settings,
@@ -51,8 +52,14 @@ SETTINGS: dict[str, Callable[[Mapping[str, str]], object]] = {
     "mattermost-adapter": mattermost_adapter_settings,
     "mcp-tracker-read": mcp_settings,
     "mcp-wiki-read": mcp_settings,
+    "mcp-wiki-write": mcp_settings,
+    "mcp-desk-write": mcp_settings,
+    "mcp-tracker-write": mcp_settings,
     "ui": ui_settings,
 }
+# The write servers (ADR 0015): only the task service reaches them, with proposal tokens.
+WRITE_SERVERS = ("mcp-wiki-write", "mcp-desk-write", "mcp-tracker-write")
+WRITE_APP = "golem-mcp-write"
 # The board's static server (ADR 0018): nginx and files, no settings, no metrics, no egress.
 BOARD = "board"
 BOARD_APP = "golem-board"
@@ -63,6 +70,7 @@ FILE_PARSERS: dict[str, Callable[[str], object]] = {
     "GOLEM_AGENT_TOOLS_FILE": parse_agent_tools,
     "GOLEM_GITLAB_PROJECTS_FILE": parse_gitlab_projects,
     "GOLEM_JIRA_LABELS_FILE": parse_label_agents,
+    "GOLEM_WRITE_SERVERS_FILE": parse_write_servers,
 }
 # The adapters' Deployments, their commands, and the agents each one may start.
 ADAPTERS = {
@@ -76,6 +84,7 @@ KUBERNETES_API_USERS = {"tasks": "golem-tasks", "reconciler": "golem-reconciler"
 TASK_SERVICE_PORTS = {
     "golem-edge": ("a2a", "internal-read"),
     "golem-mcp": ("internal-read",),
+    "golem-mcp-write": ("internal-read",),
     "golem-reconciler": ("internal-write",),
 }
 IDP_PLACEHOLDER = "198.51.100.10/32"
@@ -256,7 +265,9 @@ def test_the_task_service_listens_where_its_service_and_settings_say() -> None:
     assert {p["name"]: p["port"] for p in service_ports} == container_ports
 
 
-@pytest.mark.parametrize("name", ["edge", "reconciler", "mcp-tracker-read", "mcp-wiki-read"])
+@pytest.mark.parametrize(
+    "name", ["edge", "reconciler", "mcp-tracker-read", "mcp-wiki-read", *WRITE_SERVERS]
+)
 def test_each_caller_of_the_task_service_is_pointed_at_its_own_port(name: str) -> None:
     objects = render(EXTERNAL_SECRETS)
     deployment = find(objects, "Deployment", name, SYSTEM)
@@ -320,6 +331,57 @@ def test_each_mcp_server_serves_the_group_the_registry_routes_to_it() -> None:
             <= d["spec"]["template"]["metadata"]["labels"].items()
         ]
         assert env_of(deployment, objects, secret_keys(objects))["GOLEM_MCP_GROUP"] == group
+
+
+def test_the_task_service_calls_each_write_server_at_its_service_for_its_audience() -> None:
+    objects = render(EXTERNAL_SECRETS)
+    secrets = secret_keys(objects)
+    tasks = find(objects, "Deployment", "tasks", SYSTEM)
+    kind, name, key = mounted(tasks, env_of(tasks, objects, secrets)["GOLEM_WRITE_SERVERS_FILE"])
+    servers = parse_write_servers(find(objects, kind, name, SYSTEM)["data"][key])
+
+    assert set(servers) == {"wiki.write", "desk.write", "tracker.write"}
+    for group, server in servers.items():
+        match = SERVICE_URL.fullmatch(server.url)
+        assert match and match[2] == SYSTEM and match[4] == "/mcp", server.url
+        deployment = find(objects, "Deployment", match[1], SYSTEM)
+        env = env_of(deployment, objects, secrets)
+        assert env["GOLEM_MCP_GROUP"] == group
+        # The token's audience is the server's own canonical URI (ADR 0016).
+        assert env["GOLEM_MCP_RESOURCE"] == server.resource == server.url
+
+
+def test_the_write_servers_have_their_own_accounts_upstream() -> None:
+    objects = render(EXTERNAL_SECRETS)
+    remote = {}
+    for secret in of_kind(objects, "ExternalSecret"):
+        for data in secret["spec"]["data"]:
+            if data["secretKey"] == "GOLEM_MCP_UPSTREAM_TOKEN":
+                remote[secret["spec"]["target"]["name"]] = data["remoteRef"]["key"]
+
+    writers = {remote[f"golem-{name}"] for name in WRITE_SERVERS}
+    readers = {remote["golem-mcp-tracker-read"], remote["golem-mcp-wiki-read"]}
+    assert len(writers) == 3
+    assert not writers & readers
+
+
+def test_only_the_task_service_reaches_the_write_servers() -> None:
+    objects = render(BASE)
+    [policy] = [
+        p
+        for p in of_kind(objects, "NetworkPolicy")
+        if p["spec"]["podSelector"].get("matchLabels") == {APP_LABEL: WRITE_APP}
+    ]
+
+    assert ports_by_peer(policy["spec"]["ingress"], "from") == {"golem-tasks": {8000}}
+    assert all(
+        "namespaceSelector" not in peer for r in policy["spec"]["ingress"] for peer in r["from"]
+    )
+    tasks = find(objects, "NetworkPolicy", "tasks", SYSTEM)
+    assert ports_by_peer(tasks["spec"]["egress"], "to")[WRITE_APP] == {8000}
+    # Runs reach the read servers only: their egress names golem-mcp, never golem-mcp-write.
+    targets = [peer for rule in run_egress() for peer in rule["to"] if "podSelector" in peer]
+    assert {APP_LABEL: WRITE_APP} not in [p["podSelector"]["matchLabels"] for p in targets]
 
 
 def test_the_delegation_group_routes_to_the_edge_a2a_endpoint() -> None:

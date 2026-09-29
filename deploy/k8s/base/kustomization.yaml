@@ -13,6 +13,7 @@ resources:
   - jira-adapter.yaml
   - mattermost-adapter.yaml
   - mcp-servers.yaml
+  - mcp-write-servers.yaml
   - ui.yaml
   - board.yaml
   - network-policies-system.yaml

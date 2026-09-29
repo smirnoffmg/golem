@@ -32,7 +32,7 @@ run the network check after every deploy that changes a policy or the CNI.
 
 | Namespace | Holds | Pod Security |
 | --- | --- | --- |
-| `golem-system` (`golem.dev/zone: system`) | `edge` (2 replicas), `tasks`, `reconciler`, `jira-adapter`, `mattermost-adapter`, `mcp-tracker-read`, `mcp-wiki-read`, `ui` (2 replicas), `board` (2 replicas) | `restricted` |
+| `golem-system` (`golem.dev/zone: system`) | `edge` (2 replicas), `tasks`, `reconciler`, `jira-adapter`, `mattermost-adapter`, `mcp-tracker-read`, `mcp-wiki-read`, `mcp-wiki-write`, `mcp-desk-write`, `mcp-tracker-write`, `ui` (2 replicas), `board` (2 replicas) | `restricted` |
 | `golem-jobs` (`golem.dev/zone: jobs`) | runs only: the Jobs the task service launches, their token Secrets, the MCP registry, a `ResourceQuota` | `restricted` |
 
 Every process listens on 8000 and its Service exposes 8000, except the reconciler, which serves
@@ -97,6 +97,7 @@ Without the operator, create the same Secrets with the same keys some other way.
 | golem-system | `golem-mattermost-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_MATTERMOST_BOT_TOKEN` (the bot account's access token), `GOLEM_MATTERMOST_COMMAND_TOKEN` (the slash command's token), `GOLEM_PUSH_TOKEN_SECRET` (its own, not the Jira adapter's) | Mattermost adapter |
 | golem-system | `golem-ui` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_UI_DSN` (role `golem_ui`, database `golem_ui`), `GOLEM_UI_SESSION_KEY` (a Fernet key: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`; rotating it signs everyone out) | web UI |
 | golem-system | `golem-mcp-tracker-read`, `golem-mcp-wiki-read` | `GOLEM_MCP_UPSTREAM_TOKEN` (Jira, Confluence), `GOLEM_AUDIT_DSN` (role `golem_mcp`) | MCP servers |
+| golem-system | `golem-mcp-wiki-write`, `golem-mcp-desk-write`, `golem-mcp-tracker-write` | `GOLEM_MCP_UPSTREAM_TOKEN` (an account of each server's own, with write access to its allowed spaces or projects only), `GOLEM_AUDIT_DSN` (role `golem_mcp`) | write servers (ADR 0015) |
 | golem-jobs | `golem-run-secrets` (`GOLEM_JOB_SECRET`) | `GOLEM_MODEL_GATEWAY_URL`, `GOLEM_MODEL`, `GOLEM_MODEL_KEY`, optional `GOLEM_MODEL_TIMEOUT_SECONDS` (per call, default 120), `GOLEM_GIT_TOKEN` (branch-only), `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | every run's Job |
 
 `GOLEM_EDGE_TOKEN` is one value in both Secrets (the overlay reads it from one remote key): the

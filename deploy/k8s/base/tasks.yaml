@@ -1,6 +1,7 @@
 # The task service with the orchestrator port: A2A tasks, run admission, Job launch.
 # Three listeners, one per kind of caller (ADR 0009): a2a for the edge, internal-read for the
-# MCP servers (run keys, run status), internal-write for the reconciler (run outcomes); and
+# MCP servers (run keys, run status, proposal state), internal-write for the reconciler (run
+# outcomes); and
 # metrics for the monitoring namespace (ADR 0013).
 apiVersion: v1
 kind: ConfigMap
@@ -25,6 +26,7 @@ data:
   # The pinned catalogs the edge builds cards from: the processes among them (ADR 0019).
   GOLEM_CATALOGS_DIR: /app/examples
   GOLEM_AGENT_TOOLS_FILE: /etc/golem/agent-tools.yaml
+  GOLEM_WRITE_SERVERS_FILE: /etc/golem/write-servers.yaml
   GOLEM_RUN_TOKEN_KEY_FILE: /var/run/golem/run-token/key.pem
   GOLEM_RUN_TOKEN_KID: golem-1
   GOLEM_KUBERNETES_NAMESPACE: golem-jobs
@@ -127,6 +129,8 @@ spec:
                 path: catalogs.yaml
               - key: agent-tools.yaml
                 path: agent-tools.yaml
+              - key: write-servers.yaml
+                path: write-servers.yaml
         - name: run-token-key
           secret:
             secretName: golem-run-token-key

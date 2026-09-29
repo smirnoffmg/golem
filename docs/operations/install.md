@@ -236,6 +236,7 @@ Then write one environment file per Secret. Set the values that come from other 
 ```sh
 export JIRA_ADAPTER_CLIENT_SECRET=... MATTERMOST_ADAPTER_CLIENT_SECRET=... UI_CLIENT_SECRET=...
 export JIRA_TOKEN=... CONFLUENCE_TOKEN=... MATTERMOST_BOT_TOKEN=... MATTERMOST_COMMAND_TOKEN=...
+export WIKI_WRITE_TOKEN=... DESK_WRITE_TOKEN=... TRACKER_WRITE_TOKEN=...
 export GIT_TOKEN=... GITLAB_API_TOKEN=...
 export MODEL_GATEWAY_URL=https://llm.internal/v1 MODEL=discovery-default MODEL_KEY=...
 export OTLP_ENDPOINT= OTLP_HEADERS=
@@ -243,7 +244,11 @@ export OTLP_ENDPOINT= OTLP_HEADERS=
 
 (`MATTERMOST_COMMAND_TOKEN` is the token Mattermost shows when you create the `/golem` slash
 command, [channels.md](../guide/channels.md#mattermost); `MATTERMOST_BOT_TOKEN` a bot account's
-access token.)
+access token. The three `*_WRITE_TOKEN`s belong to accounts of their own, not the read servers':
+the write servers apply what people accept, a page edit, a service desk reply, a Jira issue or
+comment ([ADR 0015](../adr/0015-proposals.md)). Give each account write access to the spaces or
+projects its server's `GOLEM_MCP_WIKI_SPACES`, `GOLEM_MCP_DESK_PROJECTS` or
+`GOLEM_MCP_TRACKER_PROJECTS` names, and nothing else.)
 
 <!-- run: env-files -->
 ```sh
@@ -286,6 +291,18 @@ GOLEM_AUDIT_DSN=$(db golem_audit golem_mcp)
 EOF
 cat > golem-secrets/golem-mcp-wiki-read.env <<EOF
 GOLEM_MCP_UPSTREAM_TOKEN=$CONFLUENCE_TOKEN
+GOLEM_AUDIT_DSN=$(db golem_audit golem_mcp)
+EOF
+cat > golem-secrets/golem-mcp-wiki-write.env <<EOF
+GOLEM_MCP_UPSTREAM_TOKEN=$WIKI_WRITE_TOKEN
+GOLEM_AUDIT_DSN=$(db golem_audit golem_mcp)
+EOF
+cat > golem-secrets/golem-mcp-desk-write.env <<EOF
+GOLEM_MCP_UPSTREAM_TOKEN=$DESK_WRITE_TOKEN
+GOLEM_AUDIT_DSN=$(db golem_audit golem_mcp)
+EOF
+cat > golem-secrets/golem-mcp-tracker-write.env <<EOF
+GOLEM_MCP_UPSTREAM_TOKEN=$TRACKER_WRITE_TOKEN
 GOLEM_AUDIT_DSN=$(db golem_audit golem_mcp)
 EOF
 cat > golem-secrets/golem-run-secrets.env <<EOF
@@ -385,7 +402,8 @@ Create the namespaces, then the Secrets, then everything else:
 ```sh
 kubectl apply -f deploy/k8s/base/namespaces.yaml
 for name in golem-edge golem-tasks golem-reconciler golem-jira-adapter golem-mattermost-adapter \
-    golem-ui golem-mcp-tracker-read golem-mcp-wiki-read; do
+    golem-ui golem-mcp-tracker-read golem-mcp-wiki-read golem-mcp-wiki-write \
+    golem-mcp-desk-write golem-mcp-tracker-write; do
   kubectl -n golem-system create secret generic "$name" --from-env-file="golem-secrets/$name.env"
 done
 kubectl -n golem-system create secret generic golem-run-token-key \
@@ -407,23 +425,28 @@ board                2/2     2            2           7s
 edge                 2/2     2            2           7s
 jira-adapter         1/1     1            1           7s
 mattermost-adapter   1/1     1            1           7s
+mcp-desk-write       1/1     1            1           7s
 mcp-tracker-read     1/1     1            1           7s
+mcp-tracker-write    1/1     1            1           7s
 mcp-wiki-read        1/1     1            1           7s
+mcp-wiki-write       1/1     1            1           7s
 reconciler           1/1     1            1           7s
 tasks                1/1     1            1           7s
 ui                   2/2     2            2           7s
 ```
 
 The MCP servers fetch the run token keys from the task service when they start. On a first
-install they usually start before it is listening, and then refuse every run token for up to a
-minute (`GOLEM_MCP_KEYS_REFRESH_SECONDS`), which fails the runs that start meanwhile. Restart
-them once the task service is available:
+install they usually start before it is listening, and then refuse every token for up to a
+minute (`GOLEM_MCP_KEYS_REFRESH_SECONDS`), which fails the runs, and the applies of accepted
+proposals, that start meanwhile. Restart them once the task service is available:
 
 <!-- run: mcp-restart -->
 ```sh
-kubectl -n golem-system rollout restart deployment/mcp-tracker-read deployment/mcp-wiki-read
-kubectl -n golem-system rollout status deployment/mcp-tracker-read --timeout=5m
-kubectl -n golem-system rollout status deployment/mcp-wiki-read --timeout=5m
+kubectl -n golem-system rollout restart deployment/mcp-tracker-read deployment/mcp-wiki-read \
+  deployment/mcp-wiki-write deployment/mcp-desk-write deployment/mcp-tracker-write
+for name in mcp-tracker-read mcp-wiki-read mcp-wiki-write mcp-desk-write mcp-tracker-write; do
+  kubectl -n golem-system rollout status "deployment/$name" --timeout=5m
+done
 ```
 
 A Deployment that stays at `0/1`: [troubleshooting.md](troubleshooting.md#a-process-does-not-become-ready).

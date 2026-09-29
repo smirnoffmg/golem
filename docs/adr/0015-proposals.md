@@ -402,3 +402,70 @@ built separately.
   merge request (`<agent>: <target> (applied)`) and merges it with `sha` = the proposal's
   `commit`; a 409 leaves it open for a person. A `stale` proposal's branch is deleted, a
   `rejected` one's left. `landed_at` marks either, so each is done once.
+
+### The write servers as built
+
+- **Three groups, three Deployments** (`mcp-wiki-write`, `mcp-desk-write`, `mcp-tracker-write`,
+  pods labelled `golem-mcp-write`, not `golem-mcp`), so the read servers' policy, which admits
+  runs, never selects them. Their policy admits the task service on 8000 and lets them reach the
+  task service's `internal-read`, the audit database and Jira or Confluence; the task service's
+  egress gains the write servers, and no run's egress names them.
+- **Settings.** `GOLEM_MCP_RESOURCE` (the audience, which must equal the `resource` in
+  `GOLEM_WRITE_SERVERS_FILE`), `GOLEM_MCP_WIKI_SPACES`, `GOLEM_MCP_DESK_PROJECTS`,
+  `GOLEM_MCP_TRACKER_PROJECTS` (a server without its list does not start),
+  `GOLEM_MCP_CONFLUENCE_DEPLOYMENT` for `wiki.write` (`cloud` or `data-center`), and
+  `GOLEM_MCP_JIRA_DEPLOYMENT` for `tracker.write`'s search, as for `tracker.read`.
+- **The gate** takes proposal tokens only (`golem.proposal_token.verify` for the server's
+  audience); a run token is refused, and a read server still refuses any token carrying
+  `proposal`. In order: the token's group is the server's, the proposal allows the token's scope
+  and its row's digest and kind match the token (`GET /internal/proposals/{id}` on
+  `internal-read` answers `{"id", "state", "digest", "kind"}` and nothing else), the tool is in
+  the group and allowed by the scope (`preview_page_edit` needs `preview`, every `apply_*`
+  `apply`), the call names the token's proposal, and its `payload` hashes to the token's digest.
+  A refusal is 401 `invalid_token` for a proposal that no longer allows the call, 403 for the
+  rest, 503 when the task service cannot answer.
+- **The state cache keeps only answers that allow** (`GOLEM_MCP_PROPOSAL_STATUS_TTL_SECONDS`,
+  10 s). An answer that would refuse is asked again at once: a person who opens a page edit (a
+  preview while `pending`) and accepts it within ten seconds would otherwise have the apply
+  refused on the cached `pending`. Revocation is unchanged: a proposal decided or applied stops
+  a token within the TTL, as a stopped run does.
+- **The decider** reaches the tools from the verified token, which the gate leaves in the
+  request's scope state, never from the call's arguments.
+- **The audit row** names the token's `sub` as account, adds `act=service:golem-tasks
+  proposal=<id>` to the request, and replaces the `payload` argument with
+  `sha256:<16 hex of the payload digest>`; its chain is empty.
+- **Confluence.** Cloud reads `GET /wiki/api/v2/pages/{id}?body-format=storage` and the space's
+  key from `GET /wiki/api/v2/spaces/{spaceId}` (a v2 page names its space by id only), and
+  writes `PUT /wiki/api/v2/pages/{id}` with `id`, `status` `current`, `title`, `body`
+  (`representation` `storage`, `value`) and `version` (`number`, `message`), the fields the v2
+  OpenAPI marks required. Data Center reads `GET /rest/api/content/{id}?expand=body.storage,
+  version,space` and writes `PUT /rest/api/content/{id}` with `type` `page` and the space key.
+  The `GOLEM_MCP_UPSTREAM_URL` of a Cloud server ends in `/wiki`, as the read server's does.
+  The v2 OpenAPI documents its 409 as a space that requires approval before publishing, not a
+  version conflict: whatever a refused write means, the page is read again and the rules decide.
+- **Only the current version's message is checked for the marker.** If someone edits the page
+  after the apply and before a retry of a lost answer, the retry answers `stale` although the
+  proposal was written; the page history shows the marked version.
+- **The space is checked after the page is read**, since only the page names its space, and
+  before any write; a preview outside the allowed spaces is refused too.
+- **Jira Service Management.** The server's own account comes from `GET /rest/api/2/myself`
+  (`accountId` on Cloud, `key` on Data Center) and a comment's author is compared on those. A
+  reply already posted is a comment by that account, with `public` equal to the proposal's,
+  created (`created.epochMillis`) at or after `decided_at`, whose body equals the proposed text
+  up to trailing whitespace, which the upstream may trim. Comments are paged by `start` and
+  `limit` (100) until `isLastPage`, at most 50 pages; a request with more fails rather than risk
+  a second reply.
+- **Jira.** A new issue is looked up with `labels = "golem-<12 hex>"` on the deployment's search
+  path; `POST /rest/api/2/issue` sends `project`, `issuetype` by name, `summary`,
+  `description` and `labels`. A comment is found with the Jira adapter's marker rule and posted
+  with the marker as its last line.
+- **After a refused or unanswered write** each apply looks once more (the page, the comments,
+  the label) before it answers `failed`, so a write whose answer was lost ends `applied`.
+- **Metrics.** The task service counts `golem_proposal_decisions_total{kind, decision}` and
+  `golem_proposal_applies_total{kind, result}`, `result` one of `applied`, `stale`, `failed` or
+  `unanswered` (the reconciler asks again); the write servers count their gate's decisions in
+  `golem_mcp_tool_calls_total` like the read servers.
+- **Read servers keep audience `golem-mcp`.** The per-server audiences of
+  [ADR 0016](0016-observability-tools.md) are built for the write servers only.
+- **Compose** runs no MCP server, read or write; the write servers are deployed on Kubernetes
+  only.

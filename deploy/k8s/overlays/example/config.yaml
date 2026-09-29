@@ -85,6 +85,34 @@ metadata:
 data:
   GOLEM_MCP_UPSTREAM_URL: https://confluence.internal
 ---
+# The write servers: the same hosts as the read servers, other accounts, and where they write.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-wiki-write-env
+  namespace: golem-system
+data:
+  GOLEM_MCP_UPSTREAM_URL: https://confluence.internal
+  GOLEM_MCP_WIKI_SPACES: RUNBOOKS
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-desk-write-env
+  namespace: golem-system
+data:
+  GOLEM_MCP_UPSTREAM_URL: https://jira.internal
+  GOLEM_MCP_DESK_PROJECTS: HELP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-tracker-write-env
+  namespace: golem-system
+data:
+  GOLEM_MCP_UPSTREAM_URL: https://jira.internal
+  GOLEM_MCP_TRACKER_PROJECTS: OPS
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:

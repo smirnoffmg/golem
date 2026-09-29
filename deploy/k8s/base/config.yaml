@@ -22,6 +22,18 @@ data:
       target_branch: main
   jira-labels.yaml: |
     golem:discovery: discovery
+  # The write servers the task service applies accepted proposals through (ADR 0015): each
+  # one's MCP endpoint and the audience of its proposal tokens, the same canonical URI.
+  write-servers.yaml: |
+    wiki.write:
+      url: http://mcp-wiki-write.golem-system.svc:8000/mcp
+      resource: http://mcp-wiki-write.golem-system.svc:8000/mcp
+    desk.write:
+      url: http://mcp-desk-write.golem-system.svc:8000/mcp
+      resource: http://mcp-desk-write.golem-system.svc:8000/mcp
+    tracker.write:
+      url: http://mcp-tracker-write.golem-system.svc:8000/mcp
+      resource: http://mcp-tracker-write.golem-system.svc:8000/mcp
 ---
 # Lives in golem-jobs because every run's Job mounts it there (GOLEM_MCP_REGISTRY_CONFIGMAP);
 # a Job cannot mount a ConfigMap from another namespace.

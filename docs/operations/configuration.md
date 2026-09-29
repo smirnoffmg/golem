@@ -161,19 +161,28 @@ the task service, and a step for every process, whose stages it starts through t
 
 ### MCP server: `python -m golem.mcp`
 
-One process per tool group ([ADR 0008](../adr/0008-platform-mcp-servers.md)).
+One process per tool group ([ADR 0008](../adr/0008-platform-mcp-servers.md)). A read group
+(`tracker.read`, `wiki.read`) serves runs with run tokens; a write group (`wiki.write`,
+`desk.write`, `tracker.write`) serves the task service alone with proposal tokens, and applies
+what a person accepted ([ADR 0015](../adr/0015-proposals.md)).
 
 <!-- settings: mcp -->
 | Setting | Required or default | Meaning |
 | --- | --- | --- |
-| `GOLEM_MCP_GROUP` | required | `tracker.read` (Jira) or `wiki.read` (Confluence) |
-| `GOLEM_MCP_UPSTREAM_URL` | required | Jira's or Confluence's base URL |
+| `GOLEM_MCP_GROUP` | required | `tracker.read`, `tracker.write`, `desk.write` (Jira) or `wiki.read`, `wiki.write` (Confluence) |
+| `GOLEM_MCP_UPSTREAM_URL` | required | Jira's or Confluence's base URL; Confluence Cloud's ends in `/wiki` |
 | `GOLEM_MCP_UPSTREAM_TOKEN` | required | the server's own credential upstream |
 | `GOLEM_MCP_UPSTREAM_USER` | none | Atlassian Cloud: the account's email (Basic); empty on Data Center (Bearer) |
-| `GOLEM_MCP_JIRA_DEPLOYMENT` | required for `tracker.read` | `cloud` or `data-center`: which search endpoint to call |
+| `GOLEM_MCP_JIRA_DEPLOYMENT` | required for `tracker.read` and `tracker.write` | `cloud` or `data-center`: which search endpoint to call |
+| `GOLEM_MCP_CONFLUENCE_DEPLOYMENT` | required for `wiki.write` | `cloud` (the v2 page API) or `data-center` (`/rest/api/content`) |
+| `GOLEM_MCP_RESOURCE` | required for a write group | the server's canonical URI, the audience of the proposal tokens it accepts: the `resource` the task service's [write servers](#write-servers) file names for it |
+| `GOLEM_MCP_WIKI_SPACES` | required for `wiki.write` | comma-separated space keys it may edit pages in; any other space is refused before a write |
+| `GOLEM_MCP_DESK_PROJECTS` | required for `desk.write` | comma-separated service desk project keys it may reply in |
+| `GOLEM_MCP_TRACKER_PROJECTS` | required for `tracker.write` | comma-separated project keys it may create issues and comment in |
 | `GOLEM_TASK_SERVICE_URL` | required | the task service's `internal-read` listener (`http://tasks.golem-system.svc:8001`) |
 | `GOLEM_AUDIT_DSN` | required | libpq connection string to `golem_audit` as `golem_mcp` |
 | `GOLEM_MCP_RUN_STATUS_TTL_SECONDS` | `10` | how long a run's status is cached; a canceled run's calls stop within it |
+| `GOLEM_MCP_PROPOSAL_STATUS_TTL_SECONDS` | `10` | write groups: how long a proposal state that allows the call is cached; a state that would refuse is always asked again |
 | `GOLEM_MCP_KEYS_REFRESH_SECONDS` | `60` | least time between refetches of the run keys on an unknown key id; a server that has never loaded keys (it started before the task service) retries after 1 s, doubling up to this |
 | `GOLEM_PORT` | `8000` | `/mcp` |
 | `GOLEM_METRICS_PORT` | `9090` | metrics |
@@ -266,6 +275,7 @@ process only when its pod restarts.
 | golem-system | `golem-mattermost-adapter` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_MATTERMOST_BOT_TOKEN`, `GOLEM_MATTERMOST_COMMAND_TOKEN`, `GOLEM_PUSH_TOKEN_SECRET` | Mattermost adapter |
 | golem-system | `golem-ui` | `GOLEM_OIDC_CLIENT_SECRET`, `GOLEM_UI_DSN`, `GOLEM_UI_SESSION_KEY` | UI |
 | golem-system | `golem-mcp-tracker-read`, `golem-mcp-wiki-read` | `GOLEM_MCP_UPSTREAM_TOKEN`, `GOLEM_AUDIT_DSN` (role `golem_mcp`) | MCP servers |
+| golem-system | `golem-mcp-wiki-write`, `golem-mcp-desk-write`, `golem-mcp-tracker-write` | `GOLEM_MCP_UPSTREAM_TOKEN` (an account of its own, not a read server's), `GOLEM_AUDIT_DSN` (role `golem_mcp`) | write servers |
 | golem-jobs | `golem-run-secrets` | `GOLEM_MODEL_GATEWAY_URL`, `GOLEM_MODEL`, `GOLEM_MODEL_KEY`, optional `GOLEM_MODEL_TIMEOUT_SECONDS`, `GOLEM_GIT_TOKEN`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` | every run |
 | golem-jobs | `golem-run-<run id>-token` | `GOLEM_RUN_TOKEN` | one run; created by the task service, deleted with its Job |
 
@@ -281,6 +291,7 @@ it reads at `/etc/golem/`. `golem-mcp-registry` lives in `golem-jobs`, because r
 | `agent-tools.yaml` | task service | `GOLEM_AGENT_TOOLS_FILE` |
 | `gitlab-projects.yaml` | reconciler | `GOLEM_GITLAB_PROJECTS_FILE` |
 | `jira-labels.yaml` | Jira adapter | `GOLEM_JIRA_LABELS_FILE` |
+| `write-servers.yaml` | task service | `GOLEM_WRITE_SERVERS_FILE` |
 | `registry.yaml` (`golem-mcp-registry`) | every run | `GOLEM_MCP_REGISTRY_CONFIGMAP` |
 
 Adding an agent touches five of them: the call registry, catalogs, agent tools, GitLab projects
@@ -351,15 +362,20 @@ proposals end `failed` with the reason.
 
 ```yaml
 wiki.write:
-  url: http://wiki-write.golem-system.svc:8000/mcp
-  resource: https://wiki-write.golem-system.svc/mcp
+  url: http://mcp-wiki-write.golem-system.svc:8000/mcp
+  resource: http://mcp-wiki-write.golem-system.svc:8000/mcp
 desk.write:
-  url: http://desk-write.golem-system.svc:8000/mcp
-  resource: https://desk-write.golem-system.svc/mcp
+  url: http://mcp-desk-write.golem-system.svc:8000/mcp
+  resource: http://mcp-desk-write.golem-system.svc:8000/mcp
 tracker.write:
-  url: http://tracker-write.golem-system.svc:8000/mcp
-  resource: https://tracker-write.golem-system.svc/mcp
+  url: http://mcp-tracker-write.golem-system.svc:8000/mcp
+  resource: http://mcp-tracker-write.golem-system.svc:8000/mcp
 ```
+
+Each server's `GOLEM_MCP_RESOURCE` must equal its `resource` here, or it refuses every token.
+The server checks the token's group, scope, proposal and payload digest, and asks the task
+service (`GET /internal/proposals/{id}` on `internal-read`) that the proposal is still
+`accepted` (or `pending` or `failed` for a preview).
 
 ### Jira labels
 
@@ -432,7 +448,7 @@ call registry lets them call to an authenticated one. How a caller uses both:
 | edge | 8000, 9090 | TCP on 8000 |
 | tasks | 8000 `a2a`, 8001 `internal-read`, 8002 `internal-write`, 9090 | `GET /internal/run-keys` on 8001 |
 | reconciler | 9090 | none: a crash ends the process and the kubelet restarts it |
-| jira-adapter, mattermost-adapter, mcp-* | 8000, 9090 | TCP on 8000 |
+| jira-adapter, mattermost-adapter, mcp-* (read and write servers) | 8000, 9090 | TCP on 8000 |
 | ui | 8000, 9090 | readiness `GET /healthz`, liveness TCP |
 | board | 8080 | readiness `GET /`, liveness TCP |
 
