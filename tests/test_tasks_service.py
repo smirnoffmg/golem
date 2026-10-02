@@ -20,6 +20,7 @@ from golem.tasks.app import (
 )
 from golem.tasks.ports import (
     Orchestrator,
+    ProposalGate,
     ProposalRecord,
     ProposalView,
     Refused,
@@ -41,6 +42,7 @@ class FakeOrchestrator:
     canceled: list[str] = field(default_factory=list)
     runs: dict[str, TaskRun] = field(default_factory=dict)
     proposals: dict[str, ProposalRecord] = field(default_factory=dict)
+    gates: dict[str, ProposalGate] = field(default_factory=dict)
 
     async def start(self, run: RunStart) -> Started | Refused:
         self.started.append(run)
@@ -56,9 +58,12 @@ class FakeOrchestrator:
         detail: str,
         proposal: ProposalView | None = None,
         report: str | None = None,
+        proposal_payload: dict | None = None,
     ) -> None:
         run = self.runs[task_id]
-        outcome = RunOutcome(run.run_id, succeeded, detail, proposal, report)
+        outcome = RunOutcome(
+            run.run_id, succeeded, detail, proposal, report, proposal_payload=proposal_payload
+        )
         self.runs[task_id] = replace(run, outcome=outcome)
 
     async def run_of_task(self, task_id: str) -> TaskRun | None:
@@ -73,8 +78,15 @@ class FakeOrchestrator:
     async def proposal(self, proposal_id: str) -> ProposalRecord | None:
         return self.proposals.get(proposal_id)
 
+    async def claim_apply(self, proposal_id: str) -> None:
+        # Merge requests only here: none is ever accepted in Golem.
+        return None
+
     async def agents_of_tasks(self, task_ids: tuple[str, ...]) -> dict[str, str]:
         return {t: run.agent for t, run in self.runs.items() if t in task_ids}
+
+    async def proposal_gate(self, proposal_id: str) -> ProposalGate | None:
+        return self.gates.get(proposal_id)
 
 
 def make_card() -> AgentCard:
@@ -474,6 +486,25 @@ def test_a_reported_run_completes_its_task_with_the_report(
     [artifact] = done["artifacts"]
     assert artifact["name"] == "report"
     assert artifact["parts"] == [{"text": "# Seen\n\nA deploy."}]
+
+
+def test_a_proposal_the_platform_applies_is_the_tasks_proposal_artifact(
+    client: TestClient, orchestrator: FakeOrchestrator
+) -> None:
+    task = send(client, "answer SD-12")
+    reply = ProposalView(id="p-2", kind="desk_reply", state="pending", url="")
+    payload = {"request": "SD-12", "public": True, "text": "The export works again."}
+    orchestrator.finish(
+        task["id"], succeeded=True, detail="waits", proposal=reply, proposal_payload=payload
+    )
+
+    assert notify(client, task["id"]).status_code == 200
+
+    done = get_task(client, task["id"])
+    assert done["metadata"]["golemProposal"]["kind"] == "desk_reply"
+    [artifact] = done["artifacts"]
+    assert artifact["name"] == "proposal"
+    assert artifact["parts"] == [{"data": payload}]
 
 
 def test_a_proposal_state_change_moves_only_the_status_timestamp(

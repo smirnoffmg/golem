@@ -3,8 +3,9 @@
 Runs the demo stack of scripts/ui_demo.py with ids and timestamps frozen, signs in as alice in
 headless Chromium with the browser's clock fixed two hours after the seed, and captures the
 board and every task state at 1280x800, the board also at 390x844; then the stack again with a
-process pinned, where people see only the process, for the process's board. Needs Docker and
-``uv run playwright install --only-shell chromium`` once.
+process pinned, where people see only the process, for the process's board; then with proposals
+for alice to review, for the review queue, a page edit's diff, a reply and a report. Needs Docker
+and ``uv run playwright install --only-shell chromium`` once.
 """
 
 import sys
@@ -119,6 +120,30 @@ def capture_process(ui_url: str) -> list[Path]:
     return [shot]
 
 
+def capture_proposals(ui_url: str, paths: dict[str, str]) -> list[Path]:
+    shots = []
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        _, page = signed_in(browser, ui_url)
+        page.get_by_role("link", name="Sign in").click()
+        page.wait_for_url(f"{ui_url}/")
+        page.goto("/review")
+        expect(page.locator(".proposal-card")).to_have_count(4)
+        shots.append(shoot(page, "review-queue"))
+        page.goto(paths["wiki"])
+        expect(page.locator(".diff")).to_be_visible()
+        shots.append(shoot(page, "proposal-page-edit"))
+        page.goto(paths["reply"])
+        expect(page.locator(".preview")).to_be_visible()
+        shots.append(shoot(page, "proposal-reply"))
+        page.goto("/agents/triage")
+        page.locator("details.reports summary").click()
+        expect(page.locator("details.reports .card")).to_have_count(1)
+        shots.append(shoot(page, "reports-lane"))
+        browser.close()
+    return shots
+
+
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     print("building the board and starting Postgres...", flush=True)
@@ -131,6 +156,10 @@ def main() -> None:
             with frozen(SEEDED_AT):
                 seed(demo)
             shots += capture_process(demo.ui_url)
+        with running(databases_of(container), board, proposals=True) as demo:
+            with frozen(SEEDED_AT):
+                paths = seed(demo)
+            shots += capture_proposals(demo.ui_url, paths)
     total = 0
     for path in shots:
         size = path.stat().st_size

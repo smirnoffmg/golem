@@ -3,7 +3,8 @@ import { type FormEvent, useState } from "react";
 import { api } from "./api";
 import { ACTIVE_STATES, type Proposal, type Task } from "./board";
 import { Link } from "./navigation";
-import { taskPath } from "./route";
+import { kindName, stateText } from "./proposal";
+import { proposalPath, taskPath } from "./route";
 import {
   MAX_REASON_CHARS,
   answerForm,
@@ -58,7 +59,12 @@ export function ProposalLink(props: { proposal: Proposal; inProcess?: boolean })
       </p>
     );
   }
-  return <p className="proposal muted">Proposal {status}.</p>;
+  return (
+    <p className="proposal">
+      <Link to={proposalPath(proposal.id)}>{kindName(proposal.kind)}</Link>{" "}
+      <span className="muted">{stateText(proposal.state)}.</span>
+    </p>
+  );
 }
 
 export function TaskCard(props: { agent: string; task: Task; onChanged: (task: Task) => void }) {

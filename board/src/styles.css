@@ -15,6 +15,8 @@
   --accent-soft: #e3ebf6;
   --danger: #a3261d;
   --danger-soft: #f7e6e4;
+  --insert: #1f6b3a;
+  --insert-soft: #e3f1e7;
   --focus: #2c5a97;
 
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -42,6 +44,8 @@
     --accent-soft: #1d2b3d;
     --danger: #f0a39c;
     --danger-soft: #3a2021;
+    --insert: #8fd3a5;
+    --insert-soft: #1b3024;
     --focus: #8fb3e6;
   }
 }
@@ -464,14 +468,16 @@ button.danger {
   font-weight: 600;
 }
 
-.archive {
+.archive,
+.reports {
   border-top: 1px solid var(--line);
   padding-top: 0.75rem;
   display: grid;
   gap: 0.6rem;
 }
 
-.archive summary {
+.archive summary,
+.reports summary {
   cursor: pointer;
   font-weight: 650;
   display: flex;
@@ -483,7 +489,8 @@ button.danger {
   grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr));
 }
 
-.archive[open] > button {
+.archive[open] > button,
+.reports[open] > button {
   justify-self: start;
 }
 
@@ -582,6 +589,139 @@ button.danger {
   overflow-wrap: anywhere;
 }
 
+/* --- Proposals and reports ------------------------------------------------------------------ */
+
+.rail-review {
+  margin-bottom: 0.75rem;
+}
+
+.rail-name .count {
+  margin-left: 0.4rem;
+}
+
+.card-kind {
+  font-size: var(--step--1);
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.proposal-failed .state {
+  color: var(--danger);
+}
+
+.review-page .cards {
+  grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr));
+}
+
+.outcome {
+  padding: 0.6rem 0.8rem;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+}
+
+.outcome-failed,
+.outcome-stale {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.outcome-applied {
+  border-left-color: var(--insert);
+  background: var(--insert-soft);
+}
+
+.preview {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.35rem 1rem;
+  margin: 0;
+}
+
+.preview > div {
+  display: contents;
+}
+
+.preview dt {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.preview dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.preview pre,
+.report-text {
+  margin: 0;
+  padding: 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  font-family: var(--font);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  overflow: hidden;
+}
+
+.diff-line {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr);
+  padding: 0.1rem 0.5rem 0.1rem 0;
+}
+
+.diff-line code {
+  font-family: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff-mark {
+  text-align: center;
+  color: var(--muted);
+}
+
+.diff-insert {
+  background: var(--insert-soft);
+}
+
+.diff-insert .diff-mark {
+  color: var(--insert);
+}
+
+.diff-delete {
+  background: var(--danger-soft);
+}
+
+.diff-delete .diff-mark {
+  color: var(--danger);
+}
+
+.diff-delete code {
+  text-decoration: line-through;
+  text-decoration-color: var(--danger);
+}
+
+.diff-fold {
+  padding: 0.2rem 0.5rem 0.2rem 2rem;
+  color: var(--muted);
+  font-family: var(--font);
+  border-block: 1px dashed var(--line);
+}
+
 /* --- Narrow screens ------------------------------------------------------------------------ */
 
 @media (max-width: 70rem) {
@@ -613,6 +753,14 @@ button.danger {
 
   .columns {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rail-review {
+    margin-bottom: 0;
   }
 
   .start-row {

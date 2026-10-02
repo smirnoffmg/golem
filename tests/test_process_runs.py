@@ -701,6 +701,35 @@ async def test_canceling_a_process_closes_the_merge_request_waiting_for_review(
     assert len(golem.cluster.launched) == 1
 
 
+async def test_canceling_a_process_leaves_a_stage_proposal_already_accepted_to_its_apply(
+    golem: Golem, runs_db: str
+) -> None:
+    task = await golem.start("alice", "Add a CSV export.")
+    await golem.reconcile()
+    spec = golem.stage("analyst")
+    golem.succeed(spec)
+    await golem.reconcile()
+    # A kind the platform applies, accepted a moment ago: its apply may be writing right now.
+    async with await psycopg.AsyncConnection.connect(runs_db, autocommit=True) as conn:
+        await conn.execute(
+            "UPDATE proposals SET kind = 'desk_reply', state = 'accepted',"
+            " decided_by = 'user:alice', decided_at = now(),"
+            " apply_lease_until = now() + interval '60 seconds' WHERE run_id = %s",
+            (spec.run_id,),
+        )
+
+    await golem.cancel("alice", task["id"])
+    await golem.reconcile()
+
+    async with await psycopg.AsyncConnection.connect(runs_db, autocommit=True) as conn:
+        row = await (
+            await conn.execute("SELECT state FROM proposals WHERE run_id = %s", (spec.run_id,))
+        ).fetchone()
+    # Rejecting it would not stop the write; the apply's own result is what it shows.
+    assert row == ("accepted",)
+    assert process_of(await golem.task("alice", task["id"]))["state"] == "canceled"
+
+
 async def test_a_canceled_process_proposes_nothing_its_stage_left_unsettled(
     golem: Golem,
 ) -> None:

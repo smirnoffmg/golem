@@ -21,6 +21,7 @@ from prometheus_client import CollectorRegistry
 from test_k8s_render import K8S, SETTINGS, container, find, render
 
 from golem.evaluation.cli import GATEWAY_SETTINGS
+from golem.mcp.groups import GROUPS
 from golem.mcp.settings import mcp_settings
 from golem.metrics import Metrics, ReconcilerMetrics
 from golem.runtime.deepagents_runner import model_timeout
@@ -177,11 +178,35 @@ def test_required_settings_in_the_reference_are_those_the_parser_requires(proces
     assert documented == missing_names(PARSERS[process], {})
 
 
+MCP_CONDITIONS = {
+    "GOLEM_MCP_JIRA_DEPLOYMENT": ("tracker.read", "tracker.write"),
+    "GOLEM_MCP_CONFLUENCE_DEPLOYMENT": ("wiki.write",),
+    "GOLEM_MCP_WIKI_SPACES": ("wiki.write",),
+    "GOLEM_MCP_DESK_PROJECTS": ("desk.write",),
+    "GOLEM_MCP_TRACKER_PROJECTS": ("tracker.write",),
+}
+
+
+@pytest.mark.parametrize("name", sorted(MCP_CONDITIONS))
+def test_a_setting_required_for_some_groups_is_required_for_exactly_those(name: str) -> None:
+    groups = MCP_CONDITIONS[name]
+    documented = " and ".join(f"`{group}`" for group in groups)
+
+    assert settings_tables()["mcp"][name] == f"required for {documented}"
+    for group in GROUPS:
+        assert (name in missing_names(mcp_settings, {"GOLEM_MCP_GROUP": group})) is (
+            group in groups
+        )
+
+
+def test_every_write_group_requires_its_audience() -> None:
+    assert settings_tables()["mcp"]["GOLEM_MCP_RESOURCE"] == "required for a write group"
+    for group in GROUPS.values():
+        missing = missing_names(mcp_settings, {"GOLEM_MCP_GROUP": group.name})
+        assert ("GOLEM_MCP_RESOURCE" in missing) is group.writes
+
+
 def test_conditionally_required_settings_are_required_under_their_condition() -> None:
-    assert "GOLEM_MCP_JIRA_DEPLOYMENT" in missing_names(
-        mcp_settings, {"GOLEM_MCP_GROUP": "tracker.read"}
-    )
-    assert settings_tables()["mcp"]["GOLEM_MCP_JIRA_DEPLOYMENT"] == "required for `tracker.read`"
     with pytest.raises(SettingsError, match="GOLEM_PUSH_CONFIG_KEY is required"):
         task_service_settings(
             dict.fromkeys(missing_names(task_service_settings, {}), "1")
@@ -278,6 +303,9 @@ OPERATOR_INPUTS = {
     "UI_CLIENT_SECRET": "ui-client-secret",
     "JIRA_TOKEN": "jira-token",
     "CONFLUENCE_TOKEN": "confluence-token",
+    "WIKI_WRITE_TOKEN": "wiki-write-token",
+    "DESK_WRITE_TOKEN": "desk-write-token",
+    "TRACKER_WRITE_TOKEN": "tracker-write-token",
     "MATTERMOST_BOT_TOKEN": "bot-token",
     "MATTERMOST_COMMAND_TOKEN": "command-token",
     "GIT_TOKEN": "git-token",

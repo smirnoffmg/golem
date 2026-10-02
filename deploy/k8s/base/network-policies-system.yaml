@@ -155,11 +155,15 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
-    # The run keys: the MCP servers verify run tokens, the edge call tokens.
+    # The run keys: the MCP servers verify run tokens, the write servers proposal tokens (and
+    # ask a proposal's state), the edge call tokens.
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-mcp
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-mcp-write
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-edge
@@ -202,6 +206,15 @@ spec:
           port: 443
         - protocol: TCP
           port: 6443
+    # Accepted proposals, applied through the write servers (ADR 0015). Last, so an overlay's
+    # patches by index to the rules above still apply.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-mcp-write
+      ports:
+        - protocol: TCP
+          port: 8000
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -377,6 +390,49 @@ spec:
           podSelector:
             matchLabels:
               app.kubernetes.io/name: golem-run
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-tasks
+      ports:
+        - protocol: TCP
+          port: 8001
+    # Placeholder: Postgres (golem_audit).
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Placeholder: Jira and Confluence.
+    - to:
+        - ipBlock:
+            cidr: 198.51.100.20/32
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# Only the task service calls the write servers (ADR 0015); no run can open a connection to one.
+# The servers call the task service, the audit log and the system behind their group.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-write
+  namespace: golem-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: golem-mcp-write
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: golem-tasks
       ports:
         - protocol: TCP
           port: 8000

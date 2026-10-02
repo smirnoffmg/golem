@@ -20,6 +20,8 @@ AGENT_FILE = "agent.yaml"
 PROCESS_FILE = "process.yaml"
 # A handful the model can tell apart from their `when` (ADR 0019), not a directory to search.
 MAX_DELEGATES = 7
+# A person the platform names by their identity provider name; never a wildcard (ADR 0015).
+REVIEWER = re.compile(r"^user:[^\s:*]+$")
 MAX_STAGES = 10
 MAX_GOAL_CHARS = 4000
 GOAL_INPUT = "input"
@@ -134,6 +136,18 @@ class AgentCatalog(_Frozen):
     goal: Goal | None = None
     proposal: ProposalKind = "merge_request"
     delegates: tuple[Neighbour, ...] = Field(default=(), max_length=MAX_DELEGATES)
+    # Who may decide what the agent proposes, besides a person who started the run (ADR 0015).
+    reviewers: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _reviewers_are_people(self) -> "AgentCatalog":
+        for reviewer in self.reviewers:
+            if not REVIEWER.fullmatch(reviewer):
+                raise ValueError(f"reviewer {reviewer!r} is not a named person (user:<name>)")
+        repeated = sorted({r for r in self.reviewers if self.reviewers.count(r) > 1})
+        if repeated:
+            raise ValueError(f"reviewer {repeated[0]!r} is listed twice")
+        return self
 
     @model_validator(mode="after")
     def _rules_use_declared_names(self) -> "AgentCatalog":

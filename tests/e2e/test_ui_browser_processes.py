@@ -37,7 +37,7 @@ def test_people_see_the_process_and_not_its_worker(
     sign_in(page, demo, PROCESS_BOARD)
 
     rail = page.get_by_role("navigation", name="Agents")
-    expect(rail.locator(".rail-link")).to_have_text([re.compile(rf"^{PROCESS}")])
+    expect(rail.locator(".rail-list .rail-link")).to_have_text([re.compile(rf"^{PROCESS}")])
     for path in tasks.values():
         page.goto(path)
         expect(page.get_by_role("heading", level=1)).to_be_visible()

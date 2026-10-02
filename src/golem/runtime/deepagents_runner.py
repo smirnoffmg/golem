@@ -5,6 +5,7 @@ import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Literal
 
 from deepagents import FilesystemPermission, SubAgent, create_deep_agent
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
@@ -27,6 +28,7 @@ from langgraph.errors import GraphBubbleUp
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import SecretStr
 
+from golem.proposal_payload import APPLIED_KINDS, MERGE_REQUEST, ProposalError, payload_of
 from golem.runtime.ports import Brief, RoleResult
 from golem.runtime.tools import McpToolbox, ToolAccessError
 
@@ -65,22 +67,46 @@ class DeepAgentsRunner:
 
     async def run(self, brief: Brief) -> RoleResult:
         tools = await self.toolbox.tools_for(brief.role, brief.delegates)
-        proposal = Proposal()
-        agent = build_agent(
-            self.model, brief, self.limits, tools, proposal if brief.goal_mode else None
-        )
+        proposal = Proposal(brief.proposal_kind, brief.workspace, brief.role.writes)
+        proposing = brief.goal_mode or brief.proposal_kind in APPLIED_KINDS
+        agent = build_agent(self.model, brief, self.limits, tools, proposal if proposing else None)
         state = await agent.ainvoke(
             {"messages": [HumanMessage(task(brief))]},
             config={"recursion_limit": self.limits.recursion_limit, "callbacks": [*self.callbacks]},
         )
-        return RoleResult(summary=last_ai_text(state["messages"]), proposed=proposal.made)
+        return RoleResult(
+            summary=last_ai_text(state["messages"]),
+            proposed=proposal.made,
+            proposal=proposal.manifest,
+        )
 
 
 @dataclass
 class Proposal:
+    """What the role submits through `submit_proposal`: that a goal run found something, and for
+    a kind the platform applies, the proposal file's content (ADR 0015)."""
+
+    kind: str = MERGE_REQUEST
+    workspace: Path | None = None
+    writes: str = ""
     made: bool = False
+    manifest: dict[str, Any] | None = None
 
     def tool(self) -> BaseTool:
+        if self.kind not in APPLIED_KINDS:
+            return self._found_tool()
+        return StructuredTool.from_function(
+            func=SUBMITTERS[self.kind](self._submit),
+            name=PROPOSE_TOOL,
+            description=(
+                f"Submit this run's {self.kind} proposal, which a person accepts or rejects and"
+                " the platform then applies. Write each body to a file under your directory"
+                " first and pass its path; the call says what is wrong if it cannot be"
+                f" submitted. {KIND_ARGUMENTS[self.kind]}"
+            ),
+        )
+
+    def _found_tool(self) -> BaseTool:
         def submit_proposal(reason: str) -> str:
             self.made = True
             return "Noted: this run ends with a proposal a person decides on."
@@ -94,6 +120,90 @@ class Proposal:
                 " the report. `reason` says in one line what you found."
             ),
         )
+
+    def _submit(self, fields: Mapping[str, Any]) -> str:
+        manifest = {"kind": self.kind} | {
+            name: value.lstrip("/") if name.endswith("_file") and isinstance(value, str) else value
+            for name, value in fields.items()
+            if value is not None
+        }
+        try:
+            payload_of(self.kind, manifest, self._read, under=self.writes)
+        except ProposalError as error:
+            return f"Not submitted: {error}. Fix it and call {PROPOSE_TOOL} again."
+        self.made, self.manifest = True, manifest
+        return "Submitted: this run ends with your proposal; a person decides on it."
+
+    def _read(self, path: str) -> str:
+        assert self.workspace is not None
+        return (self.workspace / path).read_text(encoding="utf-8")
+
+
+Submit = Callable[[Mapping[str, Any]], str]
+
+
+def _wiki_edit(submit: Submit) -> Callable[..., str]:
+    def submit_proposal(reason: str, page_id: str, title: str, version: int, body_file: str) -> str:
+        return submit(
+            {"page_id": page_id, "title": title, "version": version, "body_file": body_file}
+        )
+
+    return submit_proposal
+
+
+def _desk_reply(submit: Submit) -> Callable[..., str]:
+    def submit_proposal(reason: str, request: str, public: bool, text_file: str) -> str:
+        return submit({"request": request, "public": public, "text_file": text_file})
+
+    return submit_proposal
+
+
+def _tracker_issue(submit: Submit) -> Callable[..., str]:
+    def submit_proposal(
+        reason: str,
+        action: Literal["create", "comment"],
+        project: str | None = None,
+        issue_type: str | None = None,
+        summary: str | None = None,
+        description_file: str | None = None,
+        issue: str | None = None,
+        comment_file: str | None = None,
+    ) -> str:
+        return submit(
+            {
+                "action": action,
+                "project": project,
+                "issue_type": issue_type,
+                "summary": summary,
+                "description_file": description_file,
+                "issue": issue,
+                "comment_file": comment_file,
+            }
+        )
+
+    return submit_proposal
+
+
+SUBMITTERS: dict[str, Callable[[Submit], Callable[..., str]]] = {
+    "wiki_edit": _wiki_edit,
+    "desk_reply": _desk_reply,
+    "tracker_issue": _tracker_issue,
+}
+KIND_ARGUMENTS = {
+    "wiki_edit": (
+        "Read the page with `get_page_source` and propose it back whole: `page_id`, the"
+        " `version` you read, the `title`, and `body_file` holding the new storage-format body."
+    ),
+    "desk_reply": (
+        "`request` is the request key (SD-12), `text_file` holds the reply, `public` is true when"
+        " the customer reads it and false for an internal note."
+    ),
+    "tracker_issue": (
+        "`action` is `create` (with `project`, `issue_type`, one-line `summary` and"
+        " `description_file`) or `comment` (with `issue` and `comment_file`). Search the tracker"
+        " first and comment on an open issue rather than create a duplicate."
+    ),
+}
 
 
 def gateway_model(settings: Mapping[str, str]) -> ChatOpenAI:
@@ -278,7 +388,7 @@ def preamble(brief: Brief) -> str:
     target = brief.target
     sections = ", ".join(sorted(target.empty_sections)) or "none"
     linked = "\n\n".join(record_block(r.id, r.text) for r in brief.linked) or "None."
-    outcome = goal_rules(brief) if brief.goal_mode else ""
+    outcome = (goal_rules(brief) if brief.goal_mode else "") + proposal_rules(brief)
     return f"""# Golem run {brief.run_id}
 
 Goal: {brief.goal}
@@ -306,6 +416,15 @@ def goal_rules(brief: Brief) -> str:
     return f"""- Record what you found in the target either way: it is the report of this run.
 - Call `{PROPOSE_TOOL}` only if a person should act on it; otherwise the run just reports.
 - Proposals still open on this target: {open_ones}. Extend what they propose, do not repeat it.
+"""
+
+
+def proposal_rules(brief: Brief) -> str:
+    if brief.proposal_kind not in APPLIED_KINDS:
+        return ""
+    when = "If you call" if brief.goal_mode else "End the run by calling"
+    return f"""- {when} `{PROPOSE_TOOL}`, it is a `{brief.proposal_kind}` proposal: \
+{KIND_ARGUMENTS[brief.proposal_kind]} A person reads it before anything is applied.
 """
 
 

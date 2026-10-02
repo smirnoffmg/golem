@@ -38,6 +38,7 @@ from golem.settings import (
     task_service_settings,
     ui_settings,
 )
+from golem.tasks.apply import WriteServer, parse_write_servers
 
 EDGE_ENV = {
     "GOLEM_OIDC_ISSUER": "https://idp.example.test/realms/golem",
@@ -399,6 +400,38 @@ def test_a_gitlab_project_without_target_branch_is_refused() -> None:
         parse_gitlab_projects("discovery:\n  project: product/discovery-context\n")
 
 
+def test_write_servers_name_each_groups_url_and_canonical_uri() -> None:
+    servers = parse_write_servers(
+        "wiki.write:\n  url: http://wiki-write:8000/mcp\n"
+        "  resource: https://wiki-write.golem-system.svc/mcp\n"
+    )
+
+    assert servers == {
+        "wiki.write": WriteServer(
+            url="http://wiki-write:8000/mcp", resource="https://wiki-write.golem-system.svc/mcp"
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "wiki.read:\n  url: http://x/mcp\n  resource: https://x/mcp\n",
+        "wiki.write:\n  url: http://x/mcp\n",
+        "wiki.write: http://x/mcp\n",
+    ],
+)
+def test_a_write_server_entry_off_in_any_way_is_refused(text: str) -> None:
+    with pytest.raises(SettingsError, match="write servers"):
+        parse_write_servers(text)
+
+
+def test_the_task_service_names_its_write_servers_only_if_given() -> None:
+    assert task_service_settings(TASKS_ENV).write_servers_file is None
+    given = task_service_settings({**TASKS_ENV, "GOLEM_WRITE_SERVERS_FILE": "/etc/golem/w.yaml"})
+    assert given.write_servers_file == Path("/etc/golem/w.yaml")
+
+
 def test_task_service_settings_name_the_run_token_key_and_agent_tools() -> None:
     settings = task_service_settings(TASKS_ENV)
 
@@ -616,3 +649,17 @@ def test_settings_import_no_process_handlers() -> None:
     ).stdout.split()
 
     assert [name for name in handlers if name in loaded] == []
+
+
+def test_reading_settings_loads_no_mcp_client_and_no_write_client() -> None:
+    # The edge, the reconciler and the MCP servers read settings too; none needs the task
+    # service's write-server client or the MCP client stack for it.
+    code = (
+        "import sys, golem.settings;"
+        "print(sorted(m for m in sys.modules if m in ('mcp', 'golem.tasks.apply')))"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    assert loaded == "[]"

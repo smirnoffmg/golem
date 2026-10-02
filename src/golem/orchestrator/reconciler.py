@@ -1,8 +1,10 @@
 """The reconciler process: ``python -m golem.orchestrator.reconciler``.
 
-Every interval it reconciles finished Jobs, opens merge requests for succeeded runs, reads the
-reports of goal runs that proposed nothing and deletes their branches (ADR 0017), delivers task
-outcomes, follows open merge requests to their proposals' state (ADR 0015), and takes every
+Every interval it reconciles finished Jobs, opens merge requests for succeeded runs or records
+what they propose for a person to decide in Golem, reads the reports of goal runs that proposed
+nothing and deletes their branches (ADR 0017), delivers task outcomes, follows open merge
+requests to their proposals' state, asks again for accepted proposals whose apply was lost and
+lands the records of decided ones (ADR 0015), and takes every
 process a step, starting its stages through the edge (ADR 0019). A failed
 pass, or one that runs past its timeout, is logged and the next one runs; SIGTERM stops the
 loop between passes. Its metrics are served on ``GOLEM_METRICS_PORT``, the only port it
@@ -30,13 +32,14 @@ from golem.orchestrator.merge_requests import (
     close_merge_request,
     closing_reason,
     discard_branch,
-    propose_merge_request,
+    land_record,
+    propose_result,
     pushed_branch,
     read_report,
 )
 from golem.orchestrator.notify import TaskServiceNotifier
 from golem.orchestrator.process_runs import ProcessPorts, StageRefused, StageStart
-from golem.orchestrator.proposals import PendingMergeRequest, Transition
+from golem.orchestrator.proposals import Landing, PendingMergeRequest, Transition
 from golem.orchestrator.reconcile import (
     Pushed,
     Reporter,
@@ -107,7 +110,10 @@ def pass_for(
     stages: EdgeStages | None = None,
 ) -> Callable[[], Awaitable[None]]:
     async def propose(run: SucceededRun) -> Settlement:
-        return await propose_merge_request(gitlab, run)
+        return await propose_result(gitlab, run)
+
+    async def land(landing: Landing) -> None:
+        await land_record(gitlab, landing)
 
     async def proposed(run: SucceededRun) -> Pushed | None:
         return await pushed_branch(gitlab, run)
@@ -150,6 +156,7 @@ def pass_for(
                 report=Reporter(read, discard),
                 processes=processes,
                 notify_process=notifier.notify_process,
+                land=land,
             )
 
     return reconcile_pass

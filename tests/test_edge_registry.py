@@ -3,6 +3,7 @@
 import pytest
 
 from golem.catalog import AgentCatalog, Catalogs, ProcessCatalog
+from golem.edge.__main__ import reviewers_of
 from golem.edge.policy import Allow, Call, ChainLimits, Deny, Registry, callable_agents, evaluate
 from golem.edge.registry import RegistryError, derive_registry
 
@@ -144,3 +145,18 @@ def test_a_person_may_not_start_a_worker_directly():
 
     assert isinstance(decision, Deny)
     assert "may not call agent 'analyst'" in decision.detail
+
+
+def test_the_edge_reads_each_agents_reviewers_from_its_pinned_catalog() -> None:
+    catalogs = Catalogs(
+        agents={
+            "desk": AgentCatalog.model_validate(
+                {"name": "desk", "description": "d", "version": "1", "reviewers": ["user:bob"]}
+            ),
+            "quiet": AgentCatalog.model_validate(
+                {"name": "quiet", "description": "q", "version": "1"}
+            ),
+        }
+    )
+
+    assert reviewers_of(catalogs) == {"desk": frozenset({"user:bob"})}

@@ -9,8 +9,9 @@ import base64
 import hashlib
 import re
 import secrets
+import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from functools import partial
 from typing import Any
@@ -39,6 +40,7 @@ from support.idp import (
     FakeIdP,
 )
 from test_edge_app import EDGE_TOKEN, agent_card
+from test_tasks_proposals import FakeApplier
 from test_tasks_service import FakeOrchestrator, make_card
 from test_tasks_to_runs import CATALOG, SIGNING_KEY, TEMPLATE, FakeLauncher
 from testcontainers.community.postgres import PostgresContainer
@@ -59,12 +61,25 @@ from golem.tasks.app import (
     create_listeners,
 )
 from golem.tasks.ports import (
+    ALREADY_DECIDED,
+    DECIDED_IN_GITLAB,
+    NOT_FOUND,
     NOT_WAITING,
+    REASON_REQUIRED,
     RESOLVED,
+    Access,
+    Applied,
+    Applier,
     Orchestrator,
     ProcessRecord,
+    ProposalDetail,
+    ProposalPage,
     ProposalRecord,
+    ProposalSummary,
     ProposalView,
+    Report,
+    ReportPage,
+    ReportSummary,
 )
 from golem.tasks.store import tasks_engine, tasks_store
 from golem.ui.__main__ import prepare
@@ -84,6 +99,8 @@ REGISTRY = Registry(
         "reviewer": frozenset({"user:bob"}),
     }
 )
+# alice reviews what discovery proposes for others (ADR 0015).
+REVIEWERS = {"discovery": frozenset({"user:alice"})}
 CARDS = {
     name: agent_card(name, *skills)
     for name, skills in (
@@ -131,7 +148,8 @@ async def engine(postgres: PostgresContainer) -> AsyncIterator[AsyncEngine]:
 
 
 class Recording(httpx.AsyncBaseTransport):
-    """The UI's calls to the edge, by path and A2A method, passed on to the real edge."""
+    """The UI's calls to the edge, by A2A method or by path and query, passed on to the real
+    edge."""
 
     def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
         self.inner = inner
@@ -139,7 +157,7 @@ class Recording(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         method = re.search(rb'"method":\s*"(\w+)"', request.content or b"")
-        self.calls.append(method[1].decode() if method else request.url.path)
+        self.calls.append(method[1].decode() if method else request.url.raw_path.decode())
         return await self.inner.handle_async_request(request)
 
 
@@ -164,6 +182,7 @@ def build_stack(
     orchestrator: Orchestrator,
     engine: AsyncEngine | None = None,
     edge_callers: Limiter | None = None,
+    applier: Applier | None = None,
     **ui_options: Any,
 ) -> Stack:
     clock = Clock()
@@ -176,6 +195,7 @@ def build_stack(
         orchestrator,
         edge_token=EDGE_TOKEN,
         task_store=tasks_store(engine) if engine is not None else None,
+        applier=applier,
     )
     edge = create_edge_app(
         authenticate=authenticator(edge_keys, issuer=ISSUER, audience=EDGE_AUDIENCE),
@@ -188,6 +208,7 @@ def build_stack(
         edge_token=EDGE_TOKEN,
         cards=CARDS,
         callers=edge_callers,
+        reviewers=REVIEWERS,
     )
     recording = Recording(httpx.ASGITransport(app=edge))
     app = create_ui_app(
@@ -214,7 +235,8 @@ def build_stack(
 
 @dataclass
 class ProcessOrchestrator(FakeOrchestrator):
-    """Also the processes' records, and what their owners resolved (ADR 0019)."""
+    """Also the processes' records and what their owners resolved (ADR 0019), and the
+    proposals and reports a person may read and decide (ADR 0015)."""
 
     processes: dict[str, ProcessRecord] = field(default_factory=dict)
     resolutions: list[tuple[str, str, str, str | None]] = field(default_factory=list)
@@ -229,10 +251,91 @@ class ProcessOrchestrator(FakeOrchestrator):
         self.resolutions.append((task_id, caller, action, reason))
         return self.answer
 
+    # Proposals and reports as golem_runs keeps them, each shown to its owner and to the
+    # reviewers of its agent (ADR 0015); the SQL itself is test_proposal_decisions.py's.
+    details: dict[str, ProposalDetail] = field(default_factory=dict)
+    reports: dict[str, Report] = field(default_factory=dict)
+
+    def _visible(self, access: Access, summary: ProposalSummary | Report) -> bool:
+        owner = summary.owner if isinstance(summary, ProposalSummary) else None
+        return owner == access.principal or summary.agent in access.reviews
+
+    async def list_proposals(
+        self,
+        access: Access,
+        agent: str | None,
+        states: tuple[str, ...] | None,
+        process: str | None,
+        page: str | None,
+    ) -> ProposalPage:
+        items = tuple(
+            found.summary
+            for found in self.details.values()
+            if self._visible(access, found.summary)
+            and agent in (None, found.summary.agent)
+            and (states is None or found.summary.state in states)
+        )
+        return ProposalPage(items, None)
+
+    async def read_proposal(self, access: Access, proposal_id: str) -> ProposalDetail | None:
+        found = self.details.get(proposal_id)
+        return found if found is not None and self._visible(access, found.summary) else None
+
+    async def decide_proposal(
+        self, access: Access, proposal_id: str, decision: str, reason: str | None
+    ) -> ProposalDetail | str:
+        found = await self.read_proposal(access, proposal_id)
+        if found is None:
+            return NOT_FOUND
+        if found.summary.kind == "merge_request":
+            return DECIDED_IN_GITLAB
+        if found.summary.state not in ("pending", "failed"):
+            return ALREADY_DECIDED
+        if decision == "reject" and found.stage and not reason:
+            return REASON_REQUIRED
+        state = "accepted" if decision == "accept" else "rejected"
+        decided = replace(
+            found,
+            summary=replace(found.summary, state=state, decided_by=access.principal),
+            reason=reason,
+        )
+        self.details[proposal_id] = decided
+        return decided
+
+    async def record_apply(
+        self, proposal_id: str, state: str, detail: str | None, from_states: tuple[str, ...]
+    ) -> bool:
+        found = self.details[proposal_id]
+        if found.summary.state not in from_states:
+            return False
+        self.details[proposal_id] = replace(
+            found, summary=replace(found.summary, state=state), detail=detail
+        )
+        return True
+
+    async def list_reports(self, access: Access, agent: str | None, page: str | None) -> ReportPage:
+        items = tuple(
+            ReportSummary(r.task_id, r.agent, r.target, r.completed_at, r.text.splitlines()[0])
+            for r in self.reports.values()
+            if r.agent in access.reviews and agent in (None, r.agent)
+        )
+        return ReportPage(items, None)
+
+    async def read_report(self, access: Access, task_id: str) -> Report | None:
+        found = self.reports.get(task_id)
+        return found if found is not None and found.agent in access.reviews else None
+
 
 @pytest.fixture
-async def stack(audit_dsn: str, audit_admin_dsn: str, ui_db: str, engine: AsyncEngine) -> Stack:
-    return build_stack(audit_dsn, ui_db, ProcessOrchestrator(), engine)
+def applier() -> FakeApplier:
+    return FakeApplier()
+
+
+@pytest.fixture
+async def stack(
+    audit_dsn: str, audit_admin_dsn: str, ui_db: str, engine: AsyncEngine, applier: FakeApplier
+) -> Stack:
+    return build_stack(audit_dsn, ui_db, ProcessOrchestrator(), engine, applier=applier)
 
 
 @pytest.fixture
@@ -654,7 +757,7 @@ async def test_a_session_ends_after_its_absolute_lifetime(
 
 
 async def test_a_token_the_edge_refuses_ends_the_session(audit_dsn: str, ui_db: str) -> None:
-    stack = build_stack(audit_dsn, ui_db, FakeOrchestrator())
+    stack = build_stack(audit_dsn, ui_db, ProcessOrchestrator())
     refusing = create_ui_app(
         oidc=OidcClient(
             http=httpx.AsyncClient(transport=httpx.MockTransport(stack.idp.handle)),
@@ -690,7 +793,7 @@ async def test_an_unreachable_edge_is_a_bad_gateway(audit_dsn: str, ui_db: str) 
     def unreachable(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=request)
 
-    stack = build_stack(audit_dsn, ui_db, FakeOrchestrator())
+    stack = build_stack(audit_dsn, ui_db, ProcessOrchestrator())
     stack.app = create_ui_app(
         oidc=OidcClient(
             http=httpx.AsyncClient(transport=httpx.MockTransport(stack.idp.handle)),
@@ -1125,7 +1228,7 @@ async def test_a_snapshot_shows_my_tasks_of_one_agent(stack: Stack) -> None:
         (mine, "alice's goal", "in_progress")
     ]
     assert [t["goal"] for t in bobs["tasks"]] == ["r"]
-    assert "proposals" not in alices
+    assert alices["proposals"] == []
 
 
 async def test_a_completed_task_with_an_open_proposal_waits_for_review(
@@ -1200,7 +1303,7 @@ async def test_a_delta_brings_what_changed_since_the_cursor(
 async def test_a_delta_that_fills_its_page_is_answered_as_a_snapshot(
     audit_dsn: str, audit_admin_dsn: str, ui_db: str, engine: AsyncEngine
 ) -> None:
-    stack = build_stack(audit_dsn, ui_db, FakeOrchestrator(), engine, board_size=2)
+    stack = build_stack(audit_dsn, ui_db, ProcessOrchestrator(), engine, board_size=2)
     async with stack.browser() as browser:
         await login(stack, browser)
         await started_id(browser, "one")
@@ -1239,7 +1342,7 @@ async def test_a_malformed_cursor_is_refused(
 async def test_the_archive_follows_the_next_page_token(
     audit_dsn: str, audit_admin_dsn: str, ui_db: str, engine: AsyncEngine
 ) -> None:
-    stack = build_stack(audit_dsn, ui_db, FakeOrchestrator(), engine, page_size=2)
+    stack = build_stack(audit_dsn, ui_db, ProcessOrchestrator(), engine, page_size=2)
     async with stack.browser() as browser:
         await login(stack, browser)
         for goal in ("goal one", "goal two", "goal three"):
@@ -1461,6 +1564,278 @@ async def test_resolving_needs_the_csrf_token(stack: Stack, browser: httpx.Async
     assert stack.orchestrator.resolutions == []
 
 
+# Proposals and reports (ADR 0015, ADR 0018): bob's runs propose, alice reviews discovery.
+
+PAGE_EDIT = {"page_id": "123", "title": "Home", "version": 7, "body": "<p>New</p>"}
+REPLY = {"request": "SD-12", "public": True, "text": "The export works again."}
+PROPOSAL_ID = "0c6f0d4e-6c43-4a8e-9a55-0f6c7b0f4a11"
+
+
+def proposed(
+    stack: Stack,
+    kind: str = "wiki_edit",
+    payload: dict[str, Any] | None = None,
+    *,
+    proposal_id: str = PROPOSAL_ID,
+    owner: str = "user:bob",
+    agent: str = "discovery",
+    state: str = "pending",
+    stage: bool = False,
+    url: str | None = None,
+) -> str:
+    stack.orchestrator.details[proposal_id] = ProposalDetail(
+        summary=ProposalSummary(
+            id=proposal_id,
+            task_id="task-of-bob",
+            agent=agent,
+            kind=kind,
+            state=state,
+            summary="Edit page Home" if kind == "wiki_edit" else f"a {kind}",
+            url=url,
+            owner=owner,
+            created_at="2026-09-29T10:00:00+00:00",
+            decided_by=None,
+            decided_at=None,
+        ),
+        payload=PAGE_EDIT if payload is None else payload,
+        digest=None,
+        target="docs-home",
+        reason=None,
+        detail=None,
+        report="The page was out of date.",
+        stage=stage,
+    )
+    return proposal_id
+
+
+async def decide(browser: httpx.AsyncClient, proposal_id: str, body: Any, **options: Any) -> Any:
+    return await post(browser, f"/api/proposals/{proposal_id}/decision", body, **options)
+
+
+async def test_the_board_carries_the_open_proposals_i_review(
+    stack: Stack, browser: httpx.AsyncClient
+) -> None:
+    await login(stack, browser)
+    proposed(stack)
+    proposed(stack, proposal_id=str(uuid.uuid4()), state="applied")
+    proposed(stack, proposal_id=str(uuid.uuid4()), agent="reviewer")
+
+    shown = await board(browser)
+
+    assert [(p["id"], p["column"], p["owner"]) for p in shown["proposals"]] == [
+        (PROPOSAL_ID, "review", "user:bob")
+    ]
+    assert stack.edge.calls[-1] == "/proposals?agent=discovery&state=pending%2Caccepted%2Cfailed"
+
+
+async def test_a_page_edit_is_shown_as_a_diff_against_the_live_page(
+    stack: Stack, browser: httpx.AsyncClient, applier: FakeApplier
+) -> None:
+    await login(stack, browser)
+    proposed(stack)
+
+    response = await browser.get(f"/api/proposals/{PROPOSAL_ID}")
+
+    assert response.status_code == 200, response.text
+    shown = response.json()
+    assert shown["diff"] == [
+        {"op": "delete", "lines": ["<p>Old</p>"]},
+        {"op": "insert", "lines": ["<p>New</p>"]},
+    ]
+    assert (shown["report"], shown["live"]) == (
+        "The page was out of date.",
+        {"title": "Home", "version": 7},
+    )
+    assert applier.previews == [(PROPOSAL_ID, "user:alice")]
+
+
+async def test_accepting_goes_through_the_edge_and_answers_what_came_of_it(
+    stack: Stack, browser: httpx.AsyncClient, applier: FakeApplier
+) -> None:
+    await login(stack, browser)
+    proposed(stack, "desk_reply", REPLY)
+
+    response = await decide(browser, PROPOSAL_ID, {"decision": "accept"})
+
+    assert response.status_code == 200, response.text
+    assert (response.json()["state"], response.json()["payload"]) == ("applied", REPLY)
+    assert [d.summary.id for d in applier.applied] == [PROPOSAL_ID]
+    assert stack.edge.calls[-1] == f"/proposals/{PROPOSAL_ID}/decision"
+
+
+async def test_a_failed_apply_comes_back_with_its_detail(
+    stack: Stack, browser: httpx.AsyncClient, applier: FakeApplier
+) -> None:
+    applier.result = Applied("failed", "Jira answered 400: project OPS is archived")
+    await login(stack, browser)
+    proposed(stack, "desk_reply", REPLY)
+
+    shown = (await decide(browser, PROPOSAL_ID, {"decision": "accept"})).json()
+
+    assert (shown["state"], shown["detail"], shown["column"]) == (
+        "failed",
+        "Jira answered 400: project OPS is archived",
+        "review",
+    )
+
+
+async def test_rejecting_passes_the_reason_on(stack: Stack, browser: httpx.AsyncClient) -> None:
+    await login(stack, browser)
+    proposed(stack, "desk_reply", REPLY)
+
+    response = await decide(browser, PROPOSAL_ID, {"decision": "reject", "reason": "Too curt."})
+
+    assert response.status_code == 200, response.text
+    assert (response.json()["state"], response.json()["reason"]) == ("rejected", "Too curt.")
+
+
+@pytest.mark.parametrize(
+    ("setup", "body", "status", "error"),
+    [
+        ({"stage": True}, {"decision": "reject"}, 400, "reason_required"),
+        ({"state": "applied"}, {"decision": "accept"}, 409, "already_decided"),
+        (
+            {"kind": "merge_request", "url": MR_URL},
+            {"decision": "accept"},
+            409,
+            "decided_in_gitlab",
+        ),
+        ({"owner": "user:carol", "agent": "reviewer"}, {"decision": "accept"}, 404, "not_found"),
+    ],
+)
+async def test_a_decision_the_proposal_does_not_take_is_refused_with_its_reason(
+    stack: Stack,
+    browser: httpx.AsyncClient,
+    setup: dict[str, Any],
+    body: dict[str, Any],
+    status: int,
+    error: str,
+) -> None:
+    await login(stack, browser)
+    proposed(stack, **setup)
+
+    response = await decide(browser, PROPOSAL_ID, body)
+
+    assert (response.status_code, response.json()["error"]) == (status, error)
+    assert response.json()["message"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"decision": "approve"},
+        {"decision": "reject", "reason": 7},
+        {"decision": "reject", "reason": "x" * 4001},
+    ],
+)
+async def test_a_malformed_decision_costs_no_edge_call(
+    stack: Stack, browser: httpx.AsyncClient, body: dict[str, Any]
+) -> None:
+    await login(stack, browser)
+    proposed(stack)
+    before = len(stack.edge.calls)
+
+    response = await decide(browser, PROPOSAL_ID, body)
+
+    assert (response.status_code, response.json()["error"]) == (400, "malformed")
+    assert len(stack.edge.calls) == before
+
+
+@pytest.mark.parametrize("path", ["/api/proposals/not-a-uuid", "/api/reports/..%2Fx"])
+async def test_a_malformed_id_is_not_found_without_an_edge_call(
+    stack: Stack, browser: httpx.AsyncClient, path: str
+) -> None:
+    await login(stack, browser)
+    before = len(stack.edge.calls)
+
+    response = await browser.get(path)
+
+    assert response.status_code == 404
+    assert len(stack.edge.calls) == before
+
+
+async def test_deciding_needs_the_csrf_token(stack: Stack, browser: httpx.AsyncClient) -> None:
+    await login(stack, browser)
+    proposed(stack)
+
+    response = await decide(browser, PROPOSAL_ID, {"decision": "accept"}, csrf=None)
+
+    assert response.status_code == 403
+    assert stack.orchestrator.details[PROPOSAL_ID].summary.state == "pending"
+
+
+async def test_a_proposal_of_an_agent_i_do_not_review_is_not_found(stack: Stack) -> None:
+    proposed(stack)
+    async with stack.browser() as carol:
+        await login(stack, carol, "carol")
+
+        response = await carol.get(f"/api/proposals/{PROPOSAL_ID}")
+
+    assert response.status_code == 404
+
+
+async def test_review_counts_are_the_proposals_waiting_for_me_per_agent(
+    stack: Stack, browser: httpx.AsyncClient
+) -> None:
+    await login(stack, browser)
+    proposed(stack)
+    proposed(stack, proposal_id=str(uuid.uuid4()), state="failed")
+    proposed(stack, proposal_id=str(uuid.uuid4()), state="accepted")
+
+    response = await browser.get("/api/review-counts")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"agents": {"discovery": 2}, "more": False}
+
+
+async def test_the_review_queue_lists_every_open_proposal_i_may_decide(
+    stack: Stack, browser: httpx.AsyncClient
+) -> None:
+    await login(stack, browser)
+    proposed(stack)
+    proposed(stack, proposal_id=str(uuid.uuid4()), state="rejected")
+
+    response = await browser.get("/api/proposals")
+
+    assert response.status_code == 200, response.text
+    assert [p["id"] for p in response.json()["proposals"]] == [PROPOSAL_ID]
+    assert response.json()["next"] is None
+
+
+async def test_reports_of_the_agent_i_review_are_listed_and_read(
+    stack: Stack, browser: httpx.AsyncClient
+) -> None:
+    await login(stack, browser)
+    stack.orchestrator.reports["task-9"] = Report(
+        task_id="task-9",
+        agent="discovery",
+        target="alert-3f2a",
+        completed_at="2026-09-29T09:00:00+00:00",
+        text="Disk grows 4% a day.\nSince the 20th.",
+    )
+
+    listed = await browser.get("/api/agents/discovery/reports")
+    read = await browser.get("/api/reports/task-9")
+
+    assert listed.status_code == 200, listed.text
+    assert [(r["taskId"], r["summary"]) for r in listed.json()["reports"]] == [
+        ("task-9", "Disk grows 4% a day.")
+    ]
+    assert read.json()["text"] == "Disk grows 4% a day.\nSince the 20th."
+
+
+async def test_a_report_i_may_not_read_is_not_found(stack: Stack) -> None:
+    stack.orchestrator.reports["task-9"] = Report(
+        "task-9", "discovery", None, "2026-09-29T09:00:00+00:00", "x"
+    )
+    async with stack.browser() as carol:
+        await login(stack, carol, "carol")
+
+        response = await carol.get("/api/reports/task-9")
+
+    assert response.status_code == 404
+
+
 # --- Settings ------------------------------------------------------------------------------------
 
 UI_ENV = {
@@ -1553,7 +1928,7 @@ async def test_login_is_limited_per_client_address(
     audit_dsn: str, audit_admin_dsn: str, ui_db: str
 ) -> None:
     logins = Limiter(Rate(per_minute=60, burst=2), clock=Clock())
-    stack = build_stack(audit_dsn, ui_db, FakeOrchestrator(), logins=logins)
+    stack = build_stack(audit_dsn, ui_db, ProcessOrchestrator(), logins=logins)
 
     async with behind(stack, "203.0.113.5") as flood, behind(stack, "203.0.113.6") as other:
         started = [await flood.get("/login") for _ in range(2)]
@@ -1577,7 +1952,7 @@ async def test_behind_a_trusted_proxy_login_is_limited_per_forwarded_client(
     stack = build_stack(
         audit_dsn,
         ui_db,
-        FakeOrchestrator(),
+        ProcessOrchestrator(),
         logins=logins,
         trusted_proxies=parse_networks("10.0.0.0/8"),
     )
@@ -1594,7 +1969,7 @@ async def test_starting_and_replying_share_a_limit_per_session(
     audit_dsn: str, audit_admin_dsn: str, ui_db: str, engine: AsyncEngine
 ) -> None:
     starts = Limiter(Rate(per_minute=60, burst=2), clock=Clock())
-    stack = build_stack(audit_dsn, ui_db, FakeOrchestrator(), engine, starts=starts)
+    stack = build_stack(audit_dsn, ui_db, ProcessOrchestrator(), engine, starts=starts)
 
     async with stack.browser() as alice, stack.browser() as bob:
         await login(stack, alice, "alice")
@@ -1619,7 +1994,7 @@ async def test_a_limit_at_the_edge_is_passed_on_with_its_retry_after(
     audit_dsn: str, audit_admin_dsn: str, ui_db: str, engine: AsyncEngine
 ) -> None:
     callers = Limiter(Rate(per_minute=60, burst=1), clock=Clock())
-    stack = build_stack(audit_dsn, ui_db, FakeOrchestrator(), engine, edge_callers=callers)
+    stack = build_stack(audit_dsn, ui_db, ProcessOrchestrator(), engine, edge_callers=callers)
 
     async with stack.browser() as browser:
         await login(stack, browser)
@@ -1644,7 +2019,7 @@ async def test_ui_requests_are_counted_by_route_template_and_refusals_by_kind(
     stack = build_stack(
         audit_dsn,
         ui_db,
-        FakeOrchestrator(),
+        ProcessOrchestrator(),
         engine,
         logins=logins,
         starts=starts,

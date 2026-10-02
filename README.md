@@ -318,7 +318,9 @@ launcher, and a fake identity provider that signs in `alice` without a password,
 front that routes like the ingress; it seeds a task in every state. Open
 `http://localhost:8090` (`--port` to change it). With `--processes` it pins a process instead,
 as a deployment that pins one: people see only the process, whose stages wait for review and
-for a reason. `uv run python scripts/ui_screenshots.py` runs
+for a reason. With `--proposals`, `alice` reviews three goal agents' proposals (a page edit, a
+service desk reply, a tracker issue) that accepting applies through real write servers to faked
+Confluence, Jira Service Management and Jira, and reads a report. `uv run python scripts/ui_screenshots.py` runs
 the same stack with ids and timestamps frozen and writes the screenshots below to
 `docs/images/ui/` (headless Chromium, 1280x800, the board also 390x844). To work on the board
 itself, `npm run dev` in `board/` serves it with Vite and proxies the API to a local UI

@@ -1,0 +1,339 @@
+# The write servers (ADR 0015): they apply what a person accepted in Golem, called by the task
+# service alone with a proposal token per call. Separate from the read servers, with their own
+# upstream accounts, and narrowed again to the spaces or projects they may write to.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-wiki-write-env
+  namespace: golem-system
+data:
+  GOLEM_MCP_GROUP: wiki.write
+  # Atlassian Cloud: https://<site>.atlassian.net/wiki, the base of both its v1 and v2 APIs.
+  GOLEM_MCP_UPSTREAM_URL: https://confluence.example.com
+  # Empty: Data Center, the upstream token is a personal access token (Bearer). Atlassian
+  # Cloud: the account's email, and the token is its API token (Basic).
+  GOLEM_MCP_UPSTREAM_USER: ""
+  GOLEM_MCP_CONFLUENCE_DEPLOYMENT: data-center
+  GOLEM_MCP_WIKI_SPACES: DOCS
+  # The audience of the proposal tokens this server accepts: its own canonical URI, the URL
+  # the task service calls (GOLEM_WRITE_SERVERS_FILE).
+  GOLEM_MCP_RESOURCE: http://mcp-wiki-write.golem-system.svc:8000/mcp
+  # The task service's internal-read port: run keys and proposal state only.
+  GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-wiki-write
+  namespace: golem-system
+  labels:
+    app.kubernetes.io/name: golem-mcp-write
+    app.kubernetes.io/instance: wiki-write
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: golem-mcp-write
+      app.kubernetes.io/instance: wiki-write
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-mcp-write
+        app.kubernetes.io/instance: wiki-write
+        app.kubernetes.io/part-of: golem
+    spec:
+      serviceAccountName: golem-mcp
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp
+          image: golem
+          command: ["python", "-m", "golem.mcp"]
+          ports:
+            - name: http
+              containerPort: 8000
+            # Scraped from the monitoring namespace only (ADR 0013).
+            - name: metrics
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: golem-mcp-wiki-write-env
+            - secretRef:
+                name: golem-mcp-wiki-write
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # TCP: /mcp answers only to a proposal token, and there is no health route.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-wiki-write
+  namespace: golem-system
+spec:
+  selector:
+    app.kubernetes.io/name: golem-mcp-write
+    app.kubernetes.io/instance: wiki-write
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-desk-write-env
+  namespace: golem-system
+data:
+  GOLEM_MCP_GROUP: desk.write
+  # Jira Service Management answers on the Jira site.
+  GOLEM_MCP_UPSTREAM_URL: https://jira.example.com
+  # Empty: Data Center, the upstream token is a personal access token (Bearer). Atlassian
+  # Cloud: the account's email, and the token is its API token (Basic).
+  GOLEM_MCP_UPSTREAM_USER: ""
+  GOLEM_MCP_DESK_PROJECTS: SD
+  # The audience of the proposal tokens this server accepts: its own canonical URI, the URL
+  # the task service calls (GOLEM_WRITE_SERVERS_FILE).
+  GOLEM_MCP_RESOURCE: http://mcp-desk-write.golem-system.svc:8000/mcp
+  # The task service's internal-read port: run keys and proposal state only.
+  GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-desk-write
+  namespace: golem-system
+  labels:
+    app.kubernetes.io/name: golem-mcp-write
+    app.kubernetes.io/instance: desk-write
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: golem-mcp-write
+      app.kubernetes.io/instance: desk-write
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-mcp-write
+        app.kubernetes.io/instance: desk-write
+        app.kubernetes.io/part-of: golem
+    spec:
+      serviceAccountName: golem-mcp
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp
+          image: golem
+          command: ["python", "-m", "golem.mcp"]
+          ports:
+            - name: http
+              containerPort: 8000
+            # Scraped from the monitoring namespace only (ADR 0013).
+            - name: metrics
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: golem-mcp-desk-write-env
+            - secretRef:
+                name: golem-mcp-desk-write
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # TCP: /mcp answers only to a proposal token, and there is no health route.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-desk-write
+  namespace: golem-system
+spec:
+  selector:
+    app.kubernetes.io/name: golem-mcp-write
+    app.kubernetes.io/instance: desk-write
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: golem-mcp-tracker-write-env
+  namespace: golem-system
+data:
+  GOLEM_MCP_GROUP: tracker.write
+  GOLEM_MCP_UPSTREAM_URL: https://jira.example.com
+  # Empty: Data Center, the upstream token is a personal access token (Bearer). Atlassian
+  # Cloud: the account's email, and the token is its API token (Basic).
+  GOLEM_MCP_UPSTREAM_USER: ""
+  GOLEM_MCP_JIRA_DEPLOYMENT: data-center
+  GOLEM_MCP_TRACKER_PROJECTS: OPS
+  # The audience of the proposal tokens this server accepts: its own canonical URI, the URL
+  # the task service calls (GOLEM_WRITE_SERVERS_FILE).
+  GOLEM_MCP_RESOURCE: http://mcp-tracker-write.golem-system.svc:8000/mcp
+  # The task service's internal-read port: run keys and proposal state only.
+  GOLEM_TASK_SERVICE_URL: http://tasks.golem-system.svc:8001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-tracker-write
+  namespace: golem-system
+  labels:
+    app.kubernetes.io/name: golem-mcp-write
+    app.kubernetes.io/instance: tracker-write
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: golem-mcp-write
+      app.kubernetes.io/instance: tracker-write
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: golem-mcp-write
+        app.kubernetes.io/instance: tracker-write
+        app.kubernetes.io/part-of: golem
+    spec:
+      serviceAccountName: golem-mcp
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp
+          image: golem
+          command: ["python", "-m", "golem.mcp"]
+          ports:
+            - name: http
+              containerPort: 8000
+            # Scraped from the monitoring namespace only (ADR 0013).
+            - name: metrics
+              containerPort: 9090
+          envFrom:
+            - configMapRef:
+                name: golem-mcp-tracker-write-env
+            - secretRef:
+                name: golem-mcp-tracker-write
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # TCP: /mcp answers only to a proposal token, and there is no health route.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-tracker-write
+  namespace: golem-system
+spec:
+  selector:
+    app.kubernetes.io/name: golem-mcp-write
+    app.kubernetes.io/instance: tracker-write
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+    - name: metrics
+      port: 9090
+      targetPort: metrics

@@ -106,12 +106,13 @@ def watched(browser: Browser, demo: Demo, **options: object) -> Watched:
     return result
 
 
-def sign_in(page: Page, demo: Demo, board: str = BOARD) -> None:
+def sign_in(page: Page, demo: Demo, board: str = BOARD, agents: int = 1) -> None:
     page.goto("/")
     page.get_by_role("link", name="Sign in").click()
     # One entry to choose from: the agent, or with a process pinned only the process.
     page.wait_for_url(f"{demo.ui_url}/")
-    expect(page.get_by_role("navigation", name="Agents").locator(".rail-link")).to_have_count(1)
+    rail = page.get_by_role("navigation", name="Agents")
+    expect(rail.locator(".rail-list .rail-link")).to_have_count(agents)
     page.goto(board)
     expect(page.get_by_role("heading", name=board.rsplit("/", 1)[-1], level=1)).to_be_visible()
 

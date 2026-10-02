@@ -43,8 +43,10 @@ from golem.metrics import Instrumented, Metrics
 from golem.resolution import ACTIONS as RESOLUTION_ACTIONS
 from golem.resolution import MAX_REASON_CHARS, RERUN
 from golem.run_token import SigningKey, public_jwks
+from golem.tasks.apply import NoWriteServers
 from golem.tasks.executor import ANONYMOUS, PROPOSAL_METADATA, RUN_OUTCOME, RunExecutor
-from golem.tasks.ports import NOT_FOUND, NOT_WAITING, Orchestrator
+from golem.tasks.ports import NOT_FOUND, NOT_WAITING, Applier, Orchestrator
+from golem.tasks.proposals import apply_accepted, proposal_routes
 
 RPC_PATH = "/a2a"
 # Each listener serves one kind of caller (ADR 0009): NetworkPolicy admits a caller to a port,
@@ -64,6 +66,9 @@ RUN_KEYS_PATH = "/internal/run-keys"
 # Platform MCP servers ask whether a run is still running before serving its token: a canceled
 # run's token is refused before it expires.
 RUN_STATUS_PATH = "/internal/runs/{run_id}"
+# Write servers ask whether a proposal still allows the call its token was issued for: the
+# revocation of a proposal token, as run status is of a run token (ADR 0015).
+PROPOSAL_GATE_PATH = "/internal/proposals/{proposal_id}"
 TERMINAL_STATES = {
     TaskState.TASK_STATE_COMPLETED,
     TaskState.TASK_STATE_FAILED,
@@ -177,9 +182,10 @@ def public_app(
     edge_token: str,
     metrics: Metrics,
     orchestrator: Orchestrator | None = None,
+    applier: Applier | None = None,
 ) -> ASGIApp:
-    """The edge's port: the agent card, A2A, and a process owner's resolution, nothing
-    internal."""
+    """The edge's port: the agent card, A2A, a process owner's resolution, and the proposals
+    and reports a person owns or reviews; nothing internal."""
 
     @asynccontextmanager
     async def lifespan(_: Starlette) -> AsyncIterator[None]:
@@ -214,10 +220,19 @@ def public_app(
             return JSONResponse({"error": "not_waiting"}, status_code=409)
         return JSONResponse({"task_id": task_id, "action": action})
 
+    async def show(proposal_id: str) -> None:
+        if orchestrator is not None:
+            await show_proposal(handler, orchestrator, proposal_id)
+
+    decisions = (
+        proposal_routes(orchestrator, applier or NoWriteServers(), show, metrics)
+        if orchestrator is not None
+        else []
+    )
     app = Starlette(
         routes=create_agent_card_routes(card)
         + create_jsonrpc_routes(handler, RPC_PATH, EdgeContextBuilder())
-        + [Route(RESOLUTION_PATH, resolution, methods=["POST"])],
+        + [Route(RESOLUTION_PATH, resolution, methods=["POST"]), *decisions],
         lifespan=lifespan,
     )
     return Instrumented(
@@ -228,7 +243,8 @@ def public_app(
 def internal_read_app(
     orchestrator: Orchestrator, run_keys: tuple[SigningKey, ...], metrics: Metrics
 ) -> ASGIApp:
-    """The MCP servers' port: run keys and run status, nothing that changes state."""
+    """The MCP servers' port: run keys, run status and proposal state, nothing that changes
+    state."""
     jwks = public_jwks(run_keys)
 
     async def run_signing_keys(_: Request) -> Response:
@@ -241,10 +257,19 @@ def internal_read_app(
             return JSONResponse({"error": "run not found"}, status_code=404)
         return JSONResponse({"run_id": run_id, "status": status})
 
+    async def proposal_gate(request: Request) -> Response:
+        found = await orchestrator.proposal_gate(request.path_params["proposal_id"])
+        if found is None:
+            return JSONResponse({"error": "proposal not found"}, status_code=404)
+        return JSONResponse(
+            {"id": found.id, "state": found.state, "digest": found.digest, "kind": found.kind}
+        )
+
     app = Starlette(
         routes=[
             Route(RUN_KEYS_PATH, run_signing_keys, methods=["GET"]),
             Route(RUN_STATUS_PATH, run_status, methods=["GET"]),
+            Route(PROPOSAL_GATE_PATH, proposal_gate, methods=["GET"]),
         ]
     )
     return Instrumented(app, routes=app.routes, metrics=metrics)
@@ -269,11 +294,30 @@ async def named_in_body(request: Request, key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+async def show_proposal(
+    handler: DefaultRequestHandler, orchestrator: Orchestrator, proposal_id: str
+) -> bool:
+    """Show a proposal's state, as golem_runs holds it, on its run's tasks; False if unknown."""
+    record = await orchestrator.proposal(proposal_id)
+    if record is None:
+        return False
+    context = ServerCallContext(user=user_of(record.caller), tenant=record.agent)
+    for task_id in record.task_ids:
+        task = await handler.task_store.get(task_id, context)
+        if task is None:
+            continue
+        await _show(handler.task_store, task, {PROPOSAL_METADATA: asdict(record.view)}, context)
+    return True
+
+
 def internal_write_app(
-    handler: DefaultRequestHandler, orchestrator: Orchestrator, metrics: Metrics
+    handler: DefaultRequestHandler,
+    orchestrator: Orchestrator,
+    metrics: Metrics,
+    applier: Applier | None = None,
 ) -> ASGIApp:
     """The reconciler's port: notifications that a task's run has a final outcome, and that a
-    run's proposal changed state.
+    run's proposal changed state or waits for its apply again.
 
     The body only names the task. Its outcome, and the caller and agent that address it in the
     task store, are read from golem_runs, the system of record, so whoever can reach this port
@@ -330,15 +374,14 @@ def internal_write_app(
         proposal_id = await named_in_body(request, "proposal_id")
         if proposal_id is None:
             return JSONResponse({"error": "proposal_id is required"}, status_code=422)
-        record = await orchestrator.proposal(proposal_id)
-        if record is None:
+        # An accepted proposal the reconciler names is either just decided, its apply running
+        # under the decision's lease, or one whose apply went unanswered and whose lease ran
+        # out: only then is it applied again, idempotently per proposal (ADR 0015).
+        accepted = await orchestrator.claim_apply(proposal_id)
+        if accepted is not None:
+            await apply_accepted(orchestrator, applier or NoWriteServers(), accepted, metrics)
+        if not await show_proposal(handler, orchestrator, proposal_id):
             return JSONResponse({"error": "proposal not found"}, status_code=404)
-        context = ServerCallContext(user=user_of(record.caller), tenant=record.agent)
-        for task_id in record.task_ids:
-            task = await handler.task_store.get(task_id, context)
-            if task is None:
-                continue
-            await _show(handler.task_store, task, {PROPOSAL_METADATA: asdict(record.view)}, context)
         return JSONResponse({"proposal_id": proposal_id})
 
     async def process_state(request: Request) -> Response:
@@ -401,13 +444,14 @@ def create_listeners(
     push: PushDelivery | None = None,
     run_keys: tuple[SigningKey, ...] = (),
     metrics: Metrics | None = None,
+    applier: Applier | None = None,
 ) -> Listeners:
     """One request handler behind three listeners; the public one owns its lifespan. All
     three record into one ``metrics``: one process, told apart by route."""
     handler = request_handler(card, orchestrator, task_store, push)
     metrics = Metrics("tasks") if metrics is None else metrics
     return Listeners(
-        public=public_app(card, handler, edge_token, metrics, orchestrator),
+        public=public_app(card, handler, edge_token, metrics, orchestrator, applier),
         internal_read=internal_read_app(orchestrator, run_keys, metrics),
-        internal_write=internal_write_app(handler, orchestrator, metrics),
+        internal_write=internal_write_app(handler, orchestrator, metrics, applier),
     )

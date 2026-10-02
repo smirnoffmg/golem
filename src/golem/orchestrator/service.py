@@ -12,6 +12,7 @@ from golem import call_token
 from golem.call_token import CallClaims
 from golem.catalog import ProcessCatalog, render_goal
 from golem.metrics import Metrics
+from golem.orchestrator import proposals
 from golem.orchestrator.admission import Limits, Rejected
 from golem.orchestrator.jobs import CatalogRef, JobLauncher, JobSpec
 from golem.orchestrator.process_runs import process_record, resolve_process
@@ -28,11 +29,18 @@ from golem.orchestrator.runs import (
     start_process,
     start_run,
 )
+from golem.proposal_payload import MERGE_REQUEST
 from golem.run_token import RunClaims, SigningKey, issue
 from golem.tasks.ports import (
+    Access,
     ProcessRecord,
+    ProposalDetail,
+    ProposalGate,
+    ProposalPage,
     ProposalRecord,
     Refused,
+    Report,
+    ReportPage,
     RunOutcome,
     RunStart,
     Started,
@@ -141,6 +149,8 @@ class PostgresOrchestrator:
     metrics: Metrics = field(default_factory=lambda: Metrics("tasks"))
     # The pinned processes (ADR 0019): a task for one of them is a process, not a run.
     processes: Mapping[str, ProcessCatalog] = field(default_factory=dict)
+    # What each pinned agent proposes (ADR 0015); an agent missing here proposes a merge request.
+    proposal_kinds: Mapping[str, str] = field(default_factory=dict)
 
     async def start(self, run: RunStart) -> Started | Refused:
         process = self.processes.get(run.agent)
@@ -160,6 +170,7 @@ class PostgresOrchestrator:
             estimated_cost=self.estimated_cost,
             # A delegated run shares its chain's concurrency and budget (ADR 0004, ADR 0014).
             root_run_id=run.root_run_id or None,
+            proposal_kind=self.proposal_kinds.get(run.agent, MERGE_REQUEST),
         )
         async with await AsyncConnection.connect(
             self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
@@ -254,6 +265,7 @@ class PostgresOrchestrator:
                 proposal=run.proposal,
                 report=run.report,
                 canceled=run.withdrawn,
+                proposal_payload=run.proposal_payload,
             )
         return TaskRun(run.run_id, run.caller, run.agent, outcome)
 
@@ -276,6 +288,58 @@ class PostgresOrchestrator:
             self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
         ) as conn:
             return await resolve_process(conn, task_id, caller, action, reason)
+
+    async def list_proposals(
+        self,
+        access: Access,
+        agent: str | None,
+        states: tuple[str, ...] | None,
+        process: str | None,
+        page: str | None,
+    ) -> ProposalPage:
+        async with await self._connect() as conn:
+            return await proposals.list_proposals(
+                conn, access, agent=agent, states=states, process=process, page=page
+            )
+
+    async def read_proposal(self, access: Access, proposal_id: str) -> ProposalDetail | None:
+        async with await self._connect() as conn:
+            return await proposals.read_proposal(conn, access, proposal_id)
+
+    async def decide_proposal(
+        self, access: Access, proposal_id: str, decision: str, reason: str | None
+    ) -> ProposalDetail | str:
+        async with await self._connect() as conn:
+            return await proposals.decide_proposal(conn, access, proposal_id, decision, reason)
+
+    async def claim_apply(self, proposal_id: str) -> ProposalDetail | None:
+        async with await self._connect() as conn:
+            return await proposals.claim_apply(conn, proposal_id)
+
+    async def proposal_gate(self, proposal_id: str) -> ProposalGate | None:
+        async with await self._connect() as conn:
+            return await proposals.proposal_gate(conn, proposal_id)
+
+    async def record_apply(
+        self, proposal_id: str, state: str, detail: str | None, from_states: tuple[str, ...]
+    ) -> bool:
+        async with await self._connect() as conn:
+            return await proposals.record_apply(
+                conn, proposal_id, state, detail, from_states=from_states
+            )
+
+    async def list_reports(self, access: Access, agent: str | None, page: str | None) -> ReportPage:
+        async with await self._connect() as conn:
+            return await proposals.list_reports(conn, access, agent=agent, page=page)
+
+    async def read_report(self, access: Access, task_id: str) -> Report | None:
+        async with await self._connect() as conn:
+            return await proposals.read_report(conn, access, task_id)
+
+    async def _connect(self) -> AsyncConnection:
+        return await AsyncConnection.connect(
+            self.dsn, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS
+        )
 
     async def agents_of_tasks(self, task_ids: tuple[str, ...]) -> dict[str, str]:
         async with await AsyncConnection.connect(

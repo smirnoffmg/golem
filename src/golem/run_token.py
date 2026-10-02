@@ -129,6 +129,8 @@ def decode(
 
 
 def _claims(payload: dict[str, Any]) -> RunClaims | RunTokenError:
+    if "proposal" in payload:
+        return RunTokenError("a proposal token is not a run token")
     tools = payload.get("tools")
     fields = (payload.get("agent"), payload.get("caller"), payload.get("root"))
     if not all(isinstance(value, str) and value for value in fields):

@@ -25,9 +25,18 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from golem.edge.app import bearer_token
 from golem.edge.audit import source_ip_of
 from golem.mcp.audit import Operation, audit_entry, written
-from golem.mcp.auth import Refusal, grant_refusal, status_refusal
+from golem.mcp.auth import (
+    Refusal,
+    grant_refusal,
+    proposal_grant_refusal,
+    proposal_state_refusal,
+    status_refusal,
+)
 from golem.mcp.groups import Group
 from golem.metrics import Metrics
+from golem.proposal_payload import ProposalError, payload_digest
+from golem.proposal_status import ProposalStates
+from golem.proposal_token import ProposalClaims
 from golem.ratelimit import (
     AUTH_FAILURE_RATE,
     Decision,
@@ -45,6 +54,10 @@ AUDIT_UNAVAILABLE = Refusal(503, "temporarily_unavailable", "audit log unavailab
 TOO_LARGE = Refusal(413, "invalid_request", "request body too large")
 NOT_JSON_RPC = Refusal(400, "invalid_request", "the body is not one JSON-RPC message")
 RATE_LIMITED = Refusal(429, "rate_limited", "rate_limited")
+# Where the gate leaves the verified proposal token for the write tools: the decider they name.
+PROPOSAL_STATE_KEY = "golem_proposal"
+
+Claims = RunClaims | ProposalClaims
 
 
 def _auth_failure_limiter() -> Limiter:
@@ -59,12 +72,14 @@ def _metrics() -> Metrics:
 class Gate:
     group: Group
     target_system: str
-    verify: Callable[[str], RunClaims | RunTokenError]
-    statuses: RunStatuses
+    verify: Callable[[str], Claims | RunTokenError]
+    # A read server asks for run status, a write server for proposal state.
+    statuses: RunStatuses | None
     audit_dsn: str
     auth_failures: Limiter = field(default_factory=_auth_failure_limiter)
     trusted_proxies: tuple[Network, ...] = ()
     metrics: Metrics = field(default_factory=_metrics)
+    proposals: ProposalStates | None = None
 
 
 class _TooLarge:
@@ -108,19 +123,62 @@ def operation_refusal(operation: Operation, group: Group) -> Refusal | None:
 
 async def decide(
     gate: Gate, token: str | None, operation: Operation
-) -> tuple[RunClaims | None, Refusal | None]:
+) -> tuple[Claims | None, Refusal | None]:
     if token is None:
         return None, Refusal(401, "", "bearer token required")
     # Verification may refetch the signing keys over HTTP, synchronously.
     verified = await asyncio.to_thread(gate.verify, token)
     if isinstance(verified, RunTokenError):
         return None, Refusal(401, "invalid_token", verified.reason)
+    if isinstance(verified, ProposalClaims):
+        return verified, await proposal_refusal(gate, verified, operation)
+    if gate.group.writes or gate.statuses is None:
+        return None, Refusal(401, "invalid_token", "a write server accepts proposal tokens only")
     refusal = grant_refusal(verified, gate.group)
     if refusal is None:
         refusal = status_refusal(await gate.statuses.status_of(verified.run_id))
     if refusal is None:
         refusal = operation_refusal(operation, gate.group)
     return verified, refusal
+
+
+async def proposal_refusal(
+    gate: Gate, claims: ProposalClaims, operation: Operation
+) -> Refusal | None:
+    if not gate.group.writes or gate.proposals is None:
+        return Refusal(401, "invalid_token", "a read server accepts run tokens only")
+    refusal = proposal_grant_refusal(claims, gate.group)
+    if refusal is None:
+        found = await gate.proposals.state_of(claims.proposal_id, claims.scope)
+        refusal = proposal_state_refusal(found, claims)
+    if refusal is None:
+        refusal = operation_refusal(operation, gate.group)
+    if refusal is None:
+        refusal = call_refusal(claims, gate.group, operation)
+    return refusal
+
+
+def call_refusal(claims: ProposalClaims, group: Group, operation: Operation) -> Refusal | None:
+    """A write tool call: its tool allowed by the token's scope, the proposal it names the
+    token's, and the payload it carries the one the person decided."""
+    if operation.tool is None:
+        return None
+    if group.scopes.get(operation.tool) != claims.scope:
+        return Refusal(
+            403,
+            "insufficient_scope",
+            f"the token's scope {claims.scope} does not allow tool {operation.tool!r}",
+        )
+    if operation.arguments.get("proposal_id") != claims.proposal_id:
+        return Refusal(403, "forbidden", "the call names another proposal than its token")
+    payload = operation.arguments.get("payload")
+    try:
+        digest = payload_digest(payload) if isinstance(payload, dict) else None
+    except ProposalError:
+        digest = None
+    if digest != claims.digest:
+        return Refusal(403, "forbidden", "the payload is not the one the person decided")
+    return None
 
 
 def too_many(decision: Decision) -> Response:
@@ -250,6 +308,8 @@ def gated(app: ASGIApp, gate: Gate) -> ASGIApp:
             await refusal_response(refusal, gate.group)(scope, receive, send)
             return
         assert isinstance(body, bytes)
+        if isinstance(claims, ProposalClaims):
+            scope.setdefault("state", {})[PROPOSAL_STATE_KEY] = claims
         await app(scope, replaying(body, receive), send)
 
     return guarded

@@ -61,6 +61,12 @@ patches:
       - {op: replace, path: /spec/egress/1/to/0/ipBlock/cidr, value: 10.20.0.5/32}
       - {op: test, path: /spec/egress/2/to/0/ipBlock/cidr, value: 198.51.100.20/32}
       - {op: replace, path: /spec/egress/2/to/0/ipBlock/cidr, value: 10.30.0.20/32}
+  - target: {kind: NetworkPolicy, name: mcp-write, namespace: golem-system}
+    patch: |-
+      - {op: test, path: /spec/egress/1/to/0/ipBlock/cidr, value: 192.0.2.10/32}
+      - {op: replace, path: /spec/egress/1/to/0/ipBlock/cidr, value: 10.20.0.5/32}
+      - {op: test, path: /spec/egress/2/to/0/ipBlock/cidr, value: 198.51.100.20/32}
+      - {op: replace, path: /spec/egress/2/to/0/ipBlock/cidr, value: 10.30.0.20/32}
   # Mattermost: 10.30.0.60, both for its slash commands in and the REST API out.
   - target: {kind: NetworkPolicy, name: mattermost-adapter, namespace: golem-system}
     patch: |-

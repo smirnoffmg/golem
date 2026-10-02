@@ -63,6 +63,27 @@ CREATE TABLE IF NOT EXISTS proposals (
 CREATE INDEX IF NOT EXISTS proposals_pending_merge_requests ON proposals (checked_at)
     WHERE kind = 'merge_request' AND state = 'pending';
 
+-- What a run's agent proposes, from its pinned catalog when the run started (ADR 0015): a
+-- merge request, or a kind the platform applies, read back from its proposal file (golem-proposals/<run id>.json).
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS proposal_kind text NOT NULL DEFAULT 'merge_request';
+-- The digest binds a decision's token to the payload a person saw; the commit is where the
+-- payload was read, and the one the record lands at. The reason is the decider's own words.
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS digest text;
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS commit text;
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS reason text;
+-- When a decided proposal's branch was merged or deleted, or left for a person.
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS landed_at timestamptz;
+-- A landing GitLab could not do now: tried again later, each time later, so rows that keep
+-- failing never hold back newer ones.
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS land_attempts integer NOT NULL DEFAULT 0;
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS land_tried_at timestamptz;
+-- Who is applying an accepted proposal, until when: one apply at a time (ADR 0015). The write
+-- servers look before they write, which holds only if no two applies of one proposal overlap.
+ALTER TABLE proposals ADD COLUMN IF NOT EXISTS apply_lease_until timestamptz;
+CREATE INDEX IF NOT EXISTS proposals_accepted ON proposals (decided_at) WHERE state = 'accepted';
+CREATE INDEX IF NOT EXISTS proposals_unlanded ON proposals (id)
+    WHERE kind <> 'merge_request' AND state IN ('applied', 'stale') AND landed_at IS NULL;
+
 -- A goal run that found nothing to propose (ADR 0017): its outcome, the record its report is,
 -- and the report once read. The branch is deleted after the report is read.
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS outcome text;

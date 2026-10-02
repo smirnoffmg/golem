@@ -12,12 +12,13 @@ from starlette.types import ASGIApp
 
 from golem.adapters.jira import jira_authorization
 from golem.jwks import SigningKeys, fetch_jwks
-from golem.mcp.auth import run_token_verifier
+from golem.mcp.auth import proposal_token_verifier, run_token_verifier
 from golem.mcp.gate import Gate
 from golem.mcp.groups import GROUPS
 from golem.mcp.server import create_mcp_app
 from golem.mcp.settings import McpSettings, mcp_settings
 from golem.metrics import Metrics, process_registry
+from golem.proposal_status import ProposalStates
 from golem.ratelimit import Limiter
 from golem.run_status import RunStatuses
 from golem.serving import serve_all, with_metrics
@@ -26,6 +27,7 @@ from golem.tasks.app import RUN_KEYS_PATH
 
 JWKS_TIMEOUT_SECONDS = 2
 RUN_STATUS_TIMEOUT_SECONDS = 2
+PROPOSAL_STATUS_TIMEOUT_SECONDS = 2
 UPSTREAM_TIMEOUT_SECONDS = 20
 
 
@@ -51,11 +53,18 @@ def build_app(
         min_refresh_seconds=settings.keys_refresh_seconds,
     )
     keys.refresh()
+    group = GROUPS[settings.group]
     gate = Gate(
-        group=GROUPS[settings.group],
+        group=group,
         target_system=target_system(settings),
-        verify=run_token_verifier(keys),
-        statuses=RunStatuses(
+        verify=(
+            proposal_token_verifier(keys, settings.resource)
+            if group.writes and settings.resource
+            else run_token_verifier(keys)
+        ),
+        statuses=None
+        if group.writes
+        else RunStatuses(
             httpx.AsyncClient(
                 base_url=settings.task_service_url, timeout=RUN_STATUS_TIMEOUT_SECONDS
             ),
@@ -65,9 +74,21 @@ def build_app(
         auth_failures=Limiter(settings.auth_failure_rate),
         trusted_proxies=settings.trusted_proxies,
         metrics=Metrics("mcp") if metrics is None else metrics,
+        proposals=ProposalStates(
+            httpx.AsyncClient(
+                base_url=settings.task_service_url, timeout=PROPOSAL_STATUS_TIMEOUT_SECONDS
+            ),
+            ttl_seconds=settings.proposal_status_ttl_seconds,
+        )
+        if group.writes
+        else None,
     )
     return create_mcp_app(
-        gate=gate, upstream=upstream_client(settings), jira_deployment=settings.jira_deployment
+        gate=gate,
+        upstream=upstream_client(settings),
+        jira_deployment=settings.jira_deployment,
+        confluence_deployment=settings.confluence_deployment,
+        allowed=settings.allowed,
     )
 
 

@@ -19,9 +19,10 @@ from pathlib import Path
 from typing import TextIO
 
 from golem.catalog import AgentCatalog, ContextRepo, Goal, Kind, goal_target, load_catalog
+from golem.proposal_payload import APPLIED_KINDS, ProposalError, payload_of, proposal_file
 from golem.runtime.brief import build_brief
 from golem.runtime.lead import Command, Idle, decide
-from golem.runtime.ports import RoleRunner
+from golem.runtime.ports import Brief, RoleResult, RoleRunner
 from golem.runtime.snapshot import Located, build_snapshot
 from golem.runtime.validate import ContextState, read_state, validate
 from golem.runtime.workspace import (
@@ -246,6 +247,7 @@ async def propose(
         ),
         goal_mode=catalog.goal is not None,
         open_proposals=open_proposals,
+        proposal_kind=catalog.proposal,
     )
     report = RunReport(
         run_id=settings.run_id,
@@ -269,8 +271,8 @@ async def propose(
         after=read_state(repo),
         kinds=checkout.catalog.kinds,
     )
-    if not violations and brief.goal_mode and result.proposed:
-        violations = unbuilt_kind(catalog)
+    if not violations and catalog.proposal in APPLIED_KINDS:
+        violations = proposal_violations(repo, brief, result)
     if violations:
         return replace(report, outcome=Outcome.INVALID, reasons=violations, summary=result.summary)
     outcome, record = Outcome.PROPOSED, None
@@ -279,17 +281,37 @@ async def propose(
     # A goal run's outcome goes on its branch too: if its Job is gone before the reconciler
     # reads the report, the branch is all that says whether it reported or proposed.
     trailers = {"Outcome": outcome.value, "Record": record} if brief.goal_mode else {}
+    if outcome is Outcome.PROPOSED and result.proposal is not None:
+        # Written by the runtime after validation, outside the role's directory: the one file
+        # the reconciler reads to learn what the run proposes (ADR 0015).
+        manifest = repo / proposal_file(settings.run_id)
+        manifest.parent.mkdir(exist_ok=True)
+        manifest.write_text(
+            json.dumps(result.proposal, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
     commit_all(repo, commit_message(settings.run_id, command, result.summary, trailers), env)
     push_branch(repo, branch, env)
     return replace(report, branch=branch, summary=result.summary, outcome=outcome, record=record)
 
 
-def unbuilt_kind(catalog: AgentCatalog) -> tuple[str, ...]:
-    # A goal run's proposal of another kind needs golem-proposal.json and a platform that
-    # applies it (ADR 0015); until then it would land as a merge request nobody asked for.
-    if catalog.proposal == "merge_request":
-        return ()
-    return (f"proposals of kind {catalog.proposal!r} are not built yet; only merge_request is",)
+def proposal_violations(repo: Path, brief: Brief, result: RoleResult) -> tuple[str, ...]:
+    """What keeps a run of a kind the platform applies from proposing (ADR 0015): no proposal
+    where one is due, or one the reconciler would refuse when it reads it back."""
+    if result.proposal is None:
+        if brief.goal_mode:
+            return ()
+        return (f"the role submitted no {brief.proposal_kind} proposal; the run must end with one",)
+    try:
+        payload_of(
+            brief.proposal_kind,
+            dict(result.proposal),
+            lambda path: (repo / path).read_text(encoding="utf-8"),
+            under=brief.role.writes,
+        )
+    except ProposalError as error:
+        return (f"the proposal is invalid: {error}",)
+    return ()
 
 
 def commit_message(

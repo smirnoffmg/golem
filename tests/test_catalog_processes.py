@@ -17,7 +17,7 @@ from golem.catalog import (
     render_goal,
 )
 from golem.settings import SettingsError, task_service_settings
-from golem.tasks.__main__ import pinned_processes
+from golem.tasks.__main__ import pinned_catalogs
 
 CONTEXT = {"url": "https://git.example.com/corsar/context.git", "branch": "main"}
 KINDS = [{"name": "change", "initial": "open", "statuses": ["open", "done"]}]
@@ -271,8 +271,10 @@ def test_the_task_service_pins_the_processes_of_its_catalogs_directory(tmp_path:
     write_catalog(tmp_path, "corsar-feature", "process.yaml", process())
     settings = task_service_settings({**TASKS_ENV, "GOLEM_CATALOGS_DIR": str(tmp_path)})
 
-    assert list(pinned_processes(settings)) == ["corsar-feature"]
-    assert pinned_processes(task_service_settings(TASKS_ENV)) == {}
+    pinned = pinned_catalogs(settings)
+    assert list(pinned.processes) == ["corsar-feature"]
+    assert sorted(pinned.agents) == ["analyst", "designer"]
+    assert pinned_catalogs(task_service_settings(TASKS_ENV)).processes == {}
 
 
 def test_the_task_service_refuses_a_process_its_stage_agents_cannot_run(tmp_path: Path) -> None:
@@ -280,4 +282,4 @@ def test_the_task_service_refuses_a_process_its_stage_agents_cannot_run(tmp_path
     settings = task_service_settings({**TASKS_ENV, "GOLEM_CATALOGS_DIR": str(tmp_path)})
 
     with pytest.raises(SettingsError, match="GOLEM_CATALOGS_DIR"):
-        pinned_processes(settings)
+        pinned_catalogs(settings)

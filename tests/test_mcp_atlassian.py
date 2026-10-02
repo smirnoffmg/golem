@@ -16,6 +16,7 @@ Request and response shapes follow Atlassian's REST documentation:
   (GET /rest/api/content/search: cql, limit, expand; response results, size, _links)
 """
 
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -27,6 +28,7 @@ from golem.mcp.atlassian import (
     UpstreamError,
     get_issue,
     get_page,
+    get_page_source,
     search_issues,
     search_pages,
     storage_to_text,
@@ -304,3 +306,43 @@ def test_storage_to_text_keeps_text_and_block_breaks_only() -> None:
     html = "<p>a &amp; b</p><script>x()</script><table><tr><td>c</td></tr></table>"
 
     assert storage_to_text(html) == "a & b\nc"
+
+
+async def test_get_page_source_returns_the_storage_body_whole_with_title_and_version() -> None:
+    # A wiki_edit proposes the page back as Confluence stores it (ADR 0015), so nothing is cut.
+    storage = "<h1>Findings</h1><p>" + "y" * 20_000 + "</p>"
+    body = page("123", "Onboarding research", body={"storage": {"value": storage}})
+    upstream = Upstream(json_reply(results(body)))
+
+    async with upstream.client(WIKI) as client:
+        text = await get_page_source(client, "123")
+
+    [request] = upstream.requests
+    assert request.url.params["cql"] == "id = 123"
+    assert request.url.params["expand"] == "body.storage,version"
+    assert json.loads(text) == {
+        "page_id": "123",
+        "title": "Onboarding research",
+        "version": 7,
+        "body": storage,
+    }
+
+
+async def test_get_page_source_refuses_a_body_over_the_limit_instead_of_cutting_it() -> None:
+    body = page("123", "Big", body={"storage": {"value": "x" * 200_001}})
+    upstream = Upstream(json_reply(results(body)))
+
+    async with upstream.client(WIKI) as client:
+        with pytest.raises(UpstreamError, match="200000"):
+            await get_page_source(client, "123")
+
+
+@pytest.mark.parametrize("page_id", ["123 OR type = blogpost", "", "12a"])
+async def test_get_page_source_refuses_what_is_not_a_page_id(page_id: str) -> None:
+    upstream = Upstream(json_reply(results()))
+
+    async with upstream.client(WIKI) as client:
+        with pytest.raises(UpstreamError, match="page id"):
+            await get_page_source(client, page_id)
+
+    assert upstream.requests == []

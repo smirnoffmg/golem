@@ -7,6 +7,9 @@ from golem.orchestrator.reconcile import TaskOutcome
 OUTCOME_PATH = "/internal/run-outcome"
 PROPOSAL_STATE_PATH = "/internal/proposal-state"
 PROCESS_STATE_PATH = "/internal/process-state"
+# The task service may apply the proposal before it answers, and waits up to 15 s for a write
+# server: this call waits longer, or the reconciler would always give up first.
+PROPOSAL_STATE_TIMEOUT_SECONDS = 25.0
 
 
 @dataclass(frozen=True)
@@ -25,7 +28,9 @@ class TaskServiceNotifier:
     async def notify_proposal(self, proposal_id: str) -> bool:
         try:
             response = await self.client.post(
-                PROPOSAL_STATE_PATH, json={"proposal_id": proposal_id}
+                PROPOSAL_STATE_PATH,
+                json={"proposal_id": proposal_id},
+                timeout=PROPOSAL_STATE_TIMEOUT_SECONDS,
             )
         except httpx.HTTPError:
             return False

@@ -12,6 +12,13 @@ the catalogs as it does in production, and people start only the process (ADR 00
 starts two, whose stages the reconciler starts through the edge with call tokens; one waits
 for review of its stage's merge request, the other for a reason after its merge request was
 closed without one.
+
+With ``proposals=True`` three goal agents propose what the platform applies (ADR 0015), and
+``alice`` reviews them: ``seed`` has ``bob`` start their runs, each run's branch carries its
+proposal file in GitLab (faked with the branches and files the reconciler reads), and the
+reconciler records the proposals; accepting one applies it through a real write server to
+Confluence, Jira Service Management or Jira, faked at their HTTP boundary (support.atlassian).
+One more run finds nothing to propose and leaves a report.
 """
 
 import asyncio
@@ -31,6 +38,7 @@ from pathlib import Path
 from random import Random
 from typing import Any
 from unittest import mock
+from urllib.parse import unquote
 
 import httpx
 import psycopg
@@ -39,14 +47,19 @@ from cryptography.fernet import Fernet
 from starlette.types import ASGIApp
 from testcontainers.community.postgres import PostgresContainer
 
-from golem.catalog import Catalogs, ProcessCatalog, load_catalogs
-from golem.edge.__main__ import authenticator, call_authenticator, public_cards
+from golem.catalog import AgentCatalog, Catalogs, ProcessCatalog, load_catalogs
+from golem.edge.__main__ import authenticator, call_authenticator, public_cards, reviewers_of
 from golem.edge.app import create_edge_app
 from golem.edge.auth import authenticate_any
 from golem.edge.card_signing import card_keys
 from golem.edge.policy import ChainLimits, Registry
 from golem.edge.registry import derive_registry
 from golem.jwks import SigningKeys, fetch_jwks
+from golem.mcp.atlassian import Deployment
+from golem.mcp.auth import proposal_token_verifier
+from golem.mcp.gate import Gate
+from golem.mcp.groups import GROUPS
+from golem.mcp.server import create_mcp_app
 from golem.orchestrator import runs
 from golem.orchestrator.admission import Limits
 from golem.orchestrator.jobs import CatalogRef, JobSpec, JobStatus
@@ -56,13 +69,18 @@ from golem.orchestrator.merge_requests import (
     check_merge_request,
     close_merge_request,
     closing_reason,
-    propose_merge_request,
+    discard_branch,
+    land_record,
+    propose_result,
+    read_report,
 )
 from golem.orchestrator.notify import TaskServiceNotifier
 from golem.orchestrator.process_runs import ProcessPorts
-from golem.orchestrator.reconcile import SucceededRun, reconcile_once
+from golem.orchestrator.reconcile import Landing, Reporter, SucceededRun, reconcile_once
 from golem.orchestrator.service import JobTemplate, PostgresOrchestrator
 from golem.orchestrator.stages import EdgeStages
+from golem.proposal_payload import proposal_file
+from golem.proposal_status import ProposalStates
 from golem.ratelimit import Limiter, Rate
 from golem.run_status import RunStatuses
 from golem.run_token import SigningKey
@@ -70,11 +88,13 @@ from golem.runtime.main import Outcome, RunReport, report_json
 from golem.serving import Listener
 from golem.tasks.__main__ import service_card
 from golem.tasks.app import RUN_KEYS_PATH, create_listeners
+from golem.tasks.apply import McpApplier, WriteServer
 from golem.tasks.store import tasks_engine, tasks_store
 from golem.ui import store
 from golem.ui.app import create_ui_app
 from golem.ui.edge import rpc
 from golem.ui.oidc import OidcClient
+from support.atlassian import Confluence, Desk, Jira
 from support.front import Front
 from support.idp import FakeIdP, idp_app
 
@@ -123,9 +143,123 @@ PROCESS_GOALS = {
     "review": "Interview notes from the September round on onboarding friction.",
     "needs_reason": "Support tickets tagged 'export' from the last quarter.",
 }
+# Goal agents whose proposals the platform applies, and alice reviews (ADR 0015); bob starts
+# their runs, so what alice decides is not her own.
+REVIEWER = f"user:{USER}"
+OWNER = "bob"
+REVIEWED = {
+    "docs": ("wiki_edit", "Keeps the runbooks true to the running system."),
+    "desk": ("desk_reply", "Answers service desk requests about the platform."),
+    "triage": ("tracker_issue", "Turns what it finds in logs and metrics into tracker issues."),
+}
+RUNBOOK = (
+    "<h1>Exporter runbook</h1>"
+    "<p>The exporter writes the nightly files to the shared drive.</p>"
+    "<p>Restart it with <code>systemctl restart exporter</code>.</p>"
+    "<p>It keeps 30 days of files.</p>"
+    "<h2>Alerts</h2>"
+    "<p>ExporterDown fires when no file arrived by 06:00.</p>"
+    "<p>Page the on-call engineer of the platform team.</p>"
+)
+RUNBOOK_EDIT = RUNBOOK.replace(
+    "<p>Restart it with <code>systemctl restart exporter</code>.</p>",
+    "<p>It runs in Kubernetes now: restart it with"
+    " <code>kubectl rollout restart deploy/exporter</code>.</p>",
+).replace("<p>It keeps 30 days of files.</p>", "<p>It keeps 14 days of files.</p>")
+# One run's branch: the target, its proposal file's fields, and the files they name.
+PROPOSED_RUNS: dict[str, tuple[str, str, dict[str, Any], dict[str, str]]] = {
+    "wiki": (
+        "docs",
+        "Bring the exporter runbook in line with the Kubernetes move.",
+        {
+            "kind": "wiki_edit",
+            "page_id": "123",
+            "title": "Exporter runbook",
+            "version": 7,
+            "body_file": "findings/runbook.html",
+        },
+        {"findings/runbook.html": RUNBOOK_EDIT},
+    ),
+    "wiki-stale": (
+        "docs",
+        "Mention the retention change in the exporter runbook.",
+        {
+            "kind": "wiki_edit",
+            "page_id": "123",
+            "title": "Exporter runbook",
+            "version": 7,
+            "body_file": "findings/retention.html",
+        },
+        {"findings/retention.html": RUNBOOK.replace("30 days", "30 days (14 from October)")},
+    ),
+    "reply": (
+        "desk",
+        "Answer SD-12: the export files are missing since Monday.",
+        {
+            "kind": "desk_reply",
+            "request": "SD-12",
+            "public": True,
+            "text_file": "findings/sd-12.txt",
+        },
+        {
+            "findings/sd-12.txt": "The exporter moved to Kubernetes on Monday and lost its"
+            " volume. It is back, and the missing files were written again this morning."
+        },
+    ),
+    "issue": (
+        "triage",
+        "Look into the exporter's disk usage.",
+        {
+            "kind": "tracker_issue",
+            "action": "create",
+            "project": "OPS",
+            "issue_type": "Bug",
+            "summary": "Exporter volume grows 4% a day",
+            "description_file": "findings/disk.txt",
+        },
+        {
+            "findings/disk.txt": "Since the 20th the exporter's volume grows 4% a day; at this"
+            " rate it is full in nine days. Retention is not applied to the new path."
+        },
+    ),
+}
+REPORTED_RUN = (
+    "triage",
+    "Check yesterday's error rate of the export API.",
+    "findings/error-rate.md",
+    "Error rate of the export API stayed under 0.1% all day.\n\nThe spike at 03:10 was the"
+    " nightly restart; no request failed.\n",
+)
 VALIDATION_REASON = (
     "H-3 changed status from 'validated' to 'accepted'; status changes are human decisions"
 )
+
+
+def reviewed_catalog(name: str, kind: str, description: str) -> AgentCatalog:
+    """A goal agent of the demo: one role on a record it creates, proposing ``kind``."""
+    return AgentCatalog.model_validate(
+        {
+            "name": name,
+            "description": description,
+            "version": "0.1.0",
+            "context": {"url": f"https://git.example.com/{CONTEXT_PROJECT}.git", "branch": "main"},
+            "skills": [{"id": name, "name": description, "description": description}],
+            "kinds": [
+                {"name": "finding", "initial": "open", "statuses": ["open"], "sections": ["Notes"]}
+            ],
+            "roles": [{"name": "investigator", "writes": "findings/", "tools": []}],
+            "mode": "goal",
+            "goal": {"role": "investigator", "kind": "finding"},
+            "proposal": kind,
+            "reviewers": [REVIEWER],
+        }
+    )
+
+
+REVIEWED_CATALOGS = {
+    name: reviewed_catalog(name, kind, description)
+    for name, (kind, description) in REVIEWED.items()
+}
 
 
 def postgres_container() -> PostgresContainer:
@@ -273,14 +407,38 @@ class DemoGitLab:
     branch is found, a merge request opened, read back, closed, and its notes listed."""
 
     merge_requests: list[dict[str, Any]] = field(default_factory=list)
+    # A goal run's branch by run id: its name, its head commit's message and its files.
+    pushed: dict[str, tuple[str, str, dict[str, str]]] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def push(self, run_id: str, target: str, files: dict[str, str], message: str = "") -> None:
+        """What a goal run's runtime pushes: its branch, with its files at the head commit."""
+        with self.lock:
+            self.pushed[run_id] = (f"golem/{target}/{run_id}", message, files)
+
+    def _branch(self, name: str) -> tuple[str, str, dict[str, str]] | None:
+        return next((push for push in self.pushed.values() if push[0] == name), None)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        # A branch name or a file path is one escaped segment: read it undecoded.
+        raw = request.url.raw_path.decode().split("?")[0]
         with self.lock:
             if path.endswith("/repository/branches"):
                 run_id = request.url.params["search"].strip("/$")
-                return httpx.Response(200, json=[{"name": f"golem/H-2/{run_id}"}])
+                branch = self.pushed.get(run_id, (f"golem/H-2/{run_id}",))[0]
+                return httpx.Response(200, json=[{"name": branch}])
+            if "/repository/branches/" in raw:
+                return self._head(request.method, unquote(raw.rsplit("/", 1)[1]))
+            if "/repository/files/" in raw and raw.endswith("/raw"):
+                name = unquote(raw.split("/repository/files/", 1)[1].removesuffix("/raw"))
+                return self._file(request.url.params.get("ref", ""), name)
+            if "/merge_requests/" in path and path.endswith("/merge"):
+                mr = self._numbered(int(path.split("/")[-2]))
+                if mr is None:
+                    return httpx.Response(404, json={"message": "404 Not found"})
+                mr.update(state="merged", merge_user={"username": "golem"})
+                return httpx.Response(200, json=mr)
             if path.endswith("/merge_requests") and request.method == "GET":
                 source = request.url.params.get("source_branch")
                 state = request.url.params.get("state", "all")
@@ -314,6 +472,24 @@ class DemoGitLab:
         self.merge_requests.append(mr)
         return mr
 
+    def _head(self, method: str, name: str) -> httpx.Response:
+        found = self._branch(name)
+        if method == "DELETE":
+            self.pushed = {r: p for r, p in self.pushed.items() if p[0] != name}
+            return httpx.Response(204)
+        # A merge request's branch that no goal run pushed has an empty head, as before.
+        message = found[1] if found else ""
+        return httpx.Response(
+            200, json={"name": name, "commit": {"id": f"sha-{name}", "message": message}}
+        )
+
+    def _file(self, ref: str, name: str) -> httpx.Response:
+        found = self._branch(ref.removeprefix("sha-"))
+        text = found[2].get(name) if found else None
+        if text is None:
+            return httpx.Response(404, json={"message": "404 File Not Found"})
+        return httpx.Response(200, text=text)
+
     def _numbered(self, iid: int) -> dict[str, Any] | None:
         return next((mr for mr in self.merge_requests if mr["iid"] == iid), None)
 
@@ -345,20 +521,32 @@ class Demo:
     run_key: SigningKey
     # A process is pinned; people start it, and not the agent.
     processes: bool
+    # Goal agents propose what write servers apply to these; alice reviews them.
+    proposals: bool = False
+    confluence: Confluence = field(default_factory=lambda: Confluence(Deployment.CLOUD))
+    desk: Desk = field(default_factory=Desk)
+    jira: Jira = field(default_factory=Jira)
 
 
 @contextmanager
 def running(
-    databases: Databases, board_url: str, ui_port: int = 0, *, processes: bool = False
+    databases: Databases,
+    board_url: str,
+    ui_port: int = 0,
+    *,
+    processes: bool = False,
+    proposals: bool = False,
 ) -> Iterator[Demo]:
     """The stack, with the board served from ``board_url`` (support.front.board_server)."""
     in_own_loop(reset(databases))
     pinned = {PROCESS: PROCESS_CATALOG} if processes else {}
-    catalogs = Catalogs(agents=load_catalogs(EXAMPLES).agents, processes=pinned)
+    reviewed = REVIEWED_CATALOGS if proposals else {}
+    catalogs = Catalogs(agents=load_catalogs(EXAMPLES).agents | reviewed, processes=pinned)
     limits = ChainLimits(max_depth=3)
+    callable_by_people = [PROCESS] if processes else list(reviewed) if proposals else [AGENT]
     # As the edge's start derives it: with a process pinned, people may start only processes.
     registry = derive_registry(
-        Registry(allowed_callers={PROCESS if processes else AGENT: frozenset({"user:*"})}),
+        Registry(allowed_callers={name: frozenset({"user:*"}) for name in callable_by_people}),
         catalogs,
         limits,
     )
@@ -366,6 +554,8 @@ def running(
     idp_socket, edge_socket, tasks_socket, outcome_socket, read_socket, bff_socket = (
         bound() for _ in range(6)
     )
+    write_sockets = {group: bound() for group in ("wiki.write", "desk.write", "tracker.write")}
+    confluence, desk, jira = Confluence(Deployment.CLOUD, body=RUNBOOK), Desk(), Jira()
     ui_url = f"http://localhost:{port_of(ui_socket)}"
     edge_url = f"http://127.0.0.1:{port_of(edge_socket)}"
     tasks_url = f"http://127.0.0.1:{port_of(tasks_socket)}"
@@ -396,14 +586,24 @@ def running(
                 cpu="1",
                 memory="1Gi",
             ),
-            catalogs={AGENT: catalog, STAGE_AGENT: catalog},
+            catalogs={AGENT: catalog, STAGE_AGENT: catalog} | {name: catalog for name in reviewed},
             signing_key=run_key,
             grants={AGENT: ("tracker.read", "wiki.read")},
             processes=pinned,
+            proposal_kinds={name: agent.proposal for name, agent in reviewed.items()},
         ),
         edge_token=EDGE_TOKEN,
         task_store=tasks_store(tasks_engine(databases.tasks_url)),
         run_keys=(run_key,),
+        applier=McpApplier(
+            servers={
+                group: WriteServer(
+                    url=f"http://127.0.0.1:{port_of(sock)}/mcp", resource=resource_of(group)
+                )
+                for group, sock in write_sockets.items()
+            },
+            signing_key=run_key,
+        ),
     )
     read_url = f"http://127.0.0.1:{port_of(read_socket)}"
     served = [
@@ -415,6 +615,9 @@ def running(
         ),
     ]
     try:
+        upstreams = {"wiki.write": confluence, "desk.write": desk, "tracker.write": jira}
+        for group, sock in write_sockets.items():
+            served.append(serve((write_server(group, upstreams[group], read_url, databases), sock)))
         edge_keys = SigningKeys(partial(fetch_jwks, httpx.Client(timeout=5), idp.jwks_url))
         edge_keys.refresh()
         golem_keys = SigningKeys(
@@ -444,6 +647,7 @@ def running(
             run_statuses=RunStatuses(
                 httpx.AsyncClient(base_url=read_url, timeout=5), ttl_seconds=0
             ),
+            reviewers=reviewers_of(catalogs),
         )
         served.append(serve((edge, edge_socket)))
         ui = create_ui_app(
@@ -474,15 +678,50 @@ def running(
             gitlab=DemoGitLab(),
             run_key=run_key,
             processes=processes,
+            proposals=proposals,
+            confluence=confluence,
+            desk=desk,
+            jira=jira,
         )
     finally:
         for each in served:
             each.stop()
 
 
+def resource_of(group: str) -> str:
+    """A write server's canonical URI: the audience of its proposal tokens (ADR 0016)."""
+    return f"http://mcp-{group.replace('.', '-')}.demo:8000/mcp"
+
+
+def write_server(group: str, upstream: Any, read_url: str, databases: Databases) -> ASGIApp:
+    """A real write server (gate, tools, audit), its Atlassian faked at the HTTP boundary."""
+    keys = SigningKeys(
+        partial(fetch_jwks, httpx.Client(base_url=read_url, timeout=5), RUN_KEYS_PATH)
+    )
+    keys.refresh()
+    gate = Gate(
+        group=GROUPS[group],
+        target_system=f"{GROUPS[group].system}:demo",
+        verify=proposal_token_verifier(keys, resource_of(group)),
+        statuses=None,
+        audit_dsn=databases.dsn("golem_audit", "golem_mcp"),
+        proposals=ProposalStates(httpx.AsyncClient(base_url=read_url, timeout=5), ttl_seconds=0),
+    )
+    base = "https://acme.atlassian.net/wiki" if group == "wiki.write" else "https://jira.demo"
+    return create_mcp_app(
+        gate=gate,
+        upstream=httpx.AsyncClient(transport=httpx.MockTransport(upstream), base_url=base),
+        jira_deployment=Deployment.CLOUD,
+        confluence_deployment=Deployment.CLOUD,
+        allowed=frozenset({"OPS", "SD"}),
+    )
+
+
 def seed(demo: Demo) -> dict[str, str]:
     """alice's tasks, one per state the board shows, or with processes her two processes;
     returns each one's board path by state (a process's as ``process-<state>``)."""
+    if demo.proposals:
+        return in_own_loop(_seed_proposals(demo))
     return in_own_loop(_seed_processes(demo) if demo.processes else _seed(demo))
 
 
@@ -544,6 +783,50 @@ async def _seed_processes(demo: Demo) -> dict[str, str]:
     }
 
 
+async def _seed_proposals(demo: Demo) -> dict[str, str]:
+    """bob's runs of the goal agents alice reviews: four propose, one reports; returns each
+    proposal's page by name (``wiki``, ``wiki-stale``, ``reply``, ``issue``) and the report's
+    as ``report``."""
+    token = demo.idp.access_token(OWNER)
+    async with httpx.AsyncClient(base_url=demo.edge_url, timeout=10) as edge:
+
+        async def send(agent: str, key: str, text: str) -> dict[str, Any]:
+            message = {"messageId": f"seed-{key}", "role": "ROLE_USER", "parts": [{"text": text}]}
+            result = await rpc(edge, token, "SendMessage", {"tenant": agent, "message": message})
+            return result["task"]
+
+        runs = {}
+        for name, (agent, goal, manifest, files) in PROPOSED_RUNS.items():
+            task = await send(agent, name, goal)
+            run_id = task["metadata"]["runId"]
+            demo.gitlab.push(
+                run_id, f"{agent}-{name}", {proposal_file(run_id): json.dumps(manifest)} | files
+            )
+            demo.launcher.finish(run_id, JobStatus.SUCCEEDED)
+            runs[name] = run_id
+        # Admission allows four runs at once; the four end before the fifth starts.
+        await _reconcile(demo)
+        agent, goal, record, text = REPORTED_RUN
+        task = await send(agent, "report", goal)
+        run_id = task["metadata"]["runId"]
+        demo.gitlab.push(run_id, "error-rate", {record: text})
+        demo.launcher.finish(
+            run_id,
+            JobStatus.SUCCEEDED,
+            report_json(
+                RunReport(run_id=run_id, agent=agent, outcome=Outcome.REPORTED, record=record)
+            ),
+        )
+    await _reconcile(demo)
+    async with await psycopg.AsyncConnection.connect(demo.databases.runs) as conn:
+        cursor = await conn.execute("SELECT run_id, id FROM proposals")
+        proposal_of = {str(run): str(proposal) for run, proposal in await cursor.fetchall()}
+    missing = sorted(name for name, run in runs.items() if run not in proposal_of)
+    assert not missing, f"no proposal was recorded for {missing}"
+    paths = {name: f"/proposals/{proposal_of[run]}" for name, run in runs.items()}
+    return paths | {"report": f"/agents/{agent}/reports/{task['id']}"}
+
+
 async def _stage_run(demo: Demo, process_task: dict[str, Any]) -> str:
     async with await psycopg.AsyncConnection.connect(demo.databases.runs) as conn:
         cursor = await conn.execute(
@@ -576,11 +859,21 @@ async def _reconcile(demo: Demo) -> None:
         await psycopg.AsyncConnection.connect(demo.databases.runs, autocommit=True) as conn,
     ):
         project = GitLabProject(path=CONTEXT_PROJECT, target_branch="main")
-        merge_requests = GitLabMergeRequests(client, {AGENT: project, STAGE_AGENT: project})
+        projects = {name: project for name in (AGENT, STAGE_AGENT, *REVIEWED)}
+        merge_requests = GitLabMergeRequests(client, projects)
         notifier = TaskServiceNotifier(outcomes)
 
         async def propose(run: SucceededRun) -> Any:
-            return await propose_merge_request(merge_requests, run)
+            return await propose_result(merge_requests, run)
+
+        async def land(landing: Landing) -> None:
+            await land_record(merge_requests, landing)
+
+        async def read(run: SucceededRun) -> str | None:
+            return await read_report(merge_requests, run)
+
+        async def discard(run: SucceededRun) -> None:
+            await discard_branch(merge_requests, run)
 
         async def check(pending: Any) -> Any:
             return await check_merge_request(merge_requests, pending)
@@ -599,6 +892,8 @@ async def _reconcile(demo: Demo) -> None:
                 close_merge_request=partial(close_merge_request, merge_requests),
             ),
             notify_process=notifier.notify_process,
+            report=Reporter(read, discard),
+            land=land,
         )
 
 

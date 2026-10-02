@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { type BoardResponse, type Task, columnsOf, cursorToAsk, nextBoard } from "./board";
+import {
+  type BoardResponse,
+  type ProposalCard,
+  type Task,
+  columnsOf,
+  cursorToAsk,
+  nextBoard,
+  reviewCards,
+} from "./board";
 
 function task(id: string, overrides: Partial<Task> = {}): Task {
   return {
@@ -15,8 +23,31 @@ function task(id: string, overrides: Partial<Task> = {}): Task {
   };
 }
 
-function response(tasks: Task[], complete: boolean, cursor = "c1"): BoardResponse {
-  return { agent: "discovery", complete, cursor, tasks };
+function response(
+  tasks: Task[],
+  complete: boolean,
+  cursor = "c1",
+  proposals: ProposalCard[] = [],
+): BoardResponse {
+  return { agent: "discovery", complete, cursor, tasks, proposals };
+}
+
+function proposal(id: string, taskId: string, overrides: Partial<ProposalCard> = {}): ProposalCard {
+  return {
+    id,
+    taskId,
+    agent: "discovery",
+    kind: "desk_reply",
+    state: "pending",
+    column: "review",
+    summary: `Reply ${id}`,
+    url: null,
+    owner: "user:bob",
+    createdAt: "2026-09-29T10:00:00+00:00",
+    decidedBy: null,
+    decidedAt: null,
+    ...overrides,
+  };
 }
 
 describe("nextBoard", () => {
@@ -106,5 +137,47 @@ describe("cursorToAsk", () => {
     }
 
     expect(cursorToAsk(board)).toBe("c19");
+  });
+});
+
+describe("the proposals on a board", () => {
+  it("replaces the open set whole with every answer, a delta too", () => {
+    const before = nextBoard(undefined, response([], true, "c1", [proposal("p1", "t1")]));
+
+    const after = nextBoard(before, response([], false, "c2", [proposal("p2", "t2")]));
+
+    expect(after.proposals.map((p) => p.id)).toEqual(["p2"]);
+  });
+
+  it("shows as cards of their own only the proposals of tasks that are not mine", () => {
+    const mine = task("t1", {
+      state: "completed",
+      column: "review",
+      proposal: { id: "p1", kind: "desk_reply", state: "pending", url: null },
+    });
+    const board = nextBoard(
+      undefined,
+      response([mine], true, "c1", [
+        proposal("p1", "t1"),
+        proposal("p2", "t-of-bob", { createdAt: "2026-09-29T09:00:00+00:00" }),
+        proposal("p3", "t-of-carol", { createdAt: "2026-09-29T11:00:00+00:00" }),
+      ]),
+    );
+
+    expect(reviewCards(board).map((p) => p.id)).toEqual(["p3", "p2"]);
+  });
+
+  it("gives a task the open set's newer state of its own proposal", () => {
+    const mine = task("t1", {
+      state: "completed",
+      column: "review",
+      proposal: { id: "p1", kind: "desk_reply", state: "pending", url: null },
+    });
+    const board = nextBoard(
+      undefined,
+      response([mine], true, "c1", [proposal("p1", "t1", { state: "failed" })]),
+    );
+
+    expect(columnsOf(board).review[0]?.proposal?.state).toBe("failed");
   });
 });

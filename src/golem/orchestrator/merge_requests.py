@@ -4,12 +4,15 @@ The runtime pushes a run's result to branch ``golem/<target_id>/<run_id>`` of th
 context repository; the orchestrator does not know the target id, so it finds the branch by
 the run id suffix, then opens the merge request idempotently per source branch. The merge
 request is the run's proposal (ADR 0015): a person decides it in GitLab, and the reconciler reads
-the decision back from there. A goal run that found nothing to propose has no merge request: its
-target record, read at the branch's head commit, is its report, and then the branch goes
-(ADR 0017).
+the decision back from there. A run of a kind the platform applies proposes through
+``golem-proposals/<run id>.json`` on its branch instead, read at the head commit and checked
+again; once a person decided it, its branch is merged at that commit or deleted. A goal run
+that found nothing to propose has no merge request: its target record, read at the branch's
+head commit, is its report, and then the branch goes (ADR 0017).
 """
 
 import json
+import logging
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -19,7 +22,13 @@ from urllib.parse import quote
 
 import httpx
 
-from golem.orchestrator.proposals import OpenedMergeRequest, PendingMergeRequest, Transition
+from golem.orchestrator.proposals import (
+    Landing,
+    NewProposal,
+    OpenedMergeRequest,
+    PendingMergeRequest,
+    Transition,
+)
 from golem.orchestrator.reconcile import (
     REPORTED,
     Pushed,
@@ -27,7 +36,19 @@ from golem.orchestrator.reconcile import (
     SucceededRun,
     idle_detail,
 )
+from golem.proposal_payload import (
+    APPLIED_KINDS,
+    MAX_MANIFEST,
+    ProposalError,
+    body_paths,
+    payload_digest,
+    payload_of,
+    proposal_file,
+    summary_of,
+)
 from golem.resolution import MAX_REASON_CHARS
+
+log = logging.getLogger(__name__)
 
 BRANCH_PREFIX = "golem"
 # A comment the closer wrote up to this long after closing still explains the close.
@@ -40,7 +61,10 @@ NOTES_PER_PAGE = "50"
 
 
 class GitLabError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int | None = None) -> None:
+        super().__init__(message)
+        # GitLab's HTTP status; None when it did not answer.
+        self.status = status
 
 
 class ProjectNotConfigured(GitLabError):
@@ -49,6 +73,16 @@ class ProjectNotConfigured(GitLabError):
 
 class NotFound(GitLabError):
     pass
+
+
+class Conflict(GitLabError):
+    """A merge whose ``sha`` is no longer the source branch's HEAD."""
+
+
+# GitLab's documented refusals of a merge (Merge requests API, "Merge a merge request"): 400
+# `sha` required, 401 no permission to merge, 405 cannot merge, 409 `sha` not the source's
+# HEAD, 422 failed to merge. Asked again, GitLab answers the same.
+MERGE_REFUSED = frozenset({400, 401, 405, 409, 422})
 
 
 @dataclass(frozen=True)
@@ -124,6 +158,10 @@ class GitLabMergeRequests:
         url = self._url(self._project(agent), f"merge_requests/{iid}")
         await self._request("PUT", url, json={"state_event": "close"})
 
+    async def merge(self, agent: str, iid: int, sha: str) -> None:
+        url = self._url(self._project(agent), f"merge_requests/{iid}/merge")
+        await self._request("PUT", url, json={"sha": sha})
+
     async def raw_file(self, agent: str, path: str, commit: str) -> str:
         url = self._url(self._project(agent), f"repository/files/{quote(path, safe='')}/raw")
         response = await self._send("GET", url, params={"ref": commit})
@@ -154,8 +192,11 @@ class GitLabMergeRequests:
         except httpx.HTTPError as error:
             raise GitLabError(f"{method} {url}: {error}") from error
         if not response.is_success:
-            error_type = NotFound if response.status_code == 404 else GitLabError
-            raise error_type(f"{method} {url}: {response.status_code} {response.text[:200]}")
+            error_type = {404: NotFound, 409: Conflict}.get(response.status_code, GitLabError)
+            raise error_type(
+                f"{method} {url}: {response.status_code} {response.text[:200]}",
+                response.status_code,
+            )
         return response
 
 
@@ -309,3 +350,98 @@ async def discard_branch(gitlab: GitLabMergeRequests, run: SucceededRun) -> None
             await gitlab.delete_branch(run.agent, branch)
     except (NotFound, ProjectNotConfigured):
         return
+
+
+async def propose_result(gitlab: GitLabMergeRequests, run: SucceededRun) -> Settlement:
+    """What a succeeded run proposes, by its agent's kind (ADR 0015)."""
+    if run.proposal_kind in APPLIED_KINDS:
+        return await propose_payload(gitlab, run)
+    return await propose_merge_request(gitlab, run)
+
+
+async def propose_payload(gitlab: GitLabMergeRequests, run: SucceededRun) -> Settlement:
+    """The run's proposal file and its body files, read at the branch's head commit and
+    checked again: they come from an untrusted Job. Anything off leaves no proposal."""
+    try:
+        branch = await gitlab.find_branch(run.agent, run.run_id)
+    except ProjectNotConfigured as error:
+        return Settlement(f"Run {run.run_id} succeeded, but {error}; nothing was proposed.")
+    if branch is None:
+        return Settlement(idle_detail(run.run_id))
+    commit = await gitlab.head_commit(run.agent, branch)
+    manifest_path = proposal_file(run.run_id)
+    try:
+        text = await gitlab.raw_file(run.agent, manifest_path, commit)
+    except NotFound:
+        return Settlement(
+            f"Run {run.run_id} succeeded, but its branch carries no {manifest_path};"
+            " nothing was proposed."
+        )
+    if len(text) > MAX_MANIFEST:
+        return _invalid(run, f"{manifest_path} is larger than {MAX_MANIFEST} characters")
+    try:
+        manifest = json.loads(text)
+    except ValueError:
+        return _invalid(run, f"{manifest_path} is not JSON")
+    files: dict[str, str] = {}
+    try:
+        # Checked before anything it names is fetched: the manifest is the Job's, and must not
+        # decide how many requests a pass makes.
+        for path in body_paths(run.proposal_kind, manifest):
+            try:
+                files[path] = await gitlab.raw_file(run.agent, path, commit)
+            except NotFound:
+                continue
+        payload = payload_of(run.proposal_kind, manifest, files.__getitem__)
+    except ProposalError as error:
+        return _invalid(run, str(error))
+    proposal = NewProposal(
+        kind=run.proposal_kind,
+        payload=payload,
+        digest=payload_digest(payload),
+        commit=commit,
+        target=target_of(branch),
+    )
+    return Settlement(
+        f"Run {run.run_id} succeeded; its proposal waits for a decision:"
+        f" {summary_of(run.proposal_kind, payload)}.",
+        proposal=proposal,
+    )
+
+
+def _invalid(run: SucceededRun, reason: str) -> Settlement:
+    return Settlement(f"Run {run.run_id} succeeded, but its proposal is invalid: {reason}.")
+
+
+async def land_record(gitlab: GitLabMergeRequests, landing: Landing) -> None:
+    """A decided proposal's branch (ADR 0015): applied, it is merged at the commit the person
+    accepted, so a branch that moved since stays open for a person; stale, it is deleted, so
+    its target is free for a fresh run. Raises when GitLab cannot do it now."""
+    try:
+        branch = await gitlab.find_branch(landing.agent, landing.run_id)
+    except ProjectNotConfigured:
+        return
+    if branch is None:
+        return
+    if landing.state == "stale":
+        await gitlab.delete_branch(landing.agent, branch)
+        return
+    target = target_of(branch)
+    merge_request = await gitlab.open(
+        landing.agent,
+        landing.run_id,
+        branch,
+        title=f"{landing.agent}: {target} (applied)",
+        description=(
+            f"The record of run {landing.run_id}, whose proposal {landing.proposal_id} was"
+            " accepted and applied."
+        ),
+    )
+    try:
+        await gitlab.merge(landing.agent, merge_request.iid, landing.commit)
+    except GitLabError as error:
+        # GitLab's documented refusals of this merge are final: the merge request stays open for
+        # a person. Anything else (5xx, a timeout) is tried again later.
+        if error.status not in MERGE_REFUSED:
+            raise
+        log.warning("proposal %s: its record is left for a person: %s", landing.proposal_id, error)

@@ -178,6 +178,64 @@ describe("the API client", () => {
     expect(error.status).toBe(409);
   });
 
+  it("decides a proposal with the decision and a trimmed reason", async () => {
+    fake = fakeFetch(json(SESSION), json({ id: "p/1", state: "rejected" }));
+    const api = createApi(fake.fetch);
+    await api.session();
+
+    const decided = await api.decide("p/1", "reject", "  Too curt.  ");
+
+    expect(decided.state).toBe("rejected");
+    expect(fake.calls[1]?.url).toBe("/api/proposals/p%2F1/decision");
+    expect(JSON.parse(String(fake.calls[1]?.init?.body))).toEqual({
+      decision: "reject",
+      reason: "Too curt.",
+    });
+  });
+
+  it("sends no reason to accept", async () => {
+    fake = fakeFetch(json(SESSION), json({ id: "p1", state: "applied" }));
+    const api = createApi(fake.fetch);
+    await api.session();
+
+    await api.decide("p1", "accept", "");
+
+    expect(JSON.parse(String(fake.calls[1]?.init?.body))).toEqual({ decision: "accept" });
+  });
+
+  it("keeps the code of a proposal someone decided first", async () => {
+    fake = fakeFetch(
+      json(SESSION),
+      json({ error: "already_decided", message: "Someone decided on this proposal already." }, 409),
+    );
+    const api = createApi(fake.fetch);
+    await api.session();
+
+    const error = (await api.decide("p1", "accept", "").catch((e: unknown) => e)) as ApiError;
+
+    expect(error.code).toBe("already_decided");
+    expect(error.status).toBe(409);
+  });
+
+  it("reads the review queue, an agent's reports and one report by page", async () => {
+    fake = fakeFetch(
+      json({ proposals: [], next: null }),
+      json({ reports: [], next: null }),
+      json({ taskId: "t 1", agent: "d", target: null, completedAt: "x", text: "y" }),
+    );
+    const api = createApi(fake.fetch);
+
+    await api.reviewQueue("tok=");
+    await api.reports("a b", "p2");
+    await api.report("t 1");
+
+    expect(fake.calls.map((c) => c.url)).toEqual([
+      "/api/proposals?page=tok%3D",
+      "/api/agents/a%20b/reports?page=p2",
+      "/api/reports/t%201",
+    ]);
+  });
+
   it("forgets the CSRF token after signing out", async () => {
     fake = fakeFetch(json(SESSION), json({ redirect: "/" }));
     const api = createApi(fake.fetch);

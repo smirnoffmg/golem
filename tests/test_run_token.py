@@ -114,3 +114,16 @@ def test_only_p256_keys_are_accepted() -> None:
 
     with pytest.raises(ValueError, match="P-256"):
         SigningKey.from_pem(pem, kid="k1")
+
+
+def test_a_token_that_carries_a_proposal_is_not_a_run_token(key: SigningKey) -> None:
+    # Every read server refuses a proposal token, whatever its audience says (ADR 0015).
+    payload = jwt.decode(issue(CLAIMS, key, NOW), options={"verify_signature": False})
+    forged = jwt.encode(
+        payload | {"proposal": "p-1"}, key.private_pem, algorithm="ES256", headers={"kid": "k1"}
+    )
+
+    refused = verify(forged, jwt.PyJWKSet.from_dict(public_jwks([key])), NOW)
+
+    assert isinstance(refused, RunTokenError)
+    assert "proposal" in refused.reason
