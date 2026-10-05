@@ -149,7 +149,14 @@ class Jira:
     issues: dict[str, dict[str, Any]] = field(default_factory=dict)
     comments: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     create_status: int = 201
+    # The issue is created, and the answer is lost on the way back: Jira answers this status
+    # instead, or the connection drops.
+    lose_create_answer: int | None = None
+    drop_create_answer: bool = False
+    # Cloud's search is eventually consistent: a new issue is left out of this many searches.
+    search_lag: int = 0
     requests: list[httpx.Request] = field(default_factory=list)
+    unseen: dict[str, int] = field(default_factory=dict)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -160,7 +167,7 @@ class Jira:
             found = [
                 {"key": key}
                 for key, fields in self.issues.items()
-                if label.group(1) in fields["labels"]
+                if label.group(1) in fields["labels"] and self._seen(key)
             ]
             return httpx.Response(200, json={"issues": found, "isLast": True})
         if path == "/rest/api/2/issue" and request.method == "POST":
@@ -168,6 +175,11 @@ class Jira:
                 return httpx.Response(self.create_status, json={"errorMessages": ["refused"]})
             key = f"OPS-{len(self.issues) + 100}"
             self.issues[key] = body_of(request)["fields"]
+            self.unseen[key] = self.search_lag
+            if self.drop_create_answer:
+                raise httpx.RemoteProtocolError("connection dropped", request=request)
+            if self.lose_create_answer is not None:
+                return httpx.Response(self.lose_create_answer, text="bad gateway")
             return httpx.Response(201, json={"id": "1", "key": key, "self": "x"})
         match = re.fullmatch(r"/rest/api/2/issue/([A-Z]+-\d+)/comment", path)
         if match and request.method == "GET":
@@ -180,6 +192,12 @@ class Jira:
             self.comments.setdefault(match.group(1), []).append(body_of(request))
             return httpx.Response(201, json={"id": "10"})
         return httpx.Response(404, json={"errorMessages": ["no such resource"]})
+
+    def _seen(self, key: str) -> bool:
+        if self.unseen.get(key, 0) > 0:
+            self.unseen[key] -= 1
+            return False
+        return True
 
     def posts(self) -> list[httpx.Request]:
         return [r for r in self.requests if r.method == "POST"]

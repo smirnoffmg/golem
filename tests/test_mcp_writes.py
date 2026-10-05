@@ -219,6 +219,29 @@ async def test_a_reply_whose_post_fails_and_is_not_found_fails() -> None:
     }
 
 
+async def test_a_reply_whose_answer_is_lost_is_unknown_and_its_retry_finds_it() -> None:
+    # Failed would invite a second accept, whose later decided_at no longer covers this reply.
+    fake = Desk()
+
+    def dropping(request: httpx.Request) -> httpx.Response:
+        answer = fake(request)
+        if request.method == "POST":
+            raise httpx.ReadTimeout("no answer", request=request)
+        return answer
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(dropping), base_url="https://jira.example.test"
+    )
+    first = await within_deadline(
+        apply_reply(client, frozenset({"SD"}), PROPOSAL, REPLY, DECIDED_AT)
+    )
+    retried = await reply(fake)
+
+    assert first["state"] == "unknown"
+    assert retried["state"] == "applied"
+    assert len(fake.posts()) == 1
+
+
 async def test_a_reply_to_a_desk_not_allowed_is_refused_before_any_call() -> None:
     fake = Desk()
 
@@ -289,6 +312,70 @@ async def test_a_refused_create_fails_with_the_reason() -> None:
     assert "refused" in result["detail"]
 
 
+@pytest.mark.parametrize(
+    "lost",
+    [{"lose_create_answer": 502, "search_lag": 1}, {"drop_create_answer": True}],
+    ids=["5xx-and-not-found-yet", "dropped"],
+)
+async def test_a_create_whose_answer_is_lost_is_unknown_until_the_search_shows_it(
+    lost: dict[str, Any],
+) -> None:
+    # Cloud's search may leave the new issue out for a while: failed would invite a second
+    # accept, and a second issue, so the reconciler's retry looks again a minute later.
+    fake = Jira(**lost)
+    first = await within_deadline(new_issue(fake))
+    retried = await within_deadline(new_issue(fake))
+
+    assert first["state"] == "unknown"
+    assert retried == {"state": "applied", "detail": "OPS-100 was created already."}
+    assert len(fake.posts()) == 1
+
+
+async def test_a_data_center_create_answered_5xx_and_not_found_fails() -> None:
+    # Data Center's search shows an issue once it is created: not found is not created.
+    fake = Jira(create_status=503)
+
+    result = await apply_issue(
+        jira_client(fake), Deployment.DATA_CENTER, frozenset({"OPS"}), PROPOSAL, ISSUE, None
+    )
+
+    assert result["state"] == "failed"
+
+
+async def test_a_jira_that_answers_5xx_before_any_write_leaves_the_apply_unknown() -> None:
+    def down(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="maintenance")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(down), base_url="https://j.test")
+
+    result = await within_deadline(
+        apply_issue(client, Deployment.CLOUD, frozenset({"OPS"}), PROPOSAL, ISSUE, None)
+    )
+
+    assert result["state"] == "unknown"
+
+
+async def test_a_refused_create_whose_look_after_cannot_be_made_still_fails() -> None:
+    # A 4xx is a refusal: unknown would retry it every minute, and forever.
+    fake = Jira(create_status=400)
+
+    def search_down_after_the_post(request: httpx.Request) -> httpx.Response:
+        if fake.posts() and request.method == "GET":
+            return httpx.Response(503, text="maintenance")
+        return fake(request)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(search_down_after_the_post), base_url="https://j.test"
+    )
+
+    result = await within_deadline(
+        apply_issue(client, Deployment.CLOUD, frozenset({"OPS"}), PROPOSAL, ISSUE, None)
+    )
+
+    assert result["state"] == "failed"
+    assert "refused" in result["detail"]
+
+
 async def test_an_issue_in_a_project_not_allowed_is_refused_before_any_call() -> None:
     fake = Jira()
 
@@ -328,7 +415,7 @@ async def test_a_comment_that_only_quotes_the_marker_is_not_this_one() -> None:
 # The whole of one apply
 
 
-async def test_an_apply_that_outlives_its_deadline_fails_and_writes_nothing_more() -> None:
+async def test_an_apply_that_outlives_its_deadline_is_unknown_and_writes_nothing_more() -> None:
     started = asyncio.Event()
 
     async def hanging() -> dict[str, str]:
@@ -339,7 +426,7 @@ async def test_an_apply_that_outlives_its_deadline_fails_and_writes_nothing_more
     result = await within_deadline(hanging(), seconds=0.05)
 
     assert started.is_set()
-    assert result == {"state": "failed", "detail": "the apply did not finish in 0.05 s"}
+    assert result == {"state": "unknown", "detail": "the apply did not finish in 0.05 s"}
 
 
 async def test_an_apply_within_its_deadline_answers_as_it_did() -> None:

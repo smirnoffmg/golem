@@ -66,6 +66,14 @@ Sources:
   <https://developer.atlassian.com/server/jira/platform/rest/v11003/api-group-issue>; the same
   resources on Cloud): `POST /rest/api/2/issue` with `fields`, answered 201 with `id`, `key`,
   `self`; `POST /rest/api/2/issue/{issueIdOrKey}/comment` with `body`, answered 201.
+- Jira Cloud, Search and reconcile
+  (<https://developer.atlassian.com/cloud/jira/platform/search-and-reconcile/>): "The API
+  doesn't provide read-after-write consistency by default"; without `reconcileIssues` a search
+  "may return stale or outdated data"; "The delay might vary from a few seconds to minutes,
+  depending on the operation"; "consistency is ensured only for the specified issues".
+- *Designing Data-Intensive Applications* (Kleppmann), с. 295 (PDF 317): "this requires the
+  resource itself to take an active role in checking tokens [...] it is not sufficient to rely
+  on clients checking their lock status themselves".
 - GitLab Merge requests API (<https://docs.gitlab.com/api/merge_requests/>): `state` is
   `opened`, `closed`, `merged` or `locked`, where `locked` is "short-lived and transitional";
   `merge_user` is "the user who merged this merge request, the user who set it to auto-merge,
@@ -215,10 +223,13 @@ the task service applies it at once through the kind's write server and records 
 (through the orchestrator's runs module it already runs, as for a cancel, so `golem_runs`
 keeps one owner role):
 `applied`, `stale` or `failed` with `detail`. The decision answers with the resulting state, so
-the person sees the outcome. If the call times out (15 s) the row stays `accepted`; the
-reconciler notifies the task service about `accepted` rows older than 60 s through the same
-`POST /internal/proposal-state`, and the task service applies again. Every apply is idempotent
-per proposal id, so a retry after a lost answer does not write twice:
+the person sees the outcome. `failed` means the upstream refused the write. If the call times
+out (15 s), or the write server cannot tell whether the upstream made the write (Jira or
+Confluence did not answer, answered 5xx, or the apply ran out of time), the row stays
+`accepted`: a `failed` row may be accepted again at once, and a write whose answer was lost
+would be made twice. The reconciler notifies the task service about `accepted` rows older than
+60 s through the same `POST /internal/proposal-state`, and the task service applies again.
+Every apply is idempotent per proposal id, so a retry after a lost answer does not write twice:
 
 - **`wiki_edit`.** Read the page (Cloud: `GET /wiki/api/v2/pages/{id}?body-format=storage`; Data
   Center: `GET /rest/api/content/{id}?expand=version,body.storage`). A version whose `message`
@@ -298,8 +309,8 @@ the run-token key and verified against the same JWKS (`/internal/run-keys`):
   platform process holding its own secrets, reached only by the task service, and acting for a
   named person with a token bound to one payload.
 - The task service grows a fourth role: it applies. Its egress now includes the write servers,
-  and an outage of Jira or Confluence shows up as `failed` proposals, not as a failing task
-  service. A decision waits up to 15 s for the upstream.
+  and an outage of Jira or Confluence shows up as proposals left `accepted` and tried again
+  every minute, then `failed` 15 minutes after the decision, not as a failing task service. A decision waits up to 15 s for the upstream.
 - The reviewers of an agent can accept what it proposes for anyone who started it; whoever
   controls the catalog's merge request controls who that is. The platform's deploy of a catalog
   revision is the second gate, as for grants.
@@ -385,8 +396,9 @@ built separately.
     never the reason), `ListReports` and `ReadReport`, and refuses what does not parse before
     it forwards anything.
 - **The decision is not refused when the live page cannot be read.** The apply reads the page
-  itself before writing, so an unreadable page ends the proposal `failed`, which a person may
-  accept again; the proposal page shows the proposed body with `live: null`.
+  itself before writing, so a page Confluence refuses to show ends the proposal `failed`, which
+  a person may accept again, and one it cannot serve leaves the proposal `accepted` for a
+  retry; the proposal page shows the proposed body with `live: null`.
 - **Applying.** The task service calls the write server's MCP endpoint (`GOLEM_WRITE_SERVERS_FILE`:
   per group its `url` and `resource`, the token's audience) with one proposal token per call.
   Without an entry for a group, an accepted proposal of its kind ends `failed` with the reason.
@@ -396,10 +408,19 @@ built separately.
   compare-and-set); the proposal-state notification and the reconciler's retry apply only a
   proposal whose lease ran out, and take a new lease by compare-and-set first. A write server
   bounds one apply to 30 s, the task service waits 15 s and the reconciler 25 s for the task
-  service, so the lease outlasts every apply that holds it. An apply that raises or takes over
-  15 s leaves the row `accepted`; once its lease ran out the reconciler names it on
-  `POST /internal/proposal-state`, at most once a minute, last in its pass and for at most 60 s
-  a pass, so a hanging write server cannot starve the rest of the pass.
+  service, so the lease outlasts every apply that holds it. An apply that raises, answers
+  `unknown` or takes over 15 s leaves the row `accepted`; once its lease ran out the reconciler
+  names it on `POST /internal/proposal-state`, at most once a minute, last in its pass and for
+  at most 60 s a pass, so a hanging write server cannot starve the rest of the pass.
+
+  The lease is a timing assumption, not a fence. Confluence checks the page version on every
+  write, so a late `PUT` is refused; Jira and Jira Service Management take no token Golem could
+  send, so a `POST` they process only after the lease ran out, while a retry looks and finds
+  nothing, is made twice. Kleppmann's fencing token needs the resource itself to check it, which
+  neither offers. It is accepted because the bounds are wide: the write server cancels an apply
+  at 30 s and the lease runs 60 s, so a request would have to sit in Atlassian for more than
+  half a minute after its client gave up. The cost is a second comment, reply or issue, which a
+  person deletes.
 - **Refused for good.** A write server's gate refusing the token (401) or its scope (403) refuses
   every retry the same way, so the apply ends `failed` with the reason. A decider no proposal
   token can name (not `user:` followed by a name without spaces, colons or `*`, the catalog's
@@ -412,9 +433,12 @@ built separately.
   - `tracker.write`: `apply_issue(proposal_id, payload, target)`; `apply_comment(proposal_id,
     payload)`.
 
-  An apply answers `{"state": "applied" | "stale" | "failed", "detail"}`; a tool error is
-  `failed` with its text. The server recomputes the digest of `payload` and compares it with the
-  token's `digest`, and reads the decider from the token's `sub`.
+  An apply answers `{"state": "applied" | "stale" | "failed" | "unknown", "detail"}`; a tool
+  error is `failed` with its text. `unknown` is not recorded while the decision is under
+  15 minutes old: the task service treats it as an apply that did not answer. Past that it is
+  `failed` with the detail, so an upstream that keeps answering 5xx is not asked every minute
+  for ever, and a person sees why. The server recomputes the digest of `payload` and compares it
+  with the token's `digest`, and reads the decider from the token's `sub`.
 - **The record lands.** For an `applied` proposal the reconciler opens the run's branch as a
   merge request (`<agent>: <target> (applied)`) and merges it with `sha` = the proposal's
   `commit`. GitLab's documented refusals of a merge (Merge requests API, "Merge a merge
@@ -481,12 +505,20 @@ built separately.
   path; `POST /rest/api/2/issue` sends `project`, `issuetype` by name, `summary`,
   `description` and `labels`. A comment is found with the Jira adapter's marker rule and posted
   with the marker as its last line.
-- **After a refused or unanswered write** each apply looks once more (the page, the comments,
-  the label) before it answers `failed`, so a write whose answer was lost ends `applied`.
+- **After a refused or unanswered write.** After an error answer each apply looks once more
+  (the page, the comments, the label): found, it is `applied`; not found, it is `failed`, since
+  pages and comments are read back as written. A look that could not be made leaves a 4xx
+  `failed` and a 5xx `unknown`, and a write that got no answer at all is `unknown`; the
+  reconciler's retry looks again once the lease ran out. Jira Cloud's search is not read back as
+  written, and only issues named by id can be reconciled, so on Cloud a label not found after a
+  5xx is `unknown` too (Data Center's search is taken at its word: `failed`). The retry looks
+  at least 30 s after the lost answer (a lease of 60 s, an apply of at most 30 s): an issue
+  Cloud's search still leaves out then is created a second time.
 - **Metrics.** The task service counts `golem_proposal_decisions_total{kind, decision}` and
   `golem_proposal_applies_total{kind, result}`, `result` one of `applied`, `stale`, `failed`,
-  `unanswered` (the reconciler asks again) or `unrecorded` (the row had moved on); the write
-  servers count their gate's decisions in `golem_mcp_tool_calls_total` like the read servers.
+  `unanswered` (the reconciler asks again, `unknown` included) or `unrecorded` (the row had
+  moved on); the write servers count their gate's decisions in `golem_mcp_tool_calls_total`
+  like the read servers.
 - **Read servers keep audience `golem-mcp`.** The per-server audiences of
   [ADR 0016](0016-observability-tools.md) are built for the write servers only.
 - **Compose** runs no MCP server, read or write; the write servers are deployed on Kubernetes
