@@ -1,16 +1,18 @@
 """The write servers as the task service calls them (ADR 0015): one MCP call per apply or
 preview, with a proposal token issued for that call alone.
 
-A write server answers an apply with ``{"state": "applied" | "stale" | "failed", "detail"}`` and
-a preview with the live page, ``{"title", "version", "body"}``. A server that cannot be reached
-raises ``ApplyUnavailable``: the proposal stays accepted and the reconciler asks again, and the
-apply is idempotent per proposal. A tool error is the upstream refusing: ``failed``.
+A write server answers an apply with ``{"state": "applied" | "stale" | "failed" | "unknown",
+"detail"}`` and a preview with the live page, ``{"title", "version", "body"}``. A server that
+cannot be reached, or that cannot tell whether the upstream made the write (``unknown``), raises
+``ApplyUnavailable``: the proposal stays accepted and the reconciler asks again, and the apply is
+idempotent per proposal. A tool error is the upstream refusing: ``failed``.
 """
 
 import json
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -29,6 +31,9 @@ MAX_DETAIL = 500
 # The write server's gate refused the token (401) or its scope (403): it refuses a retry the
 # same way, so the apply fails with the reason instead of staying accepted.
 REFUSING = frozenset({401, 403})
+# Long enough for Jira Cloud's search to show an issue created behind a lost answer; past it,
+# an upstream that keeps answering 5xx ends failed instead of being asked every minute.
+UNKNOWN_SECONDS = 15 * 60
 
 
 class ApplyUnavailable(RuntimeError):
@@ -112,6 +117,15 @@ class McpApplier:
             return Applied("failed", text[:MAX_DETAIL])
         answer = _object(text)
         state, detail = answer.get("state"), answer.get("detail")
+        if state == "unknown":
+            if self._decided_long_ago(decided):
+                return Applied(
+                    "failed",
+                    f"no answer for {UNKNOWN_SECONDS // 60} minutes: {detail}"[:MAX_DETAIL],
+                )
+            # Failed would let a person accept it again at once, and a write lost on the way
+            # back would be made twice.
+            raise ApplyUnavailable(f"the write server could not tell if it applied: {detail}")
         if state not in RESULTS:
             return Applied("failed", "the write server's answer is not one of ours")
         return Applied(state, detail[:MAX_DETAIL] if isinstance(detail, str) else None)
@@ -132,6 +146,12 @@ class McpApplier:
         if not (isinstance(title, str) and isinstance(version, int) and isinstance(body, str)):
             raise ApplyUnavailable(f"the live page could not be read: {text[:MAX_DETAIL]}")
         return LivePage(title=title, version=version, body=body)
+
+    def _decided_long_ago(self, decided: ProposalDetail) -> bool:
+        decided_at = decided.summary.decided_at
+        if decided_at is None:
+            return False
+        return self.clock() - datetime.fromisoformat(decided_at).timestamp() > UNKNOWN_SECONDS
 
     def _token(
         self, server: WriteServer, proposal: ProposalDetail, person: str, scope: str, group: str

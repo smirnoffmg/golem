@@ -1,13 +1,19 @@
 """The write servers' calls to Confluence, Jira Service Management and Jira (ADR 0015).
 
-Each apply answers ``{"state": "applied" | "stale" | "failed", "detail"}`` and is idempotent per
-proposal, so the task service may ask again after a lost answer without writing twice:
+Each apply answers ``{"state": "applied" | "stale" | "failed" | "unknown", "detail"}`` and is
+idempotent per proposal, so the task service may ask again after a lost answer without writing
+twice:
 
 - a page edit is marked ``golem:<proposal id>`` in its version message;
 - a reply is recognised by its text, visibility and author after the decision, since no marker
   may go into what the customer reads;
 - a new issue carries the label ``golem-<first 12 hex of the id>``, a comment ends with the line
   ``Golem proposal <id>``.
+
+``failed`` is an upstream refusing the write (4xx), or a write the look after it shows was not
+made, which a person may accept again. When the upstream did not answer, answered 5xx and no
+look could tell, or the apply ran out of time, the write may have been made: ``unknown`` keeps
+the proposal accepted for the reconciler's retry, which looks again.
 
 Where a server may write is checked here, before any write: the page's space, the request's or
 the issue's project. The client passed in carries the server's own write account.
@@ -47,21 +53,35 @@ WRITE_DEADLINE_SECONDS = 30.0
 CLOCK_SKEW_MS = 120_000
 
 Result = dict[str, str]
+UNKNOWN = "unknown"
+
+
+class UpstreamUnavailable(UpstreamError):
+    """The upstream did not answer, or answered 5xx: a write it was sent may have been made."""
 
 
 def _result(state: str, detail: str) -> Result:
     return {"state": state, "detail": detail}
 
 
+def _unanswered(response: httpx.Response, refused: str) -> Result:
+    """A write answered with an error, and no look after it that can be trusted: a 4xx refused
+    it, a 5xx may have come after the upstream made it."""
+    return _result("failed" if response.status_code < 500 else UNKNOWN, refused)
+
+
 async def within_deadline(
     apply: Awaitable[Result], seconds: float = WRITE_DEADLINE_SECONDS
 ) -> Result:
-    """``apply``'s answer, or failed once it has taken ``seconds``: cancelled, it writes no more."""
+    """``apply``'s answer, or unknown when the upstream did not answer or ``seconds`` ran out:
+    cancelled, it writes no more, and a retry finds what it wrote."""
     try:
         async with asyncio.timeout(seconds):
             return await apply
     except TimeoutError:
-        return _result("failed", f"the apply did not finish in {seconds:g} s")
+        return _result(UNKNOWN, f"the apply did not finish in {seconds:g} s")
+    except UpstreamUnavailable as error:
+        return _result(UNKNOWN, str(error))
 
 
 def _allowed(key: str, allowed: frozenset[str], what: str) -> None:
@@ -84,7 +104,12 @@ async def _send(
     try:
         return await client.request(method, path, params=dict(params or {}), json=json)
     except httpx.HTTPError as error:
-        raise UpstreamError(f"upstream unreachable: {type(error).__name__}") from error
+        raise UpstreamUnavailable(f"upstream unreachable: {type(error).__name__}") from error
+
+
+def _answered(status: int, detail: str) -> UpstreamError:
+    error = UpstreamUnavailable if status >= 500 else UpstreamError
+    return error(f"upstream answered {status}{detail}")
 
 
 def _object(response: httpx.Response) -> dict[str, Any]:
@@ -102,7 +127,7 @@ async def _get(
 ) -> dict[str, Any]:
     response = await _send(client, "GET", path, params=params)
     if response.status_code != 200:
-        raise UpstreamError(f"upstream answered {response.status_code}: {error_detail(response)}")
+        raise _answered(response.status_code, f": {error_detail(response)}")
     return _object(response)
 
 
@@ -225,7 +250,7 @@ async def apply_page_edit(
     try:
         again = await read_page(client, deployment, page_id)
     except UpstreamError:
-        return _result("failed", refused)
+        return _unanswered(response, refused)
     return _decided(again, page_id, marker, payload["version"]) or _result("failed", refused)
 
 
@@ -304,7 +329,7 @@ async def apply_reply(
     try:
         found = await _replied(client, request, text, public, after)
     except UpstreamError:
-        return _result("failed", refused)
+        return _unanswered(response, refused)
     return _result("applied", f"{kind} {request}.") if found else _result("failed", refused)
 
 
@@ -361,8 +386,14 @@ async def apply_issue(
     try:
         existing = await _labelled(client, deployment, label)
     except UpstreamError:
-        return _result("failed", refused)
-    return _result("applied", f"Created {existing}.") if existing else _result("failed", refused)
+        return _unanswered(response, refused)
+    if existing:
+        return _result("applied", f"Created {existing}.")
+    # Cloud's search may leave a new issue out for seconds to minutes, and only issues named by
+    # id can be reconciled: after a 5xx the issue may exist although the label finds nothing.
+    if deployment is Deployment.CLOUD:
+        return _unanswered(response, refused)
+    return _result("failed", refused)
 
 
 def comment_marker(proposal_id: str) -> str:
@@ -373,8 +404,10 @@ async def _commented(client: httpx.AsyncClient, issue: str, marker: str) -> bool
     try:
         return await comment_exists(client, issue, marker)
     except httpx.HTTPStatusError as error:
-        raise UpstreamError(f"upstream answered {error.response.status_code}") from error
-    except (httpx.HTTPError, ValueError) as error:
+        raise _answered(error.response.status_code, "") from error
+    except httpx.HTTPError as error:
+        raise UpstreamUnavailable(f"upstream unreachable: {type(error).__name__}") from error
+    except ValueError as error:
         raise UpstreamError(f"upstream unreachable: {type(error).__name__}") from error
 
 
@@ -401,5 +434,5 @@ async def apply_comment(
     try:
         found = await _commented(client, issue, marker)
     except UpstreamError:
-        return _result("failed", refused)
+        return _unanswered(response, refused)
     return _result("applied", f"Commented on {issue}.") if found else _result("failed", refused)

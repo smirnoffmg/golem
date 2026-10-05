@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from functools import partial
 from typing import Any
@@ -41,7 +42,7 @@ from golem.run_status import RunStatuses
 from golem.run_token import RunClaims, SigningKey
 from golem.run_token import issue as issue_run_token
 from golem.tasks.app import EDGE_TOKEN_HEADER, create_listeners
-from golem.tasks.apply import McpApplier, WriteServer
+from golem.tasks.apply import ApplyUnavailable, McpApplier, WriteServer
 from golem.tasks.ports import Applied, LivePage, ProposalDetail, ProposalGate, ProposalSummary
 
 KEY = SigningKey.generate(kid="run-key-1")
@@ -236,6 +237,26 @@ async def test_each_kind_applied_twice_writes_once(
 
     assert (first.state, second.state) == ("applied", "applied")
     assert len(writes(stack.upstreams)) == 1
+
+
+async def test_an_issue_whose_create_answer_is_lost_stays_for_a_retry_and_is_created_once(
+    stack: Stack,
+) -> None:
+    jira = stack.upstreams.jira
+    jira.lose_create_answer, jira.search_lag = 502, 1
+    stack.allow("tracker_issue", ISSUE)
+    applier = stack.applier()
+
+    issue = detail("tracker_issue", ISSUE)
+    # Decided just now: an apply that cannot tell is retried only for a while after the decision.
+    issue = replace(issue, summary=replace(issue.summary, decided_at=datetime.now(UTC).isoformat()))
+
+    with pytest.raises(ApplyUnavailable):
+        await applier.apply(issue)
+    retried = await applier.apply(issue)
+
+    assert retried == Applied("applied", "OPS-100 was created already.")
+    assert len(jira.posts()) == 1
 
 
 async def test_a_page_changed_since_the_role_read_it_is_stale(stack: Stack) -> None:

@@ -5,7 +5,8 @@ answers. The write servers themselves are built separately."""
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -19,6 +20,7 @@ from golem.proposal_payload import payload_digest
 from golem.proposal_token import verify
 from golem.run_token import SigningKey, public_jwks
 from golem.tasks.apply import (
+    UNKNOWN_SECONDS,
     ApplyUnavailable,
     McpApplier,
     WriteServer,
@@ -201,6 +203,34 @@ async def test_the_write_servers_answer_is_the_result(answer: Any, expected: App
 
     async with applier_for(fake) as applier:
         assert await applier.apply(detail("wiki_edit", PAGE)) == expected
+
+
+def decided_ago(seconds: int) -> ProposalDetail:
+    issue = detail("tracker_issue", {"action": "create", "project": "OPS"})
+    decided_at = datetime.fromtimestamp(NOW - seconds, UTC).isoformat()
+    return replace(issue, summary=replace(issue.summary, decided_at=decided_at))
+
+
+async def test_a_write_server_that_cannot_tell_leaves_the_proposal_for_a_retry() -> None:
+    fake = FakeWriteServer(
+        answers={"apply_issue": {"state": "unknown", "detail": "Jira answered 502"}}
+    )
+
+    async with applier_for(fake, **{"tracker.write": "x"}) as applier:
+        with pytest.raises(ApplyUnavailable, match="Jira answered 502"):
+            await applier.apply(decided_ago(60))
+
+
+async def test_an_apply_that_cannot_tell_for_too_long_fails_with_the_reason() -> None:
+    fake = FakeWriteServer(
+        answers={"apply_issue": {"state": "unknown", "detail": "Jira answered 502"}}
+    )
+
+    async with applier_for(fake, **{"tracker.write": "x"}) as applier:
+        result = await applier.apply(decided_ago(UNKNOWN_SECONDS + 1))
+
+    assert result.state == "failed"
+    assert "Jira answered 502" in (result.detail or "")
 
 
 async def test_a_tool_error_is_a_failed_apply_with_its_text() -> None:

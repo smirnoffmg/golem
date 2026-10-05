@@ -75,7 +75,7 @@ def wiki_write_tools(
         proposal_id: str, payload: dict[str, Any], ctx: Context[Any, Any, Any]
     ) -> str:
         """Write an accepted wiki_edit proposal as the page's next version; JSON with state
-        (applied, stale or failed) and detail."""
+        (applied, stale, failed or unknown) and detail."""
         return json.dumps(
             await writes.within_deadline(
                 writes.apply_page_edit(
